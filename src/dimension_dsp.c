@@ -35,8 +35,7 @@ void Dimension_Reset(DimensionDSP* d) {
     if (d == NULL) {
         return;
     }
-    const float sr = d->params.sampleRate;
-    d->params = dimension_default_params(sr);
+    d->params = dimension_default_params(DIMENSION_SAMPLE_RATE_DEFAULT);
 }
 
 void Dimension_SetMode(DimensionDSP* d, DimensionMode mode) {
