@@ -43,8 +43,8 @@ typedef struct DimensionParams {
 
 typedef struct DimensionDSP {
     DimensionParams params;
-    float delayL[DIMENSION_DELAY_SIZE];
-    float delayR[DIMENSION_DELAY_SIZE];
+    DIMENSION_ALIGN_32 float delayL[DIMENSION_DELAY_SIZE];
+    DIMENSION_ALIGN_32 float delayR[DIMENSION_DELAY_SIZE];
     uint32_t writePos;
     float lfoPhase;
     float hpfStateL;
