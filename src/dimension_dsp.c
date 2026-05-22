@@ -117,12 +117,70 @@ static DimensionParams dimension_default_params(float sampleRate) {
     return p;
 }
 
+
+static inline void dimension_apply_mode_preset(DimensionParams* p, DimensionMode mode) {
+    if (p == NULL) {
+        return;
+    }
+
+    float rateHz = p->rateHz;
+    float baseDelayMs = p->baseDelayMs;
+    float depthMs = p->depthMs;
+    float hpfHz = p->hpfHz;
+    float lpfHz = p->lpfHz;
+    float wetScale = 1.0f;
+    float analogAmount = p->analogAmount;
+    float companderAmount = p->companderAmount;
+
+    switch (mode) {
+        case DIMENSION_MODE_I:
+            rateHz = 0.25f; baseDelayMs = 7.0f; depthMs = 0.9f; hpfHz = 120.0f; lpfHz = 8000.0f; wetScale = 0.80f; analogAmount = 0.35f; companderAmount = 0.35f;
+            break;
+        case DIMENSION_MODE_II:
+            rateHz = 0.25f; baseDelayMs = 8.5f; depthMs = 1.4f; hpfHz = 120.0f; lpfHz = 7500.0f; wetScale = 0.95f; analogAmount = 0.45f; companderAmount = 0.45f;
+            break;
+        case DIMENSION_MODE_III:
+            rateHz = 0.50f; baseDelayMs = 10.0f; depthMs = 1.8f; hpfHz = 130.0f; lpfHz = 7000.0f; wetScale = 1.00f; analogAmount = 0.50f; companderAmount = 0.50f;
+            break;
+        case DIMENSION_MODE_IV:
+            rateHz = 0.50f; baseDelayMs = 11.5f; depthMs = 2.4f; hpfHz = 140.0f; lpfHz = 6500.0f; wetScale = 1.10f; analogAmount = 0.60f; companderAmount = 0.60f;
+            break;
+        case DIMENSION_MODE_CUSTOM:
+        default:
+            break;
+    }
+
+    p->mode = mode;
+    if (mode != DIMENSION_MODE_CUSTOM) {
+        p->rateHz = rateHz;
+        p->baseDelayMs = baseDelayMs;
+        p->depthMs = depthMs;
+        p->hpfHz = hpfHz;
+        p->lpfHz = lpfHz;
+        p->wetDirectGain = 0.50f * wetScale;
+        p->wetCrossGain = 0.35f * wetScale;
+        p->analogAmount = analogAmount;
+        p->companderAmount = companderAmount;
+    }
+}
+
+static inline float dimension_smooth_coeff(float sampleRate) {
+    const float sr = (sampleRate > 1000.0f) ? sampleRate : DIMENSION_SAMPLE_RATE_DEFAULT;
+    const float tauSec = 0.030f;
+    return 1.0f - expf(-1.0f / (tauSec * sr));
+}
 void Dimension_Init(DimensionDSP* d, float sampleRate) {
     if (d == NULL) {
         return;
     }
     d->params = dimension_default_params(sampleRate);
+    dimension_apply_mode_preset(&d->params, d->params.mode);
     dimension_clear_state(d);
+    d->smoothRateHz = d->params.rateHz;
+    d->smoothDepthMs = d->params.depthMs;
+    d->smoothBaseDelayMs = d->params.baseDelayMs;
+    d->smoothWetDirectGain = d->params.wetDirectGain;
+    d->smoothWetCrossGain = d->params.wetCrossGain;
 }
 
 void Dimension_Reset(DimensionDSP* d) {
@@ -130,13 +188,18 @@ void Dimension_Reset(DimensionDSP* d) {
         return;
     }
     dimension_clear_state(d);
+    d->smoothRateHz = d->params.rateHz;
+    d->smoothDepthMs = d->params.depthMs;
+    d->smoothBaseDelayMs = d->params.baseDelayMs;
+    d->smoothWetDirectGain = d->params.wetDirectGain;
+    d->smoothWetCrossGain = d->params.wetCrossGain;
 }
 
 void Dimension_SetMode(DimensionDSP* d, DimensionMode mode) {
     if (d == NULL) {
         return;
     }
-    d->params.mode = mode;
+    dimension_apply_mode_preset(&d->params, mode);
 }
 
 void Dimension_SetParams(DimensionDSP* d, const DimensionParams* p) {
@@ -144,6 +207,9 @@ void Dimension_SetParams(DimensionDSP* d, const DimensionParams* p) {
         return;
     }
     d->params = *p;
+    if (d->params.mode != DIMENSION_MODE_CUSTOM) {
+        dimension_apply_mode_preset(&d->params, d->params.mode);
+    }
 }
 
 void Dimension_GetParams(const DimensionDSP* d, DimensionParams* p) {
@@ -173,17 +239,12 @@ void Dimension_ProcessBlock(
     const float outputGain = dimension_clampf(d->params.outputGain, 0.0f, 8.0f);
     const float gDry = dimension_clampf(d->params.dryGain, 0.0f, 2.0f);
     const float width = dimension_clampf(d->params.width, 0.0f, 2.0f);
-    const float gWet1 = dimension_clampf(d->params.wetDirectGain * width, 0.0f, 2.0f);
-    const float gWet2 = dimension_clampf(d->params.wetCrossGain * width, 0.0f, 2.0f);
+    const float smoothCoeff = dimension_smooth_coeff(sr);
     const float amount = dimension_clampf(d->params.companderAmount, 0.0f, 1.0f);
     const float hpfAlpha = one_pole_alpha(d->params.hpfHz, sr);
     const float lpfAlpha = one_pole_alpha(d->params.lpfHz, sr);
     const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - dimension_clampf(d->params.analogAmount, 0.0f, 1.0f)), sr);
     const float maxDelaySpan = (float)(DIMENSION_DELAY_SIZE - 4U);
-    const float baseDelay = dimension_clampf(d->params.baseDelayMs * sr * 0.001f, 1.0f, maxDelaySpan - 1.0f);
-    const float depthDelay = dimension_clampf(d->params.depthMs * sr * 0.001f, 0.0f, maxDelaySpan - baseDelay);
-    const float rate = dimension_clampf(d->params.rateHz, 0.01f, 8.0f);
-    const float lfoInc = rate / sr;
     const float atkC = expf(-1.0f / (0.005f * sr));
     const float relC = expf(-1.0f / (0.080f * sr));
 
@@ -194,6 +255,19 @@ void Dimension_ProcessBlock(
         const float dryR = xR;
         float wetL = xL;
         float wetR = xR;
+
+        d->smoothRateHz += smoothCoeff * (d->params.rateHz - d->smoothRateHz);
+        d->smoothDepthMs += smoothCoeff * (d->params.depthMs - d->smoothDepthMs);
+        d->smoothBaseDelayMs += smoothCoeff * (d->params.baseDelayMs - d->smoothBaseDelayMs);
+        d->smoothWetDirectGain += smoothCoeff * (d->params.wetDirectGain - d->smoothWetDirectGain);
+        d->smoothWetCrossGain += smoothCoeff * (d->params.wetCrossGain - d->smoothWetCrossGain);
+
+        const float gWet1 = dimension_clampf(d->smoothWetDirectGain * width, 0.0f, 2.0f);
+        const float gWet2 = dimension_clampf(d->smoothWetCrossGain * width, 0.0f, 2.0f);
+        const float rate = dimension_clampf(d->smoothRateHz, 0.01f, 8.0f);
+        const float lfoInc = rate / sr;
+        const float baseDelay = dimension_clampf(d->smoothBaseDelayMs * sr * 0.001f, 1.0f, maxDelaySpan - 1.0f);
+        const float depthDelay = dimension_clampf(d->smoothDepthMs * sr * 0.001f, 0.0f, maxDelaySpan - baseDelay);
 
         d->hpfStateL = (1.0f - hpfAlpha) * d->hpfStateL + hpfAlpha * wetL;
         d->hpfStateR = (1.0f - hpfAlpha) * d->hpfStateR + hpfAlpha * wetR;
