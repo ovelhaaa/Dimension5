@@ -169,6 +169,24 @@ static inline float dimension_smooth_coeff(float sampleRate) {
     const float tauSec = 0.030f;
     return 1.0f - expf(-1.0f / (tauSec * sr));
 }
+
+static inline void dimension_update_smoothing_config(DimensionDSP* d) {
+    const float sr = (d->params.sampleRate > 1000.0f) ? d->params.sampleRate : DIMENSION_SAMPLE_RATE_DEFAULT;
+    d->smoothCoeff = dimension_smooth_coeff(sr);
+}
+
+static inline void dimension_sync_smoothers(DimensionDSP* d) {
+    d->smoothRateHz = d->params.rateHz;
+    d->smoothDepthMs = d->params.depthMs;
+    d->smoothBaseDelayMs = d->params.baseDelayMs;
+    d->smoothWetDirectGain = d->params.wetDirectGain;
+    d->smoothWetCrossGain = d->params.wetCrossGain;
+    d->smoothHpfHz = d->params.hpfHz;
+    d->smoothLpfHz = d->params.lpfHz;
+    d->smoothAnalogAmount = d->params.analogAmount;
+    d->smoothCompanderAmount = d->params.companderAmount;
+}
+
 void Dimension_Init(DimensionDSP* d, float sampleRate) {
     if (d == NULL) {
         return;
@@ -176,11 +194,8 @@ void Dimension_Init(DimensionDSP* d, float sampleRate) {
     d->params = dimension_default_params(sampleRate);
     dimension_apply_mode_preset(&d->params, d->params.mode);
     dimension_clear_state(d);
-    d->smoothRateHz = d->params.rateHz;
-    d->smoothDepthMs = d->params.depthMs;
-    d->smoothBaseDelayMs = d->params.baseDelayMs;
-    d->smoothWetDirectGain = d->params.wetDirectGain;
-    d->smoothWetCrossGain = d->params.wetCrossGain;
+    dimension_update_smoothing_config(d);
+    dimension_sync_smoothers(d);
 }
 
 void Dimension_Reset(DimensionDSP* d) {
@@ -188,11 +203,8 @@ void Dimension_Reset(DimensionDSP* d) {
         return;
     }
     dimension_clear_state(d);
-    d->smoothRateHz = d->params.rateHz;
-    d->smoothDepthMs = d->params.depthMs;
-    d->smoothBaseDelayMs = d->params.baseDelayMs;
-    d->smoothWetDirectGain = d->params.wetDirectGain;
-    d->smoothWetCrossGain = d->params.wetCrossGain;
+    dimension_update_smoothing_config(d);
+    dimension_sync_smoothers(d);
 }
 
 void Dimension_SetMode(DimensionDSP* d, DimensionMode mode) {
@@ -210,6 +222,7 @@ void Dimension_SetParams(DimensionDSP* d, const DimensionParams* p) {
     if (d->params.mode != DIMENSION_MODE_CUSTOM) {
         dimension_apply_mode_preset(&d->params, d->params.mode);
     }
+    dimension_update_smoothing_config(d);
 }
 
 void Dimension_GetParams(const DimensionDSP* d, DimensionParams* p) {
@@ -239,12 +252,10 @@ void Dimension_ProcessBlock(
     const float outputGain = dimension_clampf(d->params.outputGain, 0.0f, 8.0f);
     const float gDry = dimension_clampf(d->params.dryGain, 0.0f, 2.0f);
     const float width = dimension_clampf(d->params.width, 0.0f, 2.0f);
-    const float smoothCoeff = dimension_smooth_coeff(sr);
-    const float amount = dimension_clampf(d->params.companderAmount, 0.0f, 1.0f);
-    const float hpfAlpha = one_pole_alpha(d->params.hpfHz, sr);
-    const float lpfAlpha = one_pole_alpha(d->params.lpfHz, sr);
-    const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - dimension_clampf(d->params.analogAmount, 0.0f, 1.0f)), sr);
+    const float smoothCoeff = dimension_clampf(d->smoothCoeff, 0.0f, 1.0f);
     const float maxDelaySpan = (float)(DIMENSION_DELAY_SIZE - 4U);
+    const float invSr = 1.0f / sr;
+    const float msToSamples = sr * 0.001f;
     const float atkC = expf(-1.0f / (0.005f * sr));
     const float relC = expf(-1.0f / (0.080f * sr));
 
@@ -261,13 +272,23 @@ void Dimension_ProcessBlock(
         d->smoothBaseDelayMs += smoothCoeff * (d->params.baseDelayMs - d->smoothBaseDelayMs);
         d->smoothWetDirectGain += smoothCoeff * (d->params.wetDirectGain - d->smoothWetDirectGain);
         d->smoothWetCrossGain += smoothCoeff * (d->params.wetCrossGain - d->smoothWetCrossGain);
+        d->smoothHpfHz += smoothCoeff * (d->params.hpfHz - d->smoothHpfHz);
+        d->smoothLpfHz += smoothCoeff * (d->params.lpfHz - d->smoothLpfHz);
+        d->smoothAnalogAmount += smoothCoeff * (d->params.analogAmount - d->smoothAnalogAmount);
+        d->smoothCompanderAmount += smoothCoeff * (d->params.companderAmount - d->smoothCompanderAmount);
 
         const float gWet1 = dimension_clampf(d->smoothWetDirectGain * width, 0.0f, 2.0f);
         const float gWet2 = dimension_clampf(d->smoothWetCrossGain * width, 0.0f, 2.0f);
         const float rate = dimension_clampf(d->smoothRateHz, 0.01f, 8.0f);
-        const float lfoInc = rate / sr;
-        const float baseDelay = dimension_clampf(d->smoothBaseDelayMs * sr * 0.001f, 1.0f, maxDelaySpan - 1.0f);
-        const float depthDelay = dimension_clampf(d->smoothDepthMs * sr * 0.001f, 0.0f, maxDelaySpan - baseDelay);
+        const float lfoInc = rate * invSr;
+        const float baseDelay = dimension_clampf(d->smoothBaseDelayMs * msToSamples, 1.0f, maxDelaySpan - 1.0f);
+        const float depthMax = fminf(baseDelay - 1.0f, maxDelaySpan - baseDelay);
+        const float depthDelay = dimension_clampf(d->smoothDepthMs * msToSamples, 0.0f, depthMax);
+        const float amount = dimension_clampf(d->smoothCompanderAmount, 0.0f, 1.0f);
+        const float hpfAlpha = one_pole_alpha(d->smoothHpfHz, sr);
+        const float lpfAlpha = one_pole_alpha(d->smoothLpfHz, sr);
+        const float analogAmount = dimension_clampf(d->smoothAnalogAmount, 0.0f, 1.0f);
+        const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - analogAmount), sr);
 
         d->hpfStateL = (1.0f - hpfAlpha) * d->hpfStateL + hpfAlpha * wetL;
         d->hpfStateR = (1.0f - hpfAlpha) * d->hpfStateR + hpfAlpha * wetR;
