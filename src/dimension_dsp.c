@@ -18,7 +18,7 @@ static inline float dimension_sanitize_sample(float x) {
 }
 
 static inline float softclip_cubic(float x) {
-    const float xc = dimension_clampf(x, -1.5f, 1.5f);
+    const float xc = dimension_clampf(x, -1.0f, 1.0f);
     return xc - (xc * xc * xc) * (1.0f / 3.0f);
 }
 
@@ -44,6 +44,55 @@ static inline float delay_hermite(const float* buffer, float readPos) {
     const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
     const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
     return ((c3 * t + c2) * t + c1) * t + c0;
+}
+
+static inline float delay_linear(const float* buffer, float readPos) {
+    const int32_t base = (int32_t)floorf(readPos);
+    const float t = readPos - (float)base;
+    const uint32_t i0 = (uint32_t)base & DIMENSION_DELAY_MASK;
+    const uint32_t i1 = (uint32_t)(base + 1) & DIMENSION_DELAY_MASK;
+    return buffer[i0] + t * (buffer[i1] - buffer[i0]);
+}
+
+static inline float delay_lagrange3(const float* buffer, float readPos) {
+    const int32_t base = (int32_t)floorf(readPos);
+    const float t = readPos - (float)base;
+    const uint32_t i0 = (uint32_t)(base - 1) & DIMENSION_DELAY_MASK;
+    const uint32_t i1 = (uint32_t)base & DIMENSION_DELAY_MASK;
+    const uint32_t i2 = (uint32_t)(base + 1) & DIMENSION_DELAY_MASK;
+    const uint32_t i3 = (uint32_t)(base + 2) & DIMENSION_DELAY_MASK;
+    const float xm1 = buffer[i0];
+    const float x0 = buffer[i1];
+    const float x1 = buffer[i2];
+    const float x2 = buffer[i3];
+    const float c0 = (-t * (t - 1.0f) * (t - 2.0f)) * (1.0f / 6.0f);
+    const float c1 = ((t + 1.0f) * (t - 1.0f) * (t - 2.0f)) * 0.5f;
+    const float c2 = (-(t + 1.0f) * t * (t - 2.0f)) * 0.5f;
+    const float c3 = ((t + 1.0f) * t * (t - 1.0f)) * (1.0f / 6.0f);
+    return xm1 * c0 + x0 * c1 + x1 * c2 + x2 * c3;
+}
+
+static inline float delay_interp(const float* buffer, float readPos) {
+#if DIMENSION_INTERP_MODE == DIMENSION_INTERP_LINEAR
+    return delay_linear(buffer, readPos);
+#elif DIMENSION_INTERP_MODE == DIMENSION_INTERP_LAGRANGE3
+    return delay_lagrange3(buffer, readPos);
+#else
+    return delay_hermite(buffer, readPos);
+#endif
+}
+
+static void dimension_clear_state(DimensionDSP* d) {
+    memset(d->delayL, 0, sizeof(d->delayL));
+    memset(d->delayR, 0, sizeof(d->delayR));
+    d->writePos = 0U;
+    d->lfoPhase = 0.0f;
+    d->hpfStateL = d->hpfStateR = 0.0f;
+    d->lpf1StateL = d->lpf1StateR = 0.0f;
+    d->lpf2StateL = d->lpf2StateR = 0.0f;
+    d->compEnvL = d->compEnvR = 0.0f;
+    d->expEnvL = d->expEnvR = 0.0f;
+    d->bbdStateL = d->bbdStateR = 0.0f;
 }
 
 static DimensionParams dimension_default_params(float sampleRate) {
@@ -73,33 +122,14 @@ void Dimension_Init(DimensionDSP* d, float sampleRate) {
         return;
     }
     d->params = dimension_default_params(sampleRate);
-    memset(d->delayL, 0, sizeof(d->delayL));
-    memset(d->delayR, 0, sizeof(d->delayR));
-    d->writePos = 0U;
-    d->lfoPhase = 0.0f;
-    d->hpfStateL = d->hpfStateR = 0.0f;
-    d->lpf1StateL = d->lpf1StateR = 0.0f;
-    d->lpf2StateL = d->lpf2StateR = 0.0f;
-    d->compEnvL = d->compEnvR = 0.0f;
-    d->expEnvL = d->expEnvR = 0.0f;
-    d->bbdStateL = d->bbdStateR = 0.0f;
+    dimension_clear_state(d);
 }
 
 void Dimension_Reset(DimensionDSP* d) {
     if (d == NULL) {
         return;
     }
-    d->params = dimension_default_params(DIMENSION_SAMPLE_RATE_DEFAULT);
-    memset(d->delayL, 0, sizeof(d->delayL));
-    memset(d->delayR, 0, sizeof(d->delayR));
-    d->writePos = 0U;
-    d->lfoPhase = 0.0f;
-    d->hpfStateL = d->hpfStateR = 0.0f;
-    d->lpf1StateL = d->lpf1StateR = 0.0f;
-    d->lpf2StateL = d->lpf2StateR = 0.0f;
-    d->compEnvL = d->compEnvR = 0.0f;
-    d->expEnvL = d->expEnvR = 0.0f;
-    d->bbdStateL = d->bbdStateR = 0.0f;
+    dimension_clear_state(d);
 }
 
 void Dimension_SetMode(DimensionDSP* d, DimensionMode mode) {
@@ -149,8 +179,9 @@ void Dimension_ProcessBlock(
     const float hpfAlpha = one_pole_alpha(d->params.hpfHz, sr);
     const float lpfAlpha = one_pole_alpha(d->params.lpfHz, sr);
     const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - dimension_clampf(d->params.analogAmount, 0.0f, 1.0f)), sr);
-    const float baseDelay = dimension_clampf(d->params.baseDelayMs * sr * 0.001f, 1.0f, (float)(DIMENSION_DELAY_SIZE - 4U));
-    const float depthDelay = dimension_clampf(d->params.depthMs * sr * 0.001f, 0.0f, baseDelay - 1.0f);
+    const float maxDelaySpan = (float)(DIMENSION_DELAY_SIZE - 4U);
+    const float baseDelay = dimension_clampf(d->params.baseDelayMs * sr * 0.001f, 1.0f, maxDelaySpan - 1.0f);
+    const float depthDelay = dimension_clampf(d->params.depthMs * sr * 0.001f, 0.0f, maxDelaySpan - baseDelay);
     const float rate = dimension_clampf(d->params.rateHz, 0.01f, 8.0f);
     const float lfoInc = rate / sr;
     const float atkC = expf(-1.0f / (0.005f * sr));
@@ -185,7 +216,8 @@ void Dimension_ProcessBlock(
         wetL = d->bbdStateL;
         wetR = d->bbdStateR;
 
-        const float lfo = sinf(2.0f * DIMENSION_PI * d->lfoPhase);
+        const float tri = (d->lfoPhase < 0.5f) ? (4.0f * d->lfoPhase - 1.0f) : (3.0f - 4.0f * d->lfoPhase);
+        const float lfo = tri;
         const float delayL = baseDelay + depthDelay * lfo;
         const float delayR = baseDelay - depthDelay * lfo;
         const float readPosL = (float)d->writePos - delayL + (float)DIMENSION_DELAY_SIZE;
@@ -194,8 +226,8 @@ void Dimension_ProcessBlock(
         d->delayL[d->writePos] = wetL;
         d->delayR[d->writePos] = wetR;
 
-        wetL = delay_hermite(d->delayL, readPosL);
-        wetR = delay_hermite(d->delayR, readPosR);
+        wetL = delay_interp(d->delayL, readPosL);
+        wetR = delay_interp(d->delayR, readPosR);
 
         d->lpf1StateL += lpfAlpha * (wetL - d->lpf1StateL);
         d->lpf1StateR += lpfAlpha * (wetR - d->lpf1StateR);
