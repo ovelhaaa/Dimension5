@@ -53,3 +53,8 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Web
+web/node_modules/
+web/dist/
+web/public/wasm/*.wasm
