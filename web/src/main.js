@@ -36,7 +36,14 @@ params.forEach(([name, min, max, step, value], idx) => {
   controlsEl.appendChild(row);
 });
 
-btnWasm.onclick = () => engine.loadWasm();
+btnWasm.onclick = async () => {
+  try {
+    await engine.loadWasm();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = `Status: error loading wasm (${err?.message ?? err})`;
+  }
+};
 btnAudio.onclick = async () => {
   try {
     await engine.startMicAudio();
@@ -81,22 +88,34 @@ btnPlay.onclick = async () => {
   }
 };
 
-btnStop.onclick = () => engine.stopPlayback();
+btnStop.onclick = async () => {
+  try {
+    await engine.stopPlayback();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = `Status: error stopping playback (${err?.message ?? err})`;
+  }
+};
 
-btnDownload.onclick = () => {
+btnDownload.onclick = async () => {
   if (engine.hasRecordingInProgress()) {
     statusEl.textContent = 'Status: stop playback before downloading the processed file';
     return;
   }
-  const blob = engine.getDownloadBlob();
-  if (!blob) {
-    statusEl.textContent = 'Status: no processed file available yet';
+  let blob;
+  try {
+    statusEl.textContent = 'Status: rendering processed file...';
+    blob = await engine.renderLoadedFileBlob();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = `Status: error rendering file (${err?.message ?? err})`;
     return;
   }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'dimension5-processed.webm';
+  a.download = 'dimension5-processed.wav';
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 100);
+  statusEl.textContent = 'Status: processed file downloaded';
 };

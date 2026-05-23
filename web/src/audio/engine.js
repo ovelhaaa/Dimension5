@@ -22,7 +22,6 @@ export function createEngine(setStatus) {
   let loadedBuffer = null;
   let mediaDest = null;
   let recorder = null;
-  let recordedChunks = [];
   let lastRenderedBlob = null;
   let isPlayingFile = false;
 
@@ -87,12 +86,59 @@ export function createEngine(setStatus) {
       lastRenderedBlob = new Blob(sessionChunks, { type: sessionRecorder.mimeType || 'audio/webm' });
     };
     recorder = sessionRecorder;
-    recordedChunks = sessionChunks;
     sessionRecorder.start();
   };
 
   const stopRecorder = () => {
-    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    if (!recorder || recorder.state === 'inactive') return Promise.resolve();
+    return new Promise((resolve) => {
+      const activeRecorder = recorder;
+      const finalize = () => {
+        activeRecorder.removeEventListener('stop', finalize);
+        if (recorder === activeRecorder) recorder = null;
+        resolve();
+      };
+      activeRecorder.addEventListener('stop', finalize, { once: true });
+      activeRecorder.stop();
+    });
+  };
+
+  const encodeWavBlob = (left, right, sampleRate) => {
+    const frames = left.length;
+    const channels = 2;
+    const bytesPerSample = 2;
+    const dataSize = frames * channels * bytesPerSample;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    const writeString = (offset, str) => {
+      for (let i = 0; i < str.length; i += 1) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, channels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+    view.setUint16(32, channels * bytesPerSample, true);
+    view.setUint16(34, bytesPerSample * 8, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    let offset = 44;
+    for (let i = 0; i < frames; i += 1) {
+      const l = Math.max(-1, Math.min(1, left[i]));
+      const r = Math.max(-1, Math.min(1, right[i]));
+      view.setInt16(offset, l < 0 ? l * 0x8000 : l * 0x7FFF, true);
+      offset += 2;
+      view.setInt16(offset, r < 0 ? r * 0x8000 : r * 0x7FFF, true);
+      offset += 2;
+    }
+    return new Blob([buffer], { type: 'audio/wav' });
   };
 
   const api = {
@@ -118,7 +164,7 @@ export function createEngine(setStatus) {
     async startMicAudio() {
       await api.initAudioGraph();
       teardownInput({ stopMic: true, stopNode: true });
-      stopRecorder();
+      await stopRecorder();
       isPlayingFile = false;
       micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       sourceNode = ctx.createMediaStreamSource(micStream);
@@ -137,7 +183,7 @@ export function createEngine(setStatus) {
       if (!loadedBuffer) throw new Error('No audio file loaded');
       await api.initAudioGraph();
       teardownInput({ stopMic: true, stopNode: true });
-      stopRecorder();
+      await stopRecorder();
 
       sourceNode = ctx.createBufferSource();
       sourceNode.buffer = loadedBuffer;
@@ -155,11 +201,39 @@ export function createEngine(setStatus) {
       setStatus('audio active: file playback');
     },
 
-    stopPlayback() {
+    async stopPlayback() {
       teardownInput({ stopMic: false, stopNode: true });
       isPlayingFile = false;
-      stopRecorder();
+      await stopRecorder();
       setStatus('playback stopped');
+    },
+
+    async renderLoadedFileBlob() {
+      if (!loadedBuffer) throw new Error('No audio file loaded');
+      if (!module) throw new Error('Load WASM first');
+
+      const frames = loadedBuffer.length;
+      const inL = loadedBuffer.getChannelData(0);
+      const inR = loadedBuffer.numberOfChannels > 1 ? loadedBuffer.getChannelData(1) : inL;
+      const outL = new Float32Array(frames);
+      const outR = new Float32Array(frames);
+
+      module._DimensionWasm_Reset();
+      module._DimensionWasm_Init(loadedBuffer.sampleRate);
+
+      let pos = 0;
+      while (pos < frames) {
+        const n = Math.min(maxProcessFrames, frames - pos);
+        f32().set(inL.subarray(pos, pos + n), inPtrL / 4);
+        f32().set(inR.subarray(pos, pos + n), inPtrR / 4);
+        module._DimensionWasm_Process(inPtrL, inPtrR, outPtrL, outPtrR, n, bypass ? 1 : 0);
+        outL.set(f32().subarray(outPtrL / 4, outPtrL / 4 + n), pos);
+        outR.set(f32().subarray(outPtrR / 4, outPtrR / 4 + n), pos);
+        pos += n;
+      }
+
+      lastRenderedBlob = encodeWavBlob(outL, outR, loadedBuffer.sampleRate);
+      return lastRenderedBlob;
     },
 
     isPlayingFile() { return isPlayingFile; },
