@@ -98,7 +98,7 @@ btnStop.onclick = async () => {
 };
 
 btnDownload.onclick = async () => {
-  if (engine.hasRecordingInProgress()) {
+  if (engine.isPlayingFile() || engine.hasRecordingInProgress()) {
     statusEl.textContent = 'Status: stop playback before downloading the processed file';
     return;
   }
@@ -116,6 +116,6 @@ btnDownload.onclick = async () => {
   a.href = url;
   a.download = 'dimension5-processed.wav';
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 100);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
   statusEl.textContent = 'Status: processed file downloaded';
 };

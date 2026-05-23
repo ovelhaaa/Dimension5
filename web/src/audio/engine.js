@@ -91,7 +91,7 @@ export function createEngine(setStatus) {
 
   const stopRecorder = () => {
     if (!recorder || recorder.state === 'inactive') return Promise.resolve();
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const activeRecorder = recorder;
       const finalize = () => {
         activeRecorder.removeEventListener('stop', finalize);
@@ -99,7 +99,13 @@ export function createEngine(setStatus) {
         resolve();
       };
       activeRecorder.addEventListener('stop', finalize, { once: true });
-      activeRecorder.stop();
+      try {
+        activeRecorder.stop();
+      } catch (err) {
+        activeRecorder.removeEventListener('stop', finalize);
+        if (recorder === activeRecorder) recorder = null;
+        reject(err);
+      }
     });
   };
 
@@ -191,9 +197,9 @@ export function createEngine(setStatus) {
       sourceNode.connect(node);
       isPlayingFile = true;
       startRecorder();
-      sourceNode.onended = () => {
+      sourceNode.onended = async () => {
         isPlayingFile = false;
-        stopRecorder();
+        await stopRecorder();
         sourceNode = null;
         if (onEnded) onEnded();
       };
@@ -212,11 +218,17 @@ export function createEngine(setStatus) {
       if (!loadedBuffer) throw new Error('No audio file loaded');
       if (!module) throw new Error('Load WASM first');
 
+      teardownInput({ stopMic: true, stopNode: true });
+      await stopRecorder();
+      isPlayingFile = false;
+
       const frames = loadedBuffer.length;
       const inL = loadedBuffer.getChannelData(0);
       const inR = loadedBuffer.numberOfChannels > 1 ? loadedBuffer.getChannelData(1) : inL;
       const outL = new Float32Array(frames);
       const outR = new Float32Array(frames);
+      const renderBypass = bypass;
+      const originalSampleRate = ctx ? ctx.sampleRate : loadedBuffer.sampleRate;
 
       module._DimensionWasm_Reset();
       module._DimensionWasm_Init(loadedBuffer.sampleRate);
@@ -226,11 +238,18 @@ export function createEngine(setStatus) {
         const n = Math.min(maxProcessFrames, frames - pos);
         f32().set(inL.subarray(pos, pos + n), inPtrL / 4);
         f32().set(inR.subarray(pos, pos + n), inPtrR / 4);
-        module._DimensionWasm_Process(inPtrL, inPtrR, outPtrL, outPtrR, n, bypass ? 1 : 0);
+        module._DimensionWasm_Process(inPtrL, inPtrR, outPtrL, outPtrR, n, renderBypass ? 1 : 0);
         outL.set(f32().subarray(outPtrL / 4, outPtrL / 4 + n), pos);
         outR.set(f32().subarray(outPtrR / 4, outPtrR / 4 + n), pos);
         pos += n;
+
+        if (pos % (maxProcessFrames * 64) === 0) {
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
       }
+
+      module._DimensionWasm_Init(originalSampleRate);
 
       lastRenderedBlob = encodeWavBlob(outL, outR, loadedBuffer.sampleRate);
       return lastRenderedBlob;
