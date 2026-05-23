@@ -5,10 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Dimension5 Web</title>
     <style>
-      body { font-family: Arial, sans-serif; max-width: 840px; margin: 20px auto; padding: 0 16px; }
+      body { font-family: Arial, sans-serif; max-width: 920px; margin: 20px auto; padding: 0 16px; }
       .row { display: grid; grid-template-columns: 180px 1fr 80px; gap: 10px; align-items: center; margin: 8px 0; }
-      button { margin-right: 8px; }
+      button { margin-right: 8px; margin-bottom: 8px; }
       #status { margin: 12px 0; padding: 8px; background:#eee; }
+      .transport { margin: 10px 0; padding: 10px; border: 1px solid #ccc; }
     </style>
   </head>
   <body>
@@ -17,8 +18,20 @@
       <button id="btn-wasm">Load WASM</button>
       <button id="btn-audio">Start Audio/Mic</button>
       <button id="btn-bypass">Bypass: OFF</button>
+      <button id="btn-killdry">Kill Dry: OFF</button>
       <select id="mode"><option value="0">Mode I</option><option value="1">Mode II</option><option value="2">Mode III</option><option value="3">Mode IV</option><option value="4">Custom</option></select>
     </div>
+
+    <div class="transport">
+      <strong>File transport</strong><br>
+      <label for="audio-file">Upload audio file for processing</label><br>
+      <input id="audio-file" type="file" accept="audio/*" />
+      <button id="btn-play">Play File</button>
+      <button id="btn-stop">Stop</button>
+      <button id="btn-repeat">Repeat: OFF</button>
+      <button id="btn-download">Download Processed</button>
+    </div>
+
     <div id="status">Status: idle</div>
     <div id="controls"></div>
     <script type="module" src="/src/main.js"></script>

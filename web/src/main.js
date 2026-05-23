@@ -5,6 +5,12 @@ const controlsEl = document.getElementById('controls');
 const btnWasm = document.getElementById('btn-wasm');
 const btnAudio = document.getElementById('btn-audio');
 const btnBypass = document.getElementById('btn-bypass');
+const btnKillDry = document.getElementById('btn-killdry');
+const btnRepeat = document.getElementById('btn-repeat');
+const btnPlay = document.getElementById('btn-play');
+const btnStop = document.getElementById('btn-stop');
+const btnDownload = document.getElementById('btn-download');
+const fileInput = document.getElementById('audio-file');
 const modeEl = document.getElementById('mode');
 
 const params = [
@@ -15,20 +21,82 @@ const params = [
   ['width', 0, 2, 0.01, 1]
 ];
 
-const engine = createEngine((msg) => statusEl.textContent = `Status: ${msg}`);
+const engine = createEngine((msg) => { statusEl.textContent = `Status: ${msg}`; });
 
 params.forEach(([name, min, max, step, value], idx) => {
-  const row = document.createElement('div'); row.className = 'row';
+  const row = document.createElement('div');
+  row.className = 'row';
   row.innerHTML = `<label>${name}</label><input type="range" min="${min}" max="${max}" step="${step}" value="${value}"><span>${value}</span>`;
-  const slider = row.querySelector('input'); const valueEl = row.querySelector('span');
-  slider.addEventListener('input', () => { valueEl.textContent = slider.value; engine.setParam(idx, Number(slider.value)); });
+  const slider = row.querySelector('input');
+  const valueEl = row.querySelector('span');
+  slider.addEventListener('input', () => {
+    valueEl.textContent = slider.value;
+    engine.setParam(idx, Number(slider.value));
+  });
   controlsEl.appendChild(row);
 });
 
 btnWasm.onclick = () => engine.loadWasm();
-btnAudio.onclick = () => engine.startAudio();
+btnAudio.onclick = async () => {
+  try {
+    await engine.startMicAudio();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = `Status: error starting mic (${err?.message ?? err})`;
+  }
+};
 btnBypass.onclick = () => {
-  engine.toggleBypass();
-  btnBypass.textContent = `Bypass: ${engine.isBypassed() ? 'ON' : 'OFF'}`;
+  const enabled = engine.toggleBypass();
+  btnBypass.textContent = `Bypass: ${enabled ? 'ON' : 'OFF'}`;
+};
+btnKillDry.onclick = () => {
+  const enabled = engine.toggleKillDry();
+  btnKillDry.textContent = `Kill Dry: ${enabled ? 'ON' : 'OFF'}`;
+};
+btnRepeat.onclick = () => {
+  const enabled = engine.toggleRepeat();
+  btnRepeat.textContent = `Repeat: ${enabled ? 'ON' : 'OFF'}`;
 };
 modeEl.onchange = () => engine.setMode(Number(modeEl.value));
+
+fileInput.onchange = async () => {
+  const file = fileInput.files?.[0];
+  if (!file) return;
+  try {
+    await engine.loadAudioFile(file);
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = `Status: error loading file (${err?.message ?? err})`;
+  }
+};
+
+btnPlay.onclick = async () => {
+  try {
+    await engine.playLoadedFile(() => {
+      statusEl.textContent = 'Status: file playback ended';
+    });
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = `Status: error playing file (${err?.message ?? err})`;
+  }
+};
+
+btnStop.onclick = () => engine.stopPlayback();
+
+btnDownload.onclick = () => {
+  if (engine.hasRecordingInProgress()) {
+    statusEl.textContent = 'Status: stop playback before downloading the processed file';
+    return;
+  }
+  const blob = engine.getDownloadBlob();
+  if (!blob) {
+    statusEl.textContent = 'Status: no processed file available yet';
+    return;
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'dimension5-processed.webm';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+};
