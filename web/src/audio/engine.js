@@ -1,5 +1,6 @@
 const loadWasmModuleFactory = async () => {
-  const wasmModule = await import(/* @vite-ignore */ '/wasm/dimension_dsp.js');
+  const wasmModulePath = '/wasm/dimension_dsp.js';
+  const wasmModule = await import(/* @vite-ignore */ wasmModulePath);
   return wasmModule.default;
 };
 
