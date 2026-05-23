@@ -37,7 +37,14 @@ params.forEach(([name, min, max, step, value], idx) => {
 });
 
 btnWasm.onclick = () => engine.loadWasm();
-btnAudio.onclick = () => engine.startMicAudio();
+btnAudio.onclick = async () => {
+  try {
+    await engine.startMicAudio();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = `Status: error starting mic (${err?.message ?? err})`;
+  }
+};
 btnBypass.onclick = () => {
   const enabled = engine.toggleBypass();
   btnBypass.textContent = `Bypass: ${enabled ? 'ON' : 'OFF'}`;
@@ -55,18 +62,32 @@ modeEl.onchange = () => engine.setMode(Number(modeEl.value));
 fileInput.onchange = async () => {
   const file = fileInput.files?.[0];
   if (!file) return;
-  await engine.loadAudioFile(file);
+  try {
+    await engine.loadAudioFile(file);
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = `Status: error loading file (${err?.message ?? err})`;
+  }
 };
 
 btnPlay.onclick = async () => {
-  await engine.playLoadedFile(() => {
-    statusEl.textContent = 'Status: file playback ended';
-  });
+  try {
+    await engine.playLoadedFile(() => {
+      statusEl.textContent = 'Status: file playback ended';
+    });
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = `Status: error playing file (${err?.message ?? err})`;
+  }
 };
 
 btnStop.onclick = () => engine.stopPlayback();
 
 btnDownload.onclick = () => {
+  if (engine.hasRecordingInProgress()) {
+    statusEl.textContent = 'Status: stop playback before downloading the processed file';
+    return;
+  }
   const blob = engine.getDownloadBlob();
   if (!blob) {
     statusEl.textContent = 'Status: no processed file available yet';
@@ -77,5 +98,5 @@ btnDownload.onclick = () => {
   a.href = url;
   a.download = 'dimension5-processed.webm';
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 100);
 };

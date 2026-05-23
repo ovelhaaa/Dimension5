@@ -24,6 +24,23 @@ export function createEngine(setStatus) {
   let recorder = null;
   let recordedChunks = [];
   let lastRenderedBlob = null;
+  let isPlayingFile = false;
+
+  const teardownInput = ({ stopMic = true, stopNode = true } = {}) => {
+    if (sourceNode) {
+      sourceNode.onended = null;
+      if (stopNode && typeof sourceNode.stop === 'function') {
+        try { sourceNode.stop(); } catch (_) {}
+      }
+      sourceNode.disconnect();
+      sourceNode = null;
+    }
+
+    if (stopMic && micStream) {
+      micStream.getTracks().forEach((track) => track.stop());
+      micStream = null;
+    }
+  };
 
   const wireProcessor = () => {
     node = ctx.createScriptProcessor(scriptProcessorBufferSize, 2, 2);
@@ -34,7 +51,8 @@ export function createEngine(setStatus) {
       const outR = e.outputBuffer.getChannelData(1);
 
       if (inL.length > maxProcessFrames) {
-        throw new Error(`ScriptProcessor buffer ${inL.length} exceeds allocated WASM buffer ${maxProcessFrames}`);
+        console.error(`ScriptProcessor buffer ${inL.length} exceeds allocated WASM buffer ${maxProcessFrames}`);
+        return;
       }
 
       f32().set(inL, inPtrL / 4);
@@ -44,12 +62,12 @@ export function createEngine(setStatus) {
       const wetL = f32().subarray(outPtrL / 4, outPtrL / 4 + inL.length);
       const wetR = f32().subarray(outPtrR / 4, outPtrR / 4 + inL.length);
 
+      outL.set(wetL);
+      outR.set(wetR);
+
       if (killDry) {
-        outL.fill(0);
-        outR.fill(0);
-      } else {
-        outL.set(wetL);
-        outR.set(wetR);
+        // Kill Dry keeps only processed output (wet) and removes direct path,
+        // which is already represented by the processed output signal here.
       }
     };
 
@@ -60,15 +78,17 @@ export function createEngine(setStatus) {
 
   const startRecorder = () => {
     if (!mediaDest) return;
-    recordedChunks = [];
-    recorder = new MediaRecorder(mediaDest.stream);
-    recorder.ondataavailable = (ev) => {
-      if (ev.data.size > 0) recordedChunks.push(ev.data);
+    const sessionChunks = [];
+    const sessionRecorder = new MediaRecorder(mediaDest.stream);
+    sessionRecorder.ondataavailable = (ev) => {
+      if (ev.data.size > 0) sessionChunks.push(ev.data);
     };
-    recorder.onstop = () => {
-      lastRenderedBlob = new Blob(recordedChunks, { type: recorder.mimeType || 'audio/webm' });
+    sessionRecorder.onstop = () => {
+      lastRenderedBlob = new Blob(sessionChunks, { type: sessionRecorder.mimeType || 'audio/webm' });
     };
-    recorder.start();
+    recorder = sessionRecorder;
+    recordedChunks = sessionChunks;
+    sessionRecorder.start();
   };
 
   const stopRecorder = () => {
@@ -97,7 +117,9 @@ export function createEngine(setStatus) {
 
     async startMicAudio() {
       await api.initAudioGraph();
-      if (sourceNode) sourceNode.disconnect();
+      teardownInput({ stopMic: true, stopNode: true });
+      stopRecorder();
+      isPlayingFile = false;
       micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       sourceNode = ctx.createMediaStreamSource(micStream);
       sourceNode.connect(node);
@@ -114,29 +136,33 @@ export function createEngine(setStatus) {
     async playLoadedFile(onEnded) {
       if (!loadedBuffer) throw new Error('No audio file loaded');
       await api.initAudioGraph();
-      if (sourceNode) sourceNode.disconnect();
+      teardownInput({ stopMic: true, stopNode: true });
+      stopRecorder();
 
       sourceNode = ctx.createBufferSource();
       sourceNode.buffer = loadedBuffer;
       sourceNode.loop = repeat;
       sourceNode.connect(node);
+      isPlayingFile = true;
       startRecorder();
-      sourceNode.start();
       sourceNode.onended = () => {
+        isPlayingFile = false;
         stopRecorder();
+        sourceNode = null;
         if (onEnded) onEnded();
       };
+      sourceNode.start();
       setStatus('audio active: file playback');
     },
 
     stopPlayback() {
-      if (sourceNode && sourceNode.stop) {
-        try { sourceNode.stop(); } catch (_) {}
-      }
+      teardownInput({ stopMic: false, stopNode: true });
+      isPlayingFile = false;
       stopRecorder();
       setStatus('playback stopped');
     },
 
+    isPlayingFile() { return isPlayingFile; },
     setParam(id, value) { if (module) module._DimensionWasm_SetParam(id, value); },
     setMode(mode) { if (module) module._DimensionWasm_SetMode(mode); },
     toggleBypass() { bypass = !bypass; return bypass; },
@@ -145,7 +171,8 @@ export function createEngine(setStatus) {
     isKillDry() { return killDry; },
     toggleRepeat() { repeat = !repeat; return repeat; },
     isRepeat() { return repeat; },
-    getDownloadBlob() { return lastRenderedBlob; }
+    getDownloadBlob() { return lastRenderedBlob; },
+    hasRecordingInProgress() { return recorder && recorder.state === 'recording'; }
   };
 
   return api;
