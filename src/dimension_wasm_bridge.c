@@ -30,9 +30,6 @@ DIM_WASM_EXPORT void DimensionWasm_SetMode(int mode) {
     Dimension_SetMode(&g_dsp, (DimensionMode)mode);
 }
 
-DIM_WASM_EXPORT void DimensionWasm_SetBypass(int bypass) {
-    (void)bypass;
-}
 
 DIM_WASM_EXPORT void DimensionWasm_SetParam(int paramId, float value) {
     if (!g_initialized) return;

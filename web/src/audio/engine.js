@@ -1,7 +1,7 @@
 import createModule from '/wasm/dimension_dsp.js';
 
 export function createEngine(setStatus) {
-  let module = null, ctx = null, node = null, bypass = false;
+  let module = null, ctx = null, node = null, source = null, stream = null, bypass = false;
   let inPtrL, inPtrR, outPtrL, outPtrR;
   const scriptProcessorBufferSize = 1024;
   const maxProcessFrames = scriptProcessorBufferSize;
@@ -16,10 +16,29 @@ export function createEngine(setStatus) {
     },
     async startAudio() {
       if (!module) throw new Error('Load WASM first');
-      ctx = new AudioContext();
-      module._DimensionWasm_Init(ctx.sampleRate);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const src = ctx.createMediaStreamSource(stream);
+      if (ctx) {
+        setStatus('audio already active');
+        return;
+      }
+
+      const audioContext = new AudioContext();
+      try {
+        await audioContext.resume();
+        module._DimensionWasm_Init(audioContext.sampleRate);
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        source = audioContext.createMediaStreamSource(stream);
+      } catch (err) {
+        await audioContext.close();
+        const message = err?.name === 'NotAllowedError'
+          ? 'Error: microphone permission denied'
+          : `Error starting audio: ${err?.message ?? err}`;
+        setStatus(message);
+        throw err;
+      }
+
+      ctx = audioContext;
+      // ScriptProcessorNode is deprecated, but kept for parity with current scaffold.
+      // TODO: migrate this callback to AudioWorkletProcessor for production use.
       node = ctx.createScriptProcessor(scriptProcessorBufferSize, 2, 2);
       node.onaudioprocess = (e) => {
         const inL = e.inputBuffer.getChannelData(0);
@@ -34,7 +53,7 @@ export function createEngine(setStatus) {
         outL.set(f32().subarray(outPtrL / 4, outPtrL / 4 + inL.length));
         outR.set(f32().subarray(outPtrR / 4, outPtrR / 4 + inL.length));
       };
-      src.connect(node).connect(ctx.destination);
+      source.connect(node).connect(ctx.destination);
       setStatus('audio active');
     },
     setParam(id, value) { if (module) module._DimensionWasm_SetParam(id, value); },
