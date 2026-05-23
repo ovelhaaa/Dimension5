@@ -1,4 +1,7 @@
-import createModule from '/wasm/dimension_dsp.js';
+const loadWasmModuleFactory = async () => {
+  const wasmModule = await import(/* @vite-ignore */ '/wasm/dimension_dsp.js');
+  return wasmModule.default;
+};
 
 export function createEngine(setStatus) {
   let module = null, ctx = null, node = null, source = null, stream = null, bypass = false;
@@ -9,6 +12,7 @@ export function createEngine(setStatus) {
 
   const api = {
     async loadWasm() {
+      const createModule = await loadWasmModuleFactory();
       module = await createModule();
       inPtrL = module._malloc(maxProcessFrames * 4); inPtrR = module._malloc(maxProcessFrames * 4);
       outPtrL = module._malloc(maxProcessFrames * 4); outPtrR = module._malloc(maxProcessFrames * 4);
