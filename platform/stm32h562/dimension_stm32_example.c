@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <math.h>
 
 #include "../../src/dimension_dsp.h"
 
@@ -41,9 +42,9 @@ static inline float dimension_int16_to_float32(int16_t x) {
 }
 
 static inline int16_t dimension_float32_to_int16(float x) {
-    if (x > 0.999f) x = 0.999f;
+    if (x > 1.0f) x = 1.0f;
     if (x < -1.0f) x = -1.0f;
-    return (int16_t)(x * 32767.0f);
+    return (int16_t)lroundf(x * 32767.0f);
 }
 
 void Dimension_ExampleInit(void) {

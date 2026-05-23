@@ -45,7 +45,7 @@ static void test_zero_input_long_no_nan_low_dc(void) {
     process_constant(&d, 0.0f, total, &peak, &dc);
     dc /= (float)total;
     assert(fabsf(dc) < 1e-4f);
-    assert(peak < 0.05f);
+    assert(peak < 1e-6f);
 }
 
 static void test_impulse_delay_correct(void) {
@@ -149,31 +149,46 @@ static void test_input_plusminus2_safe_saturation(void) {
     assert(peak <= 2.0f);
 }
 
-static void test_mode_switch_1s_no_clicks(void) {
+static float run_mode_switch_step(bool switchMode) {
     DimensionDSP d;
     Dimension_Init(&d, TEST_SR);
     float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
     const uint32_t total = (uint32_t)TEST_SR * 6U;
     float prevL = 0.0f, prevR = 0.0f;
     float maxStep = 0.0f;
+    bool first = true;
+
     for (uint32_t n = 0; n < total; n += BLOCK) {
-        const uint32_t sec = n / (uint32_t)TEST_SR;
-        Dimension_SetMode(&d, (DimensionMode)(sec % 4U));
+        if (switchMode) {
+            const uint32_t sec = n / (uint32_t)TEST_SR;
+            Dimension_SetMode(&d, (DimensionMode)(sec % 4U));
+        }
         for (uint32_t i = 0; i < BLOCK; ++i) {
-            const float s = 0.2f * sinf(2.0f * PI_F * 440.0f * (float)(n + i) / TEST_SR);
+            const float s = 0.1f * sinf(2.0f * PI_F * 100.0f * (float)(n + i) / TEST_SR);
             inL[i] = inR[i] = s;
         }
         Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
         for (uint32_t i = 0; i < BLOCK; ++i) {
-            const float dL = fabsf(outL[i] - prevL);
-            const float dR = fabsf(outR[i] - prevR);
-            if (dL > maxStep) maxStep = dL;
-            if (dR > maxStep) maxStep = dR;
+            if (!first) {
+                const float dL = fabsf(outL[i] - prevL);
+                const float dR = fabsf(outR[i] - prevR);
+                if (dL > maxStep) maxStep = dL;
+                if (dR > maxStep) maxStep = dR;
+            }
             prevL = outL[i];
             prevR = outR[i];
+            first = false;
         }
     }
-    assert(maxStep < 1.0f);
+    return maxStep;
+}
+
+static void test_mode_switch_1s_no_clicks(void) {
+    const float baselineMaxStep = run_mode_switch_step(false);
+    const float switchedMaxStep = run_mode_switch_step(true);
+
+    assert(switchedMaxStep < 0.01f);
+    assert((switchedMaxStep - baselineMaxStep) < 0.003f);
 }
 
 static void test_noise_stability(void) {
