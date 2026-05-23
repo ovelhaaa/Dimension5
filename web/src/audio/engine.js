@@ -97,6 +97,10 @@ export function createEngine(setStatus) {
 
   const api = {
     async loadWasm() {
+      if (module) {
+        setStatus('WASM already loaded');
+        return;
+      }
       const createModule = await loadWasmModuleFactory();
       module = await createModule();
       inPtrL = module._malloc(maxProcessFrames * 4);
@@ -107,7 +111,9 @@ export function createEngine(setStatus) {
     },
 
     async initAudioGraph() {
-      if (!module) throw new Error('Load WASM first');
+      if (!module) {
+        await api.loadWasm();
+      }
       if (ctx) return;
       ctx = new AudioContext();
       await ctx.resume();
@@ -117,6 +123,7 @@ export function createEngine(setStatus) {
 
     async startMicAudio() {
       await api.initAudioGraph();
+      if (ctx.state !== 'running') await ctx.resume();
       teardownInput({ stopMic: true, stopNode: true });
       stopRecorder();
       isPlayingFile = false;
@@ -128,6 +135,7 @@ export function createEngine(setStatus) {
 
     async loadAudioFile(file) {
       await api.initAudioGraph();
+      if (ctx.state !== 'running') await ctx.resume();
       const arrayBuf = await file.arrayBuffer();
       loadedBuffer = await ctx.decodeAudioData(arrayBuf);
       setStatus(`file loaded: ${file.name}`);
@@ -136,6 +144,7 @@ export function createEngine(setStatus) {
     async playLoadedFile(onEnded) {
       if (!loadedBuffer) throw new Error('No audio file loaded');
       await api.initAudioGraph();
+      if (ctx.state !== 'running') await ctx.resume();
       teardownInput({ stopMic: true, stopNode: true });
       stopRecorder();
 
