@@ -36,12 +36,6 @@ for (const [name, min, max, step, value] of params) {
   controls.appendChild(card);
 }
 
-async function boot() {
-  await engine.init();
-}
-
-boot().catch((e) => { statusEl.textContent = `erro de inicialização: ${e.message}`; });
-
 modeEl.addEventListener('change', () => engine.setMode(Number(modeEl.value)));
 bypassBtn.addEventListener('click', () => {
   const state = engine.toggleBypass();
@@ -53,7 +47,7 @@ repeatBtn.addEventListener('click', () => {
   repeatBtn.textContent = `Loop ${state ? 'ON' : 'OFF'}`;
 });
 playBtn.addEventListener('click', async () => {
-  try { await engine.playLoadedFile(); } catch (e) { statusEl.textContent = e.message; }
+  try { await ensureReady(); await engine.playLoadedFile(); } catch (e) { statusEl.textContent = e.message; }
 });
 stopBtn.addEventListener('click', async () => { await engine.stopPlayback(); });
 renderBtn.addEventListener('click', async () => {
@@ -71,8 +65,16 @@ renderBtn.addEventListener('click', async () => {
   }
 });
 
+let userReady = false;
+async function ensureReady() {
+  if (userReady) return;
+  await engine.initFromGesture();
+  userReady = true;
+}
+
 async function loadFromFile(file) {
   if (!file) return;
+  await ensureReady();
   await engine.loadAudioFile(file);
 }
 fileInput.addEventListener('change', async () => loadFromFile(fileInput.files?.[0]));

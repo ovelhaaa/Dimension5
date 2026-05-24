@@ -1,4 +1,4 @@
-const WORKLET_PATH = '/src/audio/dimension-worklet.js';
+const WORKLET_URL = new URL('./dimension-worklet.js', import.meta.url);
 const WASM_MODULE_PATH = '/wasm/dimension_dsp.js';
 
 const PARAMS = {
@@ -54,19 +54,42 @@ export function createEngine(setStatus) {
   let bypass = false;
   let repeat = true;
   let currentMode = 0;
+  let initCounter = 0;
+  const pendingReady = new Map();
   const paramState = new Map();
 
-  async function ensureAudio() {
-    if (ctx && node) return;
-    ctx = new AudioContext({ latencyHint: 'interactive' });
-    await ctx.audioWorklet.addModule(WORKLET_PATH);
-    node = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
-    node.connect(ctx.destination);
-    node.port.onmessage = (ev) => {
-      if (ev.data?.type === 'ready') setStatus('WASM pronto no AudioWorklet');
-      if (ev.data?.type === 'error') setStatus(`erro no worklet: ${ev.data.message}`);
-    };
-    node.port.postMessage({ type: 'init', moduleUrl: WASM_MODULE_PATH, sampleRate: ctx.sampleRate });
+  function waitForReady(port, requestId) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingReady.delete(requestId);
+        reject(new Error('Timeout inicializando o AudioWorklet/WASM'));
+      }, 10000);
+      pendingReady.set(requestId, { resolve, reject, timeout });
+      port.postMessage({ type: 'init', moduleUrl: WASM_MODULE_PATH, sampleRate: (ctx?.sampleRate || 48000), requestId });
+    });
+  }
+
+  function handlePortMessage(ev) {
+    if (ev.data?.type === 'ready') {
+      const requestId = ev.data.requestId;
+      if (pendingReady.has(requestId)) {
+        const pending = pendingReady.get(requestId);
+        clearTimeout(pending.timeout);
+        pendingReady.delete(requestId);
+        pending.resolve();
+      }
+      setStatus('WASM pronto no AudioWorklet');
+    }
+    if (ev.data?.type === 'error') {
+      const requestId = ev.data.requestId;
+      if (pendingReady.has(requestId)) {
+        const pending = pendingReady.get(requestId);
+        clearTimeout(pending.timeout);
+        pendingReady.delete(requestId);
+        pending.reject(new Error(ev.data.message));
+      }
+      setStatus(`erro no worklet: ${ev.data.message}`);
+    }
   }
 
   function applyStateToPort(port) {
@@ -77,8 +100,23 @@ export function createEngine(setStatus) {
     }
   }
 
+  async function ensureAudio() {
+    if (!ctx) {
+      ctx = new AudioContext({ latencyHint: 'interactive' });
+      await ctx.audioWorklet.addModule(WORKLET_URL);
+    }
+    if (!node) {
+      node = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+      node.connect(ctx.destination);
+      node.port.onmessage = handlePortMessage;
+      const requestId = `main-${++initCounter}`;
+      await waitForReady(node.port, requestId);
+      applyStateToPort(node.port);
+    }
+  }
+
   return {
-    async init() {
+    async initFromGesture() {
       await ensureAudio();
       await ctx.resume();
     },
@@ -91,6 +129,7 @@ export function createEngine(setStatus) {
     async playLoadedFile() {
       if (!loadedBuffer) throw new Error('Nenhum arquivo carregado');
       await ensureAudio();
+      await ctx.resume();
       if (sourceNode) { try { sourceNode.stop(); } catch (_) {} sourceNode.disconnect(); }
       sourceNode = ctx.createBufferSource();
       sourceNode.buffer = loadedBuffer;
@@ -121,14 +160,28 @@ export function createEngine(setStatus) {
       return bypass;
     },
     toggleRepeat() { repeat = !repeat; return repeat; },
-    hasFileLoaded() { return !!loadedBuffer; },
     async renderOffline() {
       if (!loadedBuffer) throw new Error('Nenhum arquivo carregado');
       const offline = new OfflineAudioContext({ numberOfChannels: 2, length: loadedBuffer.length, sampleRate: loadedBuffer.sampleRate });
-      await offline.audioWorklet.addModule(WORKLET_PATH);
+      await offline.audioWorklet.addModule(WORKLET_URL);
       const offlineNode = new AudioWorkletNode(offline, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
       offlineNode.connect(offline.destination);
-      offlineNode.port.postMessage({ type: 'init', moduleUrl: WASM_MODULE_PATH, sampleRate: offline.sampleRate });
+
+      const offlineRequestId = `offline-${++initCounter}`;
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Timeout inicializando worklet offline')), 10000);
+        offlineNode.port.onmessage = (ev) => {
+          if (ev.data?.type === 'ready' && ev.data?.requestId === offlineRequestId) {
+            clearTimeout(timeout);
+            resolve();
+          } else if (ev.data?.type === 'error' && ev.data?.requestId === offlineRequestId) {
+            clearTimeout(timeout);
+            reject(new Error(ev.data.message));
+          }
+        };
+        offlineNode.port.postMessage({ type: 'init', moduleUrl: WASM_MODULE_PATH, sampleRate: offline.sampleRate, requestId: offlineRequestId });
+      });
+
       applyStateToPort(offlineNode.port);
 
       const src = offline.createBufferSource();
