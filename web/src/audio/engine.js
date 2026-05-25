@@ -1,5 +1,5 @@
 const WORKLET_URL = new URL('./dimension-worklet.js', import.meta.url);
-const WASM_MODULE_PATH = '/wasm/dimension_dsp.js';
+const WASM_MODULE_PATH = new URL('/wasm/dimension_dsp.js', globalThis.location?.origin || 'http://localhost').toString();
 
 const PARAMS = {
   inputGain: 0,
@@ -58,11 +58,18 @@ export function createEngine(setStatus) {
   const pendingReady = new Map();
   const paramState = new Map();
 
+  async function assertWasmModuleReachable() {
+    const response = await fetch(WASM_MODULE_PATH, { method: 'HEAD' });
+    if (!response.ok) {
+      throw new Error(`WASM não encontrado em ${WASM_MODULE_PATH}. Rode: npm run build:wasm`);
+    }
+  }
+
   function waitForReady(port, requestId) {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         pendingReady.delete(requestId);
-        reject(new Error('Timeout inicializando o AudioWorklet/WASM'));
+        reject(new Error(`Timeout inicializando AudioWorklet/WASM (${WASM_MODULE_PATH})`));
       }, 10000);
       pendingReady.set(requestId, { resolve, reject, timeout });
       port.postMessage({ type: 'init', moduleUrl: WASM_MODULE_PATH, sampleRate: (ctx?.sampleRate || 48000), requestId });
@@ -106,6 +113,7 @@ export function createEngine(setStatus) {
       await ctx.audioWorklet.addModule(WORKLET_URL);
     }
     if (!node) {
+      await assertWasmModuleReachable();
       node = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
       node.connect(ctx.destination);
       node.port.onmessage = handlePortMessage;
@@ -162,6 +170,7 @@ export function createEngine(setStatus) {
     toggleRepeat() { repeat = !repeat; return repeat; },
     async renderOffline() {
       if (!loadedBuffer) throw new Error('Nenhum arquivo carregado');
+      await assertWasmModuleReachable();
       const offline = new OfflineAudioContext({ numberOfChannels: 2, length: loadedBuffer.length, sampleRate: loadedBuffer.sampleRate });
       await offline.audioWorklet.addModule(WORKLET_URL);
       const offlineNode = new AudioWorkletNode(offline, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
