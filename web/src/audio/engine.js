@@ -1,5 +1,5 @@
 const WORKLET_URL = new URL('./dimension-worklet.js', import.meta.url);
-const WASM_MODULE_PATH = new URL('/wasm/dimension_dsp.js', globalThis.location?.origin || 'http://localhost').toString();
+const WASM_MODULE_PATH = new URL('wasm/dimension_dsp.js', globalThis.location?.origin ? new URL(import.meta.env.BASE_URL, globalThis.location.origin) : import.meta.env.BASE_URL).toString();
 
 const PARAMS = {
   inputGain: 0,
@@ -58,11 +58,50 @@ export function createEngine(setStatus) {
   const pendingReady = new Map();
   const paramState = new Map();
 
-  async function assertWasmModuleReachable() {
-    const response = await fetch(WASM_MODULE_PATH, { method: 'HEAD' });
-    if (!response.ok) {
-      throw new Error(`WASM não encontrado em ${WASM_MODULE_PATH}. Rode: npm run build:wasm`);
+  const WASM_CHECK_TIMEOUT_MS = 3000;
+  let wasmCheckPromise = null;
+
+  async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
     }
+  }
+
+  async function assertWasmModuleReachable() {
+    if (wasmCheckPromise) return wasmCheckPromise;
+
+    wasmCheckPromise = (async () => {
+      try {
+        const headResponse = await fetchWithTimeout(WASM_MODULE_PATH, { method: 'HEAD' }, WASM_CHECK_TIMEOUT_MS);
+        if (headResponse.ok) return;
+        if (headResponse.status !== 405 && headResponse.status !== 501) {
+          throw new Error(`WASM indisponível em ${WASM_MODULE_PATH} (HEAD ${headResponse.status})`);
+        }
+      } catch (err) {
+        if (err?.name !== 'AbortError') {
+          console.warn('HEAD check falhou para WASM, tentando GET...', err);
+        }
+      }
+
+      try {
+        const getResponse = await fetchWithTimeout(WASM_MODULE_PATH, { method: 'GET' }, WASM_CHECK_TIMEOUT_MS);
+        if (!getResponse.ok) {
+          throw new Error(`WASM indisponível em ${WASM_MODULE_PATH} (GET ${getResponse.status})`);
+        }
+      } catch (err) {
+        wasmCheckPromise = null;
+        if (err?.name === 'AbortError') {
+          throw new Error(`Timeout ao verificar WASM em ${WASM_MODULE_PATH}`);
+        }
+        throw new Error(err?.message || `Falha ao verificar WASM em ${WASM_MODULE_PATH}`);
+      }
+    })();
+
+    return wasmCheckPromise;
   }
 
   function waitForReady(port, requestId) {
@@ -114,6 +153,7 @@ export function createEngine(setStatus) {
     }
     if (!node) {
       await assertWasmModuleReachable();
+      if (node) return;
       node = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
       node.connect(ctx.destination);
       node.port.onmessage = handlePortMessage;
