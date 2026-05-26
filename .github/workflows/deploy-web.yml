@@ -48,6 +48,7 @@ jobs:
       - name: Build web app
         env:
           CI: "true"
+          BASE_URL: "/${{ github.event.repository.name }}/"
         run: npm run build
 
       - name: Upload Pages artifact
