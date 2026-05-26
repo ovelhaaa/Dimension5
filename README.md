@@ -2,10 +2,6 @@
 
 Implementação DSP do efeito Dimension em C para STM32H562, com versão web/WASM para testes em navegador.
 
-## Status da análise `earthpedal`
-
-No ambiente atual, o repositório `earthpedal` não está disponível no filesystem (nenhum diretório encontrado com esse nome), então não foi possível extrair a arquitetura real dele de forma direta. A implementação web abaixo foi feita preservando a arquitetura DSP existente do `Dimension5` e separando claramente: núcleo DSP C, bridge WASM, engine WebAudio e UI.
-
 ## Build nativo de testes
 
 ```bash
