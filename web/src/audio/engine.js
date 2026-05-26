@@ -228,7 +228,7 @@ export function createEngine(setStatus) {
             reject(new Error(ev.data.message));
           }
         };
-        offlineNode.port.postMessage({ type: 'init', moduleUrl: WASM_MODULE_PATH, sampleRate: offline.sampleRate, requestId: offlineRequestId });
+        offlineNode.port.postMessage({ type: 'init', sampleRate: offline.sampleRate, requestId: offlineRequestId });
       });
 
       applyStateToPort(offlineNode.port);

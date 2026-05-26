@@ -1,5 +1,7 @@
 import createDimensionModule from '/wasm/dimension_dsp.js';
 
+const WASM_BASE_PATH = `${import.meta.env.BASE_URL}wasm/`;
+
 class DimensionProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -61,7 +63,9 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.ready = false;
     try {
       if (!this.module) {
-        this.module = await createDimensionModule();
+        this.module = await createDimensionModule({
+          locateFile: (path) => `${WASM_BASE_PATH}${path}`
+        });
       }
     } catch (err) {
       const reportedError = err instanceof Error ? err : new Error(String(err));
