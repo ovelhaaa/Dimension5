@@ -1,4 +1,4 @@
-import createDimensionModule from '/wasm/dimension_dsp.js';
+import createDimensionModule from '../../public/wasm/dimension_dsp.js';
 
 function getWasmBasePath() {
   try {
