@@ -1,4 +1,4 @@
-import createDimensionModule from '../../public/wasm/dimension_dsp.js';
+import createDimensionModule from './dimension-wasm-loader.js';
 
 function getWasmBasePath() {
   try {
@@ -23,6 +23,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.module = null; this.ready = false; this.bypass = false; this.ptrs = null; this.maxFrames = 0;
+    this.modulePromise = null;
     this.lastParams = Array(PARAMS.length).fill(NaN);
     this.port.onmessage = async (event) => {
       const msg = event.data || {};
@@ -48,7 +49,20 @@ class DimensionProcessor extends AudioWorkletProcessor {
 
   async initWasm(sr, requestId, wasmBytes) {
     this.ready = false;
-    if (!this.module) this.module = await createDimensionModule({ wasmBinary: wasmBytes, locateFile: (path) => `${WASM_BASE_PATH}${path}` });
+    if (!this.module) {
+      if (!this.modulePromise) {
+        this.modulePromise = (async () => {
+          if (typeof createDimensionModule !== 'function') throw new Error('Loader WASM inválido');
+          return createDimensionModule({ wasmBinary: wasmBytes, locateFile: (path) => `${WASM_BASE_PATH}${path}` });
+        })();
+      }
+      try {
+        this.module = await this.modulePromise;
+      } catch (err) {
+        this.modulePromise = null;
+        throw err;
+      }
+    }
     this.freeHeapBuffers();
     this.lastParams = Array(PARAMS.length).fill(NaN);
     this.module._DimensionWasm_Init(sr);
