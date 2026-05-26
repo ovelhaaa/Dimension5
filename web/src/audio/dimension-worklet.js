@@ -1,5 +1,3 @@
-import createDimensionModule from './dimension-wasm-loader.js';
-
 function getWasmBasePath() {
   try {
     const workletUrl = new URL(import.meta.url);
@@ -22,8 +20,9 @@ class DimensionProcessor extends AudioWorkletProcessor {
 
   constructor() {
     super();
-    this.module = null; this.ready = false; this.bypass = false; this.ptrs = null; this.maxFrames = 0; this.quantumFrames = 128; this.silence = new Float32Array(this.quantumFrames);
+    this.module = null; this.ready = false; this.bypass = false; this.ptrs = null; this.maxFrames = 0; this.maxRenderFrames = 2048; this.silence = new Float32Array(this.maxRenderFrames);
     this.modulePromise = null;
+    this.loaderPromise = null;
     this.lastParams = Array(PARAMS.length).fill(NaN);
     this.port.onmessage = async (event) => {
       const msg = event.data || {};
@@ -47,12 +46,23 @@ class DimensionProcessor extends AudioWorkletProcessor {
   freeHeapBuffers() { if (!this.module || !this.ptrs) return; Object.values(this.ptrs).forEach((p) => this.module._free(p)); this.ptrs = null; this.maxFrames = 0; }
   ensureCapacity(frames) { if (!this.module || (this.ptrs && this.maxFrames >= frames)) return; this.freeHeapBuffers(); const b = frames * 4; this.ptrs = { inPtrL:this.module._malloc(b), inPtrR:this.module._malloc(b), outPtrL:this.module._malloc(b), outPtrR:this.module._malloc(b)}; this.maxFrames = frames; }
 
+  async loadModuleFactory() {
+    if (!this.loaderPromise) {
+      const loaderUrl = `${WASM_BASE_PATH}dimension_dsp.js`;
+      this.loaderPromise = import(/* @vite-ignore */ loaderUrl).then((mod) => {
+        if (typeof mod.default !== 'function') throw new Error('Loader WASM inválido');
+        return mod.default;
+      });
+    }
+    return this.loaderPromise;
+  }
+
   async initWasm(sr, requestId, wasmBytes) {
     this.ready = false;
     if (!this.module) {
       if (!this.modulePromise) {
         this.modulePromise = (async () => {
-          if (typeof createDimensionModule !== 'function') throw new Error('Loader WASM inválido');
+          const createDimensionModule = await this.loadModuleFactory();
           return createDimensionModule({ wasmBinary: wasmBytes, locateFile: (path) => `${WASM_BASE_PATH}${path}` });
         })();
       }
@@ -66,7 +76,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.freeHeapBuffers();
     this.lastParams = Array(PARAMS.length).fill(NaN);
     this.module._DimensionWasm_Init(sr);
-    this.ensureCapacity(this.quantumFrames);
+    this.ensureCapacity(this.maxRenderFrames);
     this.ready = true;
     this.port.postMessage({ type: 'ready', requestId: requestId ?? null });
   }
@@ -88,7 +98,11 @@ class DimensionProcessor extends AudioWorkletProcessor {
     if (!this.ready || !this.module) { outL.fill(0); outR.fill(0); return true; }
     this.syncParams(parameters);
     const inL = input?.[0] || this.silence; const inR = input?.[1] || inL; const frames = inL.length;
-    if (frames > this.maxFrames) { outL.fill(0); outR.fill(0); return true; }
+    if (frames > this.maxFrames) {
+      outL.fill(0); outR.fill(0);
+      this.port.postMessage({ type: 'error', message: `bloco de áudio maior que capacidade pré-alocada (${frames} > ${this.maxFrames})` });
+      return true;
+    }
     const heap = this.module.HEAPF32;
     heap.set(inL, this.ptrs.inPtrL >> 2); heap.set(inR, this.ptrs.inPtrR >> 2);
     this.module._DimensionWasm_Process(this.ptrs.inPtrL,this.ptrs.inPtrR,this.ptrs.outPtrL,this.ptrs.outPtrR,frames,this.bypass ? 1 : 0);
