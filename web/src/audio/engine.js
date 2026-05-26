@@ -83,7 +83,7 @@ export function createEngine(setStatus) {
         if (ev.data?.type === 'error') { clearTimeout(timeout); targetNode.port.onmessage = null; reject(new Error(ev.data.message)); }
       };
       targetNode.port.onmessage = handler;
-      targetNode.port.postMessage({ type: 'init', sampleRate: targetNode.context.sampleRate, wasmBytes, requestId });
+      targetNode.port.postMessage({ type: 'init', sampleRate: targetNode.context.sampleRate, wasmBytes, wasmJsPath: WASM_JS_PATH, requestId });
     });
   }
 
