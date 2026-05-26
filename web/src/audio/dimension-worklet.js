@@ -1,6 +1,20 @@
-import createDimensionModule from '/wasm/dimension_dsp.js';
+function getWasmBasePath() {
+  try {
+    const workletUrl = new URL(import.meta.url);
+    const queryBase = workletUrl.searchParams.get('base');
+    if (queryBase) return new URL(`wasm/`, queryBase).toString();
 
-const WASM_BASE_PATH = `${import.meta.env.BASE_URL}wasm/`;
+    const assetsIndex = workletUrl.pathname.indexOf('/assets/');
+    if (assetsIndex !== -1) {
+      return `${workletUrl.origin}${workletUrl.pathname.substring(0, assetsIndex + 1)}wasm/`;
+    }
+  } catch (_) {
+    // fallback abaixo
+  }
+  return '/wasm/';
+}
+
+const WASM_BASE_PATH = getWasmBasePath();
 
 class DimensionProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -63,6 +77,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.ready = false;
     try {
       if (!this.module) {
+        const { default: createDimensionModule } = await import(`${WASM_BASE_PATH}dimension_dsp.js`);
         this.module = await createDimensionModule({
           locateFile: (path) => `${WASM_BASE_PATH}${path}`
         });
