@@ -20,6 +20,7 @@ const params = [
 ];
 
 const engine = createEngine((msg) => { statusEl.textContent = msg; });
+statusEl.textContent = 'pronto: carregue um arquivo e clique em Play para inicializar áudio';
 
 for (const [name, min, max, step, value] of params) {
   const card = document.createElement('label');
