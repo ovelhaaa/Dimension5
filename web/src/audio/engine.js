@@ -149,7 +149,7 @@ export function createEngine(setStatus) {
   async function ensureAudio() {
     if (!ctx) {
       ctx = new AudioContext({ latencyHint: 'interactive' });
-      await ctx.audioWorklet.addModule(WORKLET_URL);
+      await ctx.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
     }
     if (!node) {
       await assertWasmModuleReachable();
@@ -212,7 +212,7 @@ export function createEngine(setStatus) {
       if (!loadedBuffer) throw new Error('Nenhum arquivo carregado');
       await assertWasmModuleReachable();
       const offline = new OfflineAudioContext({ numberOfChannels: 2, length: loadedBuffer.length, sampleRate: loadedBuffer.sampleRate });
-      await offline.audioWorklet.addModule(WORKLET_URL);
+      await offline.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
       const offlineNode = new AudioWorkletNode(offline, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
       offlineNode.connect(offline.destination);
 

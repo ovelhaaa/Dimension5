@@ -1,4 +1,4 @@
-import createModule from '/wasm/dimension_dsp.js';
+import createModule from '../../wasm/dimension_dsp.js';
 
 class DimensionProcessor extends AudioWorkletProcessor {
   constructor() {
