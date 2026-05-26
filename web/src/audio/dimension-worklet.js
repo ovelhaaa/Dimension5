@@ -22,7 +22,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
 
   constructor() {
     super();
-    this.module = null; this.ready = false; this.bypass = false; this.ptrs = null; this.maxFrames = 0;
+    this.module = null; this.ready = false; this.bypass = false; this.ptrs = null; this.maxFrames = 0; this.quantumFrames = 128; this.silence = new Float32Array(this.quantumFrames);
     this.modulePromise = null;
     this.lastParams = Array(PARAMS.length).fill(NaN);
     this.port.onmessage = async (event) => {
@@ -66,6 +66,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.freeHeapBuffers();
     this.lastParams = Array(PARAMS.length).fill(NaN);
     this.module._DimensionWasm_Init(sr);
+    this.ensureCapacity(this.quantumFrames);
     this.ready = true;
     this.port.postMessage({ type: 'ready', requestId: requestId ?? null });
   }
@@ -86,7 +87,8 @@ class DimensionProcessor extends AudioWorkletProcessor {
     const outL = output[0]; const outR = output[1];
     if (!this.ready || !this.module) { outL.fill(0); outR.fill(0); return true; }
     this.syncParams(parameters);
-    const inL = input?.[0] || outL; const inR = input?.[1] || inL; const frames = inL.length; this.ensureCapacity(frames);
+    const inL = input?.[0] || this.silence; const inR = input?.[1] || inL; const frames = inL.length;
+    if (frames > this.maxFrames) { outL.fill(0); outR.fill(0); return true; }
     const heap = this.module.HEAPF32;
     heap.set(inL, this.ptrs.inPtrL >> 2); heap.set(inR, this.ptrs.inPtrR >> 2);
     this.module._DimensionWasm_Process(this.ptrs.inPtrL,this.ptrs.inPtrR,this.ptrs.outPtrL,this.ptrs.outPtrR,frames,this.bypass ? 1 : 0);
