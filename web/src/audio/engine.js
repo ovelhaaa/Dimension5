@@ -44,6 +44,7 @@ export function createEngine(setStatus) {
   let bypass = false; let repeat = true; let currentMode = 0; let initCounter = 0;
   const paramState = new Map();
   let wasmBytesCache = null;
+  let initPromise = null;
 
   async function loadWasmBytes() {
     if (wasmBytesCache) return wasmBytesCache;
@@ -72,7 +73,10 @@ export function createEngine(setStatus) {
 
   function waitForReady(targetNode, requestId, wasmBytes) {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Timeout inicializando AudioWorklet/WASM')), 12000);
+      const timeout = setTimeout(() => {
+        targetNode.port.onmessage = null;
+        reject(new Error('Timeout inicializando AudioWorklet/WASM'));
+      }, 12000);
       const handler = (ev) => {
         if (ev.data?.requestId !== requestId) return;
         if (ev.data?.type === 'ready') { clearTimeout(timeout); targetNode.port.onmessage = null; resolve(); }
@@ -85,50 +89,57 @@ export function createEngine(setStatus) {
 
   async function ensureAudio() {
     if (node) return;
+    if (initPromise) return initPromise;
 
-    let createdCtx = false;
-    let localNode = null;
-    try {
-      if (!ctx) {
-        ctx = new AudioContext({ latencyHint: 'interactive' });
-        createdCtx = true;
-        await ctx.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
+    initPromise = (async () => {
+      let createdCtx = false;
+      let localNode = null;
+      try {
+        if (!ctx) {
+          ctx = new AudioContext({ latencyHint: 'interactive' });
+          createdCtx = true;
+          await ctx.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
+        }
+
+        await assertWasmLoaderReachable();
+        const wasmBytes = await loadWasmBytes();
+
+        if (node) return;
+
+        localNode = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+        localNode.connect(ctx.destination);
+        const requestId = `main-${initCounter + 1}`;
+        await waitForReady(localNode, requestId, wasmBytes);
+        initCounter += 1;
+
+        localNode.port.onmessage = (ev) => {
+          if (ev.data?.type === 'error') setStatus(`erro no worklet: ${ev.data.message}`);
+        };
+
+        if (node) {
+          localNode.disconnect();
+          return;
+        }
+
+        node = localNode;
+        applyStateToNode(node);
+        setStatus('WASM pronto no AudioWorklet');
+      } catch (err) {
+        if (localNode) {
+          try { localNode.disconnect(); } catch (_) {}
+        }
+        if (createdCtx && ctx) {
+          try { await ctx.close(); } catch (_) {}
+          ctx = null;
+        }
+        node = null;
+        throw err;
+      } finally {
+        initPromise = null;
       }
+    })();
 
-      await assertWasmLoaderReachable();
-      const wasmBytes = await loadWasmBytes();
-
-      if (node) return;
-
-      localNode = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
-      localNode.connect(ctx.destination);
-      const requestId = `main-${initCounter + 1}`;
-      await waitForReady(localNode, requestId, wasmBytes);
-      initCounter += 1;
-
-      localNode.port.onmessage = (ev) => {
-        if (ev.data?.type === 'error') setStatus(`erro no worklet: ${ev.data.message}`);
-      };
-
-      if (node) {
-        localNode.disconnect();
-        return;
-      }
-
-      node = localNode;
-      applyStateToNode(node);
-      setStatus('WASM pronto no AudioWorklet');
-    } catch (err) {
-      if (localNode) {
-        try { localNode.disconnect(); } catch (_) {}
-      }
-      if (createdCtx && ctx) {
-        try { await ctx.close(); } catch (_) {}
-        ctx = null;
-      }
-      node = null;
-      throw err;
-    }
+    return initPromise;
   }
 
   return {

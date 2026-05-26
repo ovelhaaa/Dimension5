@@ -60,7 +60,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     if (!this.module) return;
     for (let i = 0; i < PARAMS.length; i += 1) {
       const value = parameters[PARAMS[i]]?.[0] ?? this.lastParams[i];
-      if (value !== this.lastParams[i]) {
+      if (!Object.is(value, this.lastParams[i])) {
         this.lastParams[i] = value;
         this.module._DimensionWasm_SetParam(i, value);
       }
