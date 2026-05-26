@@ -107,19 +107,21 @@ export function createEngine(setStatus) {
         if (node) return;
 
         localNode = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
-        localNode.connect(ctx.destination);
         const requestId = `main-${initCounter + 1}`;
         await waitForReady(localNode, requestId, wasmBytes);
         initCounter += 1;
 
-        localNode.port.onmessage = (ev) => {
-          if (ev.data?.type === 'error') setStatus(`erro no worklet: ${ev.data.message}`);
-        };
-
+        // Re-check after async setup in case another overlapping ensureAudio already won initialization.
         if (node) {
           localNode.disconnect();
           return;
         }
+
+        localNode.connect(ctx.destination);
+
+        localNode.port.onmessage = (ev) => {
+          if (ev.data?.type === 'error') setStatus(`erro no worklet: ${ev.data.message}`);
+        };
 
         node = localNode;
         applyStateToNode(node);
