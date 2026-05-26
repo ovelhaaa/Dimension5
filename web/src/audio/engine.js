@@ -1,4 +1,4 @@
-const WORKLET_URL = new URL('./dimension-worklet.js', import.meta.url);
+const WORKLET_URL = new URL(`./dimension-worklet.js?base=${encodeURIComponent(import.meta.env.BASE_URL || '/')}`, import.meta.url);
 const WASM_MODULE_PATH = new URL('wasm/dimension_dsp.js', globalThis.location?.origin ? new URL(import.meta.env.BASE_URL, globalThis.location.origin) : import.meta.env.BASE_URL).toString();
 
 const PARAMS = {
