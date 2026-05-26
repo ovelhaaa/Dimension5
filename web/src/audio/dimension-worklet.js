@@ -1,3 +1,5 @@
+import createDimensionModule from './dimension-wasm-loader.js';
+
 function getWasmBasePath() {
   try {
     const workletUrl = new URL(import.meta.url);
@@ -21,12 +23,12 @@ class DimensionProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.module = null; this.ready = false; this.bypass = false; this.ptrs = null; this.maxFrames = 0;
-    this.moduleFactory = null;
+    this.modulePromise = null;
     this.lastParams = Array(PARAMS.length).fill(NaN);
     this.port.onmessage = async (event) => {
       const msg = event.data || {};
       try {
-        if (msg.type === 'init') await this.initWasm(msg.sampleRate || sampleRate, msg.requestId, msg.wasmBytes, msg.wasmJsPath);
+        if (msg.type === 'init') await this.initWasm(msg.sampleRate || sampleRate, msg.requestId, msg.wasmBytes);
         else if (msg.type === 'setParam' && this.module) {
           const paramId = msg.paramId | 0;
           const value = Number(msg.value);
@@ -45,21 +47,21 @@ class DimensionProcessor extends AudioWorkletProcessor {
   freeHeapBuffers() { if (!this.module || !this.ptrs) return; Object.values(this.ptrs).forEach((p) => this.module._free(p)); this.ptrs = null; this.maxFrames = 0; }
   ensureCapacity(frames) { if (!this.module || (this.ptrs && this.maxFrames >= frames)) return; this.freeHeapBuffers(); const b = frames * 4; this.ptrs = { inPtrL:this.module._malloc(b), inPtrR:this.module._malloc(b), outPtrL:this.module._malloc(b), outPtrR:this.module._malloc(b)}; this.maxFrames = frames; }
 
-  async loadModuleFactory(wasmJsPath) {
-    if (this.moduleFactory) return this.moduleFactory;
-    if (!wasmJsPath) throw new Error('Caminho do loader WASM não informado');
-    const imported = await import(/* @vite-ignore */ wasmJsPath);
-    const factory = imported?.default;
-    if (typeof factory !== 'function') throw new Error(`Loader WASM inválido em ${wasmJsPath}`);
-    this.moduleFactory = factory;
-    return factory;
-  }
-
-  async initWasm(sr, requestId, wasmBytes, wasmJsPath) {
+  async initWasm(sr, requestId, wasmBytes) {
     this.ready = false;
     if (!this.module) {
-      const createDimensionModule = await this.loadModuleFactory(wasmJsPath);
-      this.module = await createDimensionModule({ wasmBinary: wasmBytes, locateFile: (path) => `${WASM_BASE_PATH}${path}` });
+      if (!this.modulePromise) {
+        this.modulePromise = (async () => {
+          if (typeof createDimensionModule !== 'function') throw new Error('Loader WASM inválido');
+          return createDimensionModule({ wasmBinary: wasmBytes, locateFile: (path) => `${WASM_BASE_PATH}${path}` });
+        })();
+      }
+      try {
+        this.module = await this.modulePromise;
+      } catch (err) {
+        this.modulePromise = null;
+        throw err;
+      }
     }
     this.freeHeapBuffers();
     this.lastParams = Array(PARAMS.length).fill(NaN);
