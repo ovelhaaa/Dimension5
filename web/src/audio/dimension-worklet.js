@@ -22,7 +22,9 @@ class DimensionProcessor extends AudioWorkletProcessor {
           this.module._DimensionWasm_Reset();
         }
       } catch (err) {
-        this.port.postMessage({ type: 'error', message: err?.message || String(err), requestId: msg.requestId ?? null });
+        if (!err?.__alreadyReportedToMainThread) {
+          this.port.postMessage({ type: 'error', message: err?.message || String(err), requestId: msg.requestId ?? null });
+        }
       }
     };
   }
@@ -55,13 +57,20 @@ class DimensionProcessor extends AudioWorkletProcessor {
 
   async initWasm(moduleUrl, sr, requestId) {
     this.ready = false;
-    if (!this.module) {
-      const wasmModule = await import(/* @vite-ignore */ moduleUrl);
-      const createModule = wasmModule?.default;
-      if (typeof createModule !== 'function') {
-        throw new Error(`Factory do módulo WASM inválida em ${moduleUrl}`);
+    try {
+      if (!this.module) {
+        const wasmModule = await import(/* @vite-ignore */ moduleUrl);
+        const createModule = wasmModule?.default;
+        if (typeof createModule !== 'function') {
+          throw new Error(`Factory do módulo WASM inválida em ${moduleUrl}`);
+        }
+        this.module = await createModule();
       }
-      this.module = await createModule();
+    } catch (err) {
+      const reportedError = err instanceof Error ? err : new Error(String(err));
+      reportedError.__alreadyReportedToMainThread = true;
+      this.port.postMessage({ type: 'error', requestId: requestId ?? null, message: reportedError.message });
+      throw reportedError;
     }
 
     this.freeHeapBuffers();
