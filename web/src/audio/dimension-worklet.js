@@ -1,5 +1,3 @@
-import createModule from '../../wasm/dimension_dsp.js';
-
 class DimensionProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -55,9 +53,14 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.maxFrames = frames;
   }
 
-  async initWasm(_moduleUrl, sr, requestId) {
+  async initWasm(moduleUrl, sr, requestId) {
     this.ready = false;
     if (!this.module) {
+      const wasmModule = await import(/* @vite-ignore */ moduleUrl);
+      const createModule = wasmModule?.default;
+      if (typeof createModule !== 'function') {
+        throw new Error(`Factory do módulo WASM inválida em ${moduleUrl}`);
+      }
       this.module = await createModule();
     }
 
