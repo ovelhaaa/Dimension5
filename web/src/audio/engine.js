@@ -19,6 +19,7 @@ const PARAMS = {
 };
 
 const PARAM_NAMES = Object.keys(PARAMS);
+const hasOwn = Object.prototype.hasOwnProperty;
 
 function encodeWavBlob(left, right, sampleRate) { /* unchanged */
   const frames = left.length; const channels = 2; const bytesPerSample = 2;
@@ -61,9 +62,11 @@ export function createEngine(setStatus) {
     targetNode.port.postMessage({ type: 'setMode', mode: currentMode });
     targetNode.port.postMessage({ type: 'setBypass', value: bypass });
     for (const [name, value] of paramState.entries()) {
+      if (!hasOwn.call(PARAMS, name)) continue;
+      const paramId = PARAMS[name];
       const param = targetNode.parameters.get(name);
       if (param) param.setValueAtTime(value, targetNode.context.currentTime);
-      targetNode.port.postMessage({ type: 'setParam', paramId: PARAMS[name], value });
+      targetNode.port.postMessage({ type: 'setParam', paramId, value });
     }
   }
 
@@ -81,19 +84,50 @@ export function createEngine(setStatus) {
   }
 
   async function ensureAudio() {
-    if (!ctx) {
-      ctx = new AudioContext({ latencyHint: 'interactive' });
-      await ctx.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
-    }
-    if (!node) {
+    if (node) return;
+
+    let createdCtx = false;
+    let localNode = null;
+    try {
+      if (!ctx) {
+        ctx = new AudioContext({ latencyHint: 'interactive' });
+        createdCtx = true;
+        await ctx.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
+      }
+
       await assertWasmLoaderReachable();
       const wasmBytes = await loadWasmBytes();
-      node = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
-      node.connect(ctx.destination);
-      const requestId = `main-${++initCounter}`;
-      await waitForReady(node, requestId, wasmBytes);
+
+      if (node) return;
+
+      localNode = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+      localNode.connect(ctx.destination);
+      const requestId = `main-${initCounter + 1}`;
+      await waitForReady(localNode, requestId, wasmBytes);
+      initCounter += 1;
+
+      localNode.port.onmessage = (ev) => {
+        if (ev.data?.type === 'error') setStatus(`erro no worklet: ${ev.data.message}`);
+      };
+
+      if (node) {
+        localNode.disconnect();
+        return;
+      }
+
+      node = localNode;
       applyStateToNode(node);
       setStatus('WASM pronto no AudioWorklet');
+    } catch (err) {
+      if (localNode) {
+        try { localNode.disconnect(); } catch (_) {}
+      }
+      if (createdCtx && ctx) {
+        try { await ctx.close(); } catch (_) {}
+        ctx = null;
+      }
+      node = null;
+      throw err;
     }
   }
 
@@ -104,7 +138,16 @@ export function createEngine(setStatus) {
       sourceNode = ctx.createBufferSource(); sourceNode.buffer = loadedBuffer; sourceNode.loop = repeat; sourceNode.connect(node); sourceNode.start(); setStatus('tocando arquivo em loop/processado'); },
     async stopPlayback() { if (sourceNode) { try { sourceNode.stop(); } catch (_) {} sourceNode.disconnect(); sourceNode = null; } setStatus('playback parado'); },
     setMode(mode) { currentMode = mode; if (node) node.port.postMessage({ type: 'setMode', mode }); },
-    setParam(name, value) { paramState.set(name, value); if (node) { const p = node.parameters.get(name); if (p) p.setValueAtTime(value, ctx.currentTime); node.port.postMessage({ type: 'setParam', paramId: PARAMS[name], value }); } },
+    setParam(name, value) {
+      if (!hasOwn.call(PARAMS, name)) return;
+      paramState.set(name, value);
+      if (node) {
+        const paramId = PARAMS[name];
+        const p = node.parameters.get(name);
+        if (p) p.setValueAtTime(value, ctx.currentTime);
+        node.port.postMessage({ type: 'setParam', paramId, value });
+      }
+    },
     toggleBypass() { bypass = !bypass; if (node) node.port.postMessage({ type: 'setBypass', value: bypass }); return bypass; },
     toggleRepeat() { repeat = !repeat; return repeat; },
     async renderOffline() {

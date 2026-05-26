@@ -23,12 +23,17 @@ class DimensionProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.module = null; this.ready = false; this.bypass = false; this.ptrs = null; this.maxFrames = 0;
-    this.lastParams = PARAM_DEFAULTS.slice();
+    this.lastParams = Array(PARAMS.length).fill(NaN);
     this.port.onmessage = async (event) => {
       const msg = event.data || {};
       try {
         if (msg.type === 'init') await this.initWasm(msg.sampleRate || sampleRate, msg.requestId, msg.wasmBytes);
-        else if (msg.type === 'setParam' && this.module) this.module._DimensionWasm_SetParam(msg.paramId | 0, Number(msg.value));
+        else if (msg.type === 'setParam' && this.module) {
+          const paramId = msg.paramId | 0;
+          const value = Number(msg.value);
+          if (paramId >= 0 && paramId < this.lastParams.length) this.lastParams[paramId] = value;
+          this.module._DimensionWasm_SetParam(paramId, value);
+        }
         else if (msg.type === 'setMode' && this.module) this.module._DimensionWasm_SetMode(msg.mode | 0);
         else if (msg.type === 'setBypass') this.bypass = !!msg.value;
         else if (msg.type === 'reset' && this.module) this.module._DimensionWasm_Reset();
@@ -44,7 +49,11 @@ class DimensionProcessor extends AudioWorkletProcessor {
   async initWasm(sr, requestId, wasmBytes) {
     this.ready = false;
     if (!this.module) this.module = await createDimensionModule({ wasmBinary: wasmBytes, locateFile: (path) => `${WASM_BASE_PATH}${path}` });
-    this.freeHeapBuffers(); this.module._DimensionWasm_Init(sr); this.ready = true; this.port.postMessage({ type: 'ready', requestId: requestId ?? null });
+    this.freeHeapBuffers();
+    this.lastParams = Array(PARAMS.length).fill(NaN);
+    this.module._DimensionWasm_Init(sr);
+    this.ready = true;
+    this.port.postMessage({ type: 'ready', requestId: requestId ?? null });
   }
 
   syncParams(parameters) {
