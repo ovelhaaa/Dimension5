@@ -1,3 +1,7 @@
+import createDimensionModule from '/wasm/dimension_dsp.js';
+
+const WASM_BASE_PATH = `${import.meta.env.BASE_URL}wasm/`;
+
 class DimensionProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -11,7 +15,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
       const msg = event.data || {};
       try {
         if (msg.type === 'init') {
-          await this.initWasm(msg.moduleUrl, msg.sampleRate || sampleRate, msg.requestId);
+          await this.initWasm(msg.sampleRate || sampleRate, msg.requestId);
         } else if (msg.type === 'setParam' && this.module) {
           this.module._DimensionWasm_SetParam(msg.paramId | 0, Number(msg.value));
         } else if (msg.type === 'setMode' && this.module) {
@@ -55,16 +59,13 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.maxFrames = frames;
   }
 
-  async initWasm(moduleUrl, sr, requestId) {
+  async initWasm(sr, requestId) {
     this.ready = false;
     try {
       if (!this.module) {
-        const wasmModule = await import(/* @vite-ignore */ moduleUrl);
-        const createModule = wasmModule?.default;
-        if (typeof createModule !== 'function') {
-          throw new Error(`Factory do módulo WASM inválida em ${moduleUrl}`);
-        }
-        this.module = await createModule();
+        this.module = await createDimensionModule({
+          locateFile: (path) => `${WASM_BASE_PATH}${path}`
+        });
       }
     } catch (err) {
       const reportedError = err instanceof Error ? err : new Error(String(err));

@@ -111,7 +111,7 @@ export function createEngine(setStatus) {
         reject(new Error(`Timeout inicializando AudioWorklet/WASM (${WASM_MODULE_PATH})`));
       }, 10000);
       pendingReady.set(requestId, { resolve, reject, timeout });
-      port.postMessage({ type: 'init', moduleUrl: WASM_MODULE_PATH, sampleRate: (ctx?.sampleRate || 48000), requestId });
+      port.postMessage({ type: 'init', sampleRate: (ctx?.sampleRate || 48000), requestId });
     });
   }
 
@@ -228,7 +228,7 @@ export function createEngine(setStatus) {
             reject(new Error(ev.data.message));
           }
         };
-        offlineNode.port.postMessage({ type: 'init', moduleUrl: WASM_MODULE_PATH, sampleRate: offline.sampleRate, requestId: offlineRequestId });
+        offlineNode.port.postMessage({ type: 'init', sampleRate: offline.sampleRate, requestId: offlineRequestId });
       });
 
       applyStateToPort(offlineNode.port);
