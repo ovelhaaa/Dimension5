@@ -1,5 +1,4 @@
-const WORKLET_URL = new URL(`./dimension-worklet.js?base=${encodeURIComponent(import.meta.env.BASE_URL || '/')}`, import.meta.url);
-const WASM_JS_PATH = new URL('wasm/dimension_dsp.js', globalThis.location?.origin ? new URL(import.meta.env.BASE_URL, globalThis.location.origin) : import.meta.env.BASE_URL).toString();
+const WORKLET_URL = new URL('./dimension-worklet.js', import.meta.url);
 const WASM_BIN_PATH = new URL('wasm/dimension_dsp.wasm', globalThis.location?.origin ? new URL(import.meta.env.BASE_URL, globalThis.location.origin) : import.meta.env.BASE_URL).toString();
 
 const PARAMS = {
@@ -43,20 +42,15 @@ export function createEngine(setStatus) {
   let ctx = null; let node = null; let sourceNode = null; let loadedBuffer = null;
   let bypass = false; let repeat = true; let currentMode = 0; let initCounter = 0;
   const paramState = new Map();
-  let wasmBytesCache = null;
+  let wasmModuleCache = null;
   let initPromise = null;
 
-  async function loadWasmBytes() {
-    if (wasmBytesCache) return wasmBytesCache;
+  async function loadWasmModule() {
+    if (wasmModuleCache) return wasmModuleCache;
     const response = await fetch(WASM_BIN_PATH);
     if (!response.ok) throw new Error(`WASM bin indisponível (${response.status}) em ${WASM_BIN_PATH}`);
-    wasmBytesCache = await response.arrayBuffer();
-    return wasmBytesCache;
-  }
-
-  async function assertWasmLoaderReachable() {
-    const response = await fetch(WASM_JS_PATH, { method: 'GET' });
-    if (!response.ok) throw new Error(`WASM loader indisponível (${response.status}) em ${WASM_JS_PATH}`);
+    wasmModuleCache = await WebAssembly.compile(await response.arrayBuffer());
+    return wasmModuleCache;
   }
 
   function applyStateToNode(targetNode) {
@@ -71,7 +65,7 @@ export function createEngine(setStatus) {
     }
   }
 
-  function waitForReady(targetNode, requestId, wasmBytes) {
+  function waitForReady(targetNode, requestId, wasmModule) {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         targetNode.port.onmessage = null;
@@ -83,7 +77,7 @@ export function createEngine(setStatus) {
         if (ev.data?.type === 'error') { clearTimeout(timeout); targetNode.port.onmessage = null; reject(new Error(ev.data.message)); }
       };
       targetNode.port.onmessage = handler;
-      targetNode.port.postMessage({ type: 'init', sampleRate: targetNode.context.sampleRate, wasmBytes, requestId });
+      targetNode.port.postMessage({ type: 'init', sampleRate: targetNode.context.sampleRate, wasmModule, requestId });
     });
   }
 
@@ -101,14 +95,13 @@ export function createEngine(setStatus) {
           await ctx.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
         }
 
-        await assertWasmLoaderReachable();
-        const wasmBytes = await loadWasmBytes();
+        const wasmModule = await loadWasmModule();
 
         if (node) return;
 
         localNode = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
         const requestId = `main-${initCounter + 1}`;
-        await waitForReady(localNode, requestId, wasmBytes);
+        await waitForReady(localNode, requestId, wasmModule);
         initCounter += 1;
 
         // Re-check after async setup in case another overlapping ensureAudio already won initialization.
@@ -165,14 +158,13 @@ export function createEngine(setStatus) {
     toggleRepeat() { repeat = !repeat; return repeat; },
     async renderOffline() {
       if (!loadedBuffer) throw new Error('Nenhum arquivo carregado');
-      await assertWasmLoaderReachable();
-      const wasmBytes = await loadWasmBytes();
+      const wasmModule = await loadWasmModule();
       const offline = new OfflineAudioContext({ numberOfChannels: 2, length: loadedBuffer.length, sampleRate: loadedBuffer.sampleRate });
       await offline.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
       const offNode = new AudioWorkletNode(offline, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
       offNode.connect(offline.destination);
       const requestId = `offline-${++initCounter}`;
-      await waitForReady(offNode, requestId, wasmBytes);
+      await waitForReady(offNode, requestId, wasmModule);
       applyStateToNode(offNode);
       const src = offline.createBufferSource(); src.buffer = loadedBuffer; src.connect(offNode); src.start(0);
       const rendered = await offline.startRendering();
