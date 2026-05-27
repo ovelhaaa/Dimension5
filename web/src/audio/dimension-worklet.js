@@ -10,6 +10,13 @@ function getExportFn(instance, names) {
   throw new Error(`Função WASM não encontrada: ${names.join(' ou ')}`);
 }
 
+function resolveAllocatorFns(instance) {
+  return {
+    malloc: getExportFn(instance, ['_malloc', 'malloc']),
+    free: getExportFn(instance, ['_free', 'free'])
+  };
+}
+
 
 class DimensionProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
@@ -20,6 +27,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     super();
     this.wasmInstance = null; this.ready = false; this.bypass = false; this.ptrs = null; this.maxFrames = 0; this.maxRenderFrames = 2048; this.silence = new Float32Array(this.maxRenderFrames);
     this.modulePromise = null;
+    this.alloc = null;
     this.heap = null;
     this.lastParams = Array(PARAMS.length).fill(NaN);
     this.port.onmessage = async (event) => {
@@ -41,8 +49,8 @@ class DimensionProcessor extends AudioWorkletProcessor {
     };
   }
 
-  freeHeapBuffers() { if (!this.wasmInstance || !this.ptrs) return; Object.values(this.ptrs).forEach((p) => this.wasmInstance.exports._free(p)); this.ptrs = null; this.maxFrames = 0; }
-  ensureCapacity(frames) { if (!this.wasmInstance || (this.ptrs && this.maxFrames >= frames)) return; this.freeHeapBuffers(); const b = frames * 4; this.ptrs = { inPtrL:this.wasmInstance.exports._malloc(b), inPtrR:this.wasmInstance.exports._malloc(b), outPtrL:this.wasmInstance.exports._malloc(b), outPtrR:this.wasmInstance.exports._malloc(b)}; this.maxFrames = frames; }
+  freeHeapBuffers() { if (!this.wasmInstance || !this.ptrs || !this.alloc) return; Object.values(this.ptrs).forEach((p) => this.alloc.free(p)); this.ptrs = null; this.maxFrames = 0; }
+  ensureCapacity(frames) { if (!this.wasmInstance || !this.alloc || (this.ptrs && this.maxFrames >= frames)) return; this.freeHeapBuffers(); const b = frames * 4; this.ptrs = { inPtrL:this.alloc.malloc(b), inPtrR:this.alloc.malloc(b), outPtrL:this.alloc.malloc(b), outPtrR:this.alloc.malloc(b)}; this.maxFrames = frames; }
 
   async initWasm(sr, requestId, wasmBytes) {
     this.ready = false;
@@ -60,6 +68,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
       }
     }
     this.freeHeapBuffers();
+    this.alloc = resolveAllocatorFns(this.wasmInstance);
     this.heap = new Float32Array(this.wasmInstance.exports.memory.buffer);
     this.lastParams = Array(PARAMS.length).fill(NaN);
     getExportFn(this.wasmInstance, ['_DimensionWasm_Init', 'DimensionWasm_Init'])(sr);
