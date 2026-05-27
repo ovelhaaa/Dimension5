@@ -1,6 +1,16 @@
 const PARAMS = ['inputGain','outputGain','dryGain','wetDirectGain','wetCrossGain','baseDelayMs','depthMs','rateHz','hpfHz','lpfHz','analogAmount','companderAmount','width'];
 const PARAM_DEFAULTS = [1,1,0.83,0.5,0.35,7,0.9,0.25,120,8000,0.35,0.35,1];
 
+function getExportFn(instance, names) {
+  const exports = instance?.exports || {};
+  for (const name of names) {
+    const fn = exports[name];
+    if (typeof fn === 'function') return fn;
+  }
+  throw new Error(`Função WASM não encontrada: ${names.join(' ou ')}`);
+}
+
+
 class DimensionProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
     return PARAMS.map((name, i) => ({ name, defaultValue: PARAM_DEFAULTS[i], automationRate: 'k-rate' }));
@@ -20,11 +30,11 @@ class DimensionProcessor extends AudioWorkletProcessor {
           const paramId = msg.paramId | 0;
           const value = Number(msg.value);
           if (paramId >= 0 && paramId < this.lastParams.length) this.lastParams[paramId] = value;
-          this.wasmInstance.exports._DimensionWasm_SetParam(paramId, value);
+          getExportFn(this.wasmInstance, ['_DimensionWasm_SetParam', 'DimensionWasm_SetParam'])(paramId, value);
         }
-        else if (msg.type === 'setMode' && this.wasmInstance) this.wasmInstance.exports._DimensionWasm_SetMode(msg.mode | 0);
+        else if (msg.type === 'setMode' && this.wasmInstance) getExportFn(this.wasmInstance, ['_DimensionWasm_SetMode', 'DimensionWasm_SetMode'])(msg.mode | 0);
         else if (msg.type === 'setBypass') this.bypass = !!msg.value;
-        else if (msg.type === 'reset' && this.wasmInstance) this.wasmInstance.exports._DimensionWasm_Reset();
+        else if (msg.type === 'reset' && this.wasmInstance) getExportFn(this.wasmInstance, ['_DimensionWasm_Reset', 'DimensionWasm_Reset'])();
       } catch (err) {
         this.port.postMessage({ type: 'error', message: err?.message || String(err), requestId: msg.requestId ?? null });
       }
@@ -52,7 +62,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.freeHeapBuffers();
     this.heap = new Float32Array(this.wasmInstance.exports.memory.buffer);
     this.lastParams = Array(PARAMS.length).fill(NaN);
-    this.wasmInstance.exports._DimensionWasm_Init(sr);
+    getExportFn(this.wasmInstance, ['_DimensionWasm_Init', 'DimensionWasm_Init'])(sr);
     this.ensureCapacity(this.maxRenderFrames);
     this.ready = true;
     this.port.postMessage({ type: 'WASM_READY', requestId: requestId ?? null });
@@ -64,7 +74,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
       const value = parameters[PARAMS[i]]?.[0] ?? this.lastParams[i];
       if (!Object.is(value, this.lastParams[i])) {
         this.lastParams[i] = value;
-        this.wasmInstance.exports._DimensionWasm_SetParam(i, value);
+        getExportFn(this.wasmInstance, ['_DimensionWasm_SetParam', 'DimensionWasm_SetParam'])(i, value);
       }
     }
   }
@@ -103,7 +113,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
         heap.fill(0, inRPtr, inRPtr + frames);
     }
 
-    this.wasmInstance.exports._DimensionWasm_Process(this.ptrs.inPtrL,this.ptrs.inPtrR,this.ptrs.outPtrL,this.ptrs.outPtrR,frames,this.bypass ? 1 : 0);
+    getExportFn(this.wasmInstance, ['_DimensionWasm_Process', 'DimensionWasm_Process'])(this.ptrs.inPtrL,this.ptrs.inPtrR,this.ptrs.outPtrL,this.ptrs.outPtrR,frames,this.bypass ? 1 : 0);
 
     // Copy out of wasm memory explicitly
     const outLPtr = this.ptrs.outPtrL >> 2;
