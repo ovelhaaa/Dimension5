@@ -43,15 +43,22 @@ export function createEngine(setStatus) {
   let ctx = null; let node = null; let sourceNode = null; let loadedBuffer = null;
   let bypass = false; let repeat = true; let currentMode = 0; let initCounter = 0;
   const paramState = new Map();
-  let wasmModuleCache = null;
+  let wasmBytesPromise = null;
   let initPromise = null;
 
-  async function loadWasmModule() {
-    if (wasmModuleCache) return wasmModuleCache;
-    const response = await fetch(WASM_BIN_PATH);
-    if (!response.ok) throw new Error(`WASM bin indisponível (${response.status}) em ${WASM_BIN_PATH}`);
-    wasmModuleCache = await WebAssembly.compile(await response.arrayBuffer());
-    return wasmModuleCache;
+  async function loadWasmBytes() {
+    if (wasmBytesPromise) return wasmBytesPromise;
+    wasmBytesPromise = (async () => {
+      try {
+        const response = await fetch(WASM_BIN_PATH);
+        if (!response.ok) throw new Error(`WASM bin indisponível (${response.status}) em ${WASM_BIN_PATH}`);
+        return await response.arrayBuffer();
+      } catch (err) {
+        wasmBytesPromise = null;
+        throw err;
+      }
+    })();
+    return wasmBytesPromise;
   }
 
   function applyStateToNode(targetNode) {
@@ -66,7 +73,7 @@ export function createEngine(setStatus) {
     }
   }
 
-  function waitForReady(targetNode, requestId, wasmModule, timeoutMs = WORKLET_INIT_TIMEOUT_MS) {
+  function waitForReady(targetNode, requestId, wasmBytes, timeoutMs = WORKLET_INIT_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         targetNode.port.onmessage = null;
@@ -78,13 +85,13 @@ export function createEngine(setStatus) {
         if (ev.data?.type === 'error') { clearTimeout(timeout); targetNode.port.onmessage = null; reject(new Error(ev.data.message)); }
       };
       targetNode.port.onmessage = handler;
-      targetNode.port.postMessage({ type: 'init', sampleRate: targetNode.context.sampleRate, wasmModule, requestId });
+      targetNode.port.postMessage({ type: 'init', sampleRate: targetNode.context.sampleRate, wasmBytes, requestId });
     });
   }
 
 
 
-  async function initializeWorkletNode(targetContext, wasmModule) {
+  async function initializeWorkletNode(targetContext, wasmBytes) {
     initCounter += 1;
     const requestId = `main-${initCounter}`;
     const localNode = new AudioWorkletNode(targetContext, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
@@ -93,7 +100,7 @@ export function createEngine(setStatus) {
       setStatus('erro interno no AudioWorklet (ver console)');
     };
     try {
-      await waitForReady(localNode, requestId, wasmModule, WORKLET_INIT_TIMEOUT_MS);
+      await waitForReady(localNode, requestId, wasmBytes, WORKLET_INIT_TIMEOUT_MS);
       return localNode;
     } catch (err) {
       try { localNode.port.onmessage = null; } catch (_) {}
@@ -117,11 +124,11 @@ export function createEngine(setStatus) {
           await ctx.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
         }
 
-        const wasmModule = await loadWasmModule();
+        const wasmBytes = await loadWasmBytes();
 
         if (node) return;
 
-        localNode = await initializeWorkletNode(ctx, wasmModule);
+        localNode = await initializeWorkletNode(ctx, wasmBytes);
 
         // Re-check after async setup in case another overlapping ensureAudio already won initialization.
         if (node) {
@@ -177,14 +184,14 @@ export function createEngine(setStatus) {
     toggleRepeat() { repeat = !repeat; return repeat; },
     async renderOffline() {
       if (!loadedBuffer) return null;
-      const wasmModule = await loadWasmModule();
+      const wasmBytes = await loadWasmBytes();
       const offline = new OfflineAudioContext({ numberOfChannels: 2, length: loadedBuffer.length, sampleRate: loadedBuffer.sampleRate });
       await offline.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
       const offNode = new AudioWorkletNode(offline, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
       offNode.onprocessorerror = (e) => console.error('Offline AudioWorklet processor error:', e);
       offNode.connect(offline.destination);
       const requestId = `offline-${++initCounter}`;
-      await waitForReady(offNode, requestId, wasmModule);
+      await waitForReady(offNode, requestId, wasmBytes);
       applyStateToNode(offNode);
       const src = offline.createBufferSource(); src.buffer = loadedBuffer; src.connect(offNode); src.start(0);
       const rendered = await offline.startRendering();

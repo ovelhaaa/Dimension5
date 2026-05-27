@@ -15,7 +15,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.port.onmessage = async (event) => {
       const msg = event.data || {};
       try {
-        if (msg.type === 'init') await this.initWasm(msg.sampleRate || sampleRate, msg.requestId, msg.wasmModule);
+        if (msg.type === 'init') await this.initWasm(msg.sampleRate || sampleRate, msg.requestId, msg.wasmBytes);
         else if (msg.type === 'setParam' && this.wasmInstance) {
           const paramId = msg.paramId | 0;
           const value = Number(msg.value);
@@ -34,11 +34,12 @@ class DimensionProcessor extends AudioWorkletProcessor {
   freeHeapBuffers() { if (!this.wasmInstance || !this.ptrs) return; Object.values(this.ptrs).forEach((p) => this.wasmInstance.exports._free(p)); this.ptrs = null; this.maxFrames = 0; }
   ensureCapacity(frames) { if (!this.wasmInstance || (this.ptrs && this.maxFrames >= frames)) return; this.freeHeapBuffers(); const b = frames * 4; this.ptrs = { inPtrL:this.wasmInstance.exports._malloc(b), inPtrR:this.wasmInstance.exports._malloc(b), outPtrL:this.wasmInstance.exports._malloc(b), outPtrR:this.wasmInstance.exports._malloc(b)}; this.maxFrames = frames; }
 
-  async initWasm(sr, requestId, wasmModule) {
+  async initWasm(sr, requestId, wasmBytes) {
     this.ready = false;
     if (!this.wasmInstance) {
       if (!this.modulePromise) {
-        this.modulePromise = WebAssembly.instantiate(wasmModule);
+        if (!wasmBytes) throw new Error('WASM bytes ausentes na inicialização');
+        this.modulePromise = WebAssembly.instantiate(wasmBytes);
       }
       try {
         const instantiated = await this.modulePromise;
