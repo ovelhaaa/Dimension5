@@ -43,15 +43,22 @@ export function createEngine(setStatus) {
   let ctx = null; let node = null; let sourceNode = null; let loadedBuffer = null;
   let bypass = false; let repeat = true; let currentMode = 0; let initCounter = 0;
   const paramState = new Map();
-  let wasmBytesCache = null;
+  let wasmBytesPromise = null;
   let initPromise = null;
 
   async function loadWasmBytes() {
-    if (wasmBytesCache) return wasmBytesCache;
-    const response = await fetch(WASM_BIN_PATH);
-    if (!response.ok) throw new Error(`WASM bin indisponível (${response.status}) em ${WASM_BIN_PATH}`);
-    wasmBytesCache = await response.arrayBuffer();
-    return wasmBytesCache;
+    if (wasmBytesPromise) return wasmBytesPromise;
+    wasmBytesPromise = (async () => {
+      try {
+        const response = await fetch(WASM_BIN_PATH);
+        if (!response.ok) throw new Error(`WASM bin indisponível (${response.status}) em ${WASM_BIN_PATH}`);
+        return await response.arrayBuffer();
+      } catch (err) {
+        wasmBytesPromise = null;
+        throw err;
+      }
+    })();
+    return wasmBytesPromise;
   }
 
   function applyStateToNode(targetNode) {
