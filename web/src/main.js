@@ -55,6 +55,10 @@ renderBtn.addEventListener('click', async () => {
   try {
     statusEl.textContent = 'renderizando offline...';
     const blob = await engine.renderOffline();
+    if (!blob) {
+      statusEl.textContent = 'erro no offline render: Nenhum arquivo carregado';
+      return;
+    }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'dimension5-offline.wav';

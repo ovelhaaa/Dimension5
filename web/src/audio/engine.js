@@ -20,7 +20,6 @@ const PARAMS = {
 const PARAM_NAMES = Object.keys(PARAMS);
 const hasOwn = Object.prototype.hasOwnProperty;
 const WORKLET_INIT_TIMEOUT_MS = 20000;
-const MAX_WORKLET_INIT_RETRIES = 1;
 
 function encodeWavBlob(left, right, sampleRate) { /* unchanged */
   const frames = left.length; const channels = 2; const bytesPerSample = 2;
@@ -75,7 +74,7 @@ export function createEngine(setStatus) {
       }, timeoutMs);
       const handler = (ev) => {
         if (ev.data?.requestId !== requestId) return;
-        if (ev.data?.type === 'ready') { clearTimeout(timeout); targetNode.port.onmessage = null; resolve(); }
+        if (ev.data?.type === 'WASM_READY') { clearTimeout(timeout); targetNode.port.onmessage = null; resolve(); }
         if (ev.data?.type === 'error') { clearTimeout(timeout); targetNode.port.onmessage = null; reject(new Error(ev.data.message)); }
       };
       targetNode.port.onmessage = handler;
@@ -86,38 +85,22 @@ export function createEngine(setStatus) {
 
 
   async function initializeWorkletNode(targetContext, wasmModule) {
-    let attempt = 0;
-    let timeoutMs = WORKLET_INIT_TIMEOUT_MS;
-    let lastError = null;
-
-    while (attempt <= MAX_WORKLET_INIT_RETRIES) {
-      const attemptNumber = attempt + 1;
-      initCounter += 1;
-      const requestId = `main-${initCounter}`;
-      let localNode = null;
-
-      try {
-        localNode = new AudioWorkletNode(targetContext, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
-        await waitForReady(localNode, requestId, wasmModule, timeoutMs);
-        return localNode;
-      } catch (err) {
-        lastError = err;
-        if (localNode) {
-          try { localNode.port.onmessage = null; } catch (_) {}
-          try { localNode.port.close(); } catch (_) {}
-          try { localNode.disconnect(); } catch (_) {}
-        }
-
-        if (attempt === MAX_WORKLET_INIT_RETRIES) break;
-
-        timeoutMs *= 1.5;
-        setStatus(`inicialização lenta (${attemptNumber}/${MAX_WORKLET_INIT_RETRIES + 1}), tentando novamente...`);
-      }
-
-      attempt += 1;
+    initCounter += 1;
+    const requestId = `main-${initCounter}`;
+    const localNode = new AudioWorkletNode(targetContext, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+    localNode.onprocessorerror = (e) => {
+      console.error('AudioWorklet processor error:', e);
+      setStatus('erro interno no AudioWorklet (ver console)');
+    };
+    try {
+      await waitForReady(localNode, requestId, wasmModule, WORKLET_INIT_TIMEOUT_MS);
+      return localNode;
+    } catch (err) {
+      try { localNode.port.onmessage = null; } catch (_) {}
+      try { localNode.port.close(); } catch (_) {}
+      try { localNode.disconnect(); } catch (_) {}
+      throw err;
     }
-
-    throw new Error(`Falha ao inicializar AudioWorklet/WASM após ${MAX_WORKLET_INIT_RETRIES + 1} tentativas: ${lastError?.message || 'erro desconhecido'}`);
   }
 
   async function ensureAudio() {
@@ -193,11 +176,12 @@ export function createEngine(setStatus) {
     toggleBypass() { bypass = !bypass; if (node) node.port.postMessage({ type: 'setBypass', value: bypass }); return bypass; },
     toggleRepeat() { repeat = !repeat; return repeat; },
     async renderOffline() {
-      if (!loadedBuffer) throw new Error('Nenhum arquivo carregado');
+      if (!loadedBuffer) return null;
       const wasmModule = await loadWasmModule();
       const offline = new OfflineAudioContext({ numberOfChannels: 2, length: loadedBuffer.length, sampleRate: loadedBuffer.sampleRate });
       await offline.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
       const offNode = new AudioWorkletNode(offline, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+      offNode.onprocessorerror = (e) => console.error('Offline AudioWorklet processor error:', e);
       offNode.connect(offline.destination);
       const requestId = `offline-${++initCounter}`;
       await waitForReady(offNode, requestId, wasmModule);

@@ -41,7 +41,8 @@ class DimensionProcessor extends AudioWorkletProcessor {
         this.modulePromise = WebAssembly.instantiate(wasmModule);
       }
       try {
-        this.wasmInstance = await this.modulePromise;
+        const instantiated = await this.modulePromise;
+        this.wasmInstance = instantiated?.instance ?? instantiated;
       } catch (err) {
         this.modulePromise = null;
         throw err;
@@ -53,7 +54,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.wasmInstance.exports._DimensionWasm_Init(sr);
     this.ensureCapacity(this.maxRenderFrames);
     this.ready = true;
-    this.port.postMessage({ type: 'ready', requestId: requestId ?? null });
+    this.port.postMessage({ type: 'WASM_READY', requestId: requestId ?? null });
   }
 
   syncParams(parameters) {
