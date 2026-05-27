@@ -92,16 +92,21 @@ export function createEngine(setStatus) {
 
     while (attempt <= MAX_WORKLET_INIT_RETRIES) {
       const attemptNumber = attempt + 1;
-      const requestId = `main-${initCounter + attemptNumber}`;
-      const localNode = new AudioWorkletNode(targetContext, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+      initCounter += 1;
+      const requestId = `main-${initCounter}`;
+      let localNode = null;
 
       try {
+        localNode = new AudioWorkletNode(targetContext, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
         await waitForReady(localNode, requestId, wasmModule, timeoutMs);
-        initCounter += attemptNumber;
         return localNode;
       } catch (err) {
         lastError = err;
-        try { localNode.disconnect(); } catch (_) {}
+        if (localNode) {
+          try { localNode.port.onmessage = null; } catch (_) {}
+          try { localNode.port.close(); } catch (_) {}
+          try { localNode.disconnect(); } catch (_) {}
+        }
 
         if (attempt === MAX_WORKLET_INIT_RETRIES) break;
 
