@@ -92,8 +92,15 @@ export function createEngine(setStatus) {
       console.error('AudioWorklet processor error:', e);
       setStatus('erro interno no AudioWorklet (ver console)');
     };
-    await waitForReady(localNode, requestId, wasmModule, WORKLET_INIT_TIMEOUT_MS);
-    return localNode;
+    try {
+      await waitForReady(localNode, requestId, wasmModule, WORKLET_INIT_TIMEOUT_MS);
+      return localNode;
+    } catch (err) {
+      try { localNode.port.onmessage = null; } catch (_) {}
+      try { localNode.port.close(); } catch (_) {}
+      try { localNode.disconnect(); } catch (_) {}
+      throw err;
+    }
   }
 
   async function ensureAudio() {
