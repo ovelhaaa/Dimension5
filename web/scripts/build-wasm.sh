@@ -10,6 +10,9 @@ emcc \
   "${ROOT_DIR}/src/dimension_wasm_bridge.c" \
   -I"${ROOT_DIR}/src" \
   -O3 \
+  -s AUDIO_WORKLET=1 \
+  -s WASM_WORKERS=1 \
+  -s EXPORT_ES6=1 \
   -s STANDALONE_WASM=1 \
   -s EXPORTED_FUNCTIONS='["_malloc","_free","_DimensionWasm_Init","_DimensionWasm_Reset","_DimensionWasm_SetMode","_DimensionWasm_SetParam","_DimensionWasm_Process"]' \
   --no-entry \
