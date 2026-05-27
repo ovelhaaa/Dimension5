@@ -19,6 +19,8 @@ const PARAMS = {
 
 const PARAM_NAMES = Object.keys(PARAMS);
 const hasOwn = Object.prototype.hasOwnProperty;
+const WORKLET_INIT_TIMEOUT_MS = 20000;
+const MAX_WORKLET_INIT_RETRIES = 1;
 
 function encodeWavBlob(left, right, sampleRate) { /* unchanged */
   const frames = left.length; const channels = 2; const bytesPerSample = 2;
@@ -65,12 +67,12 @@ export function createEngine(setStatus) {
     }
   }
 
-  function waitForReady(targetNode, requestId, wasmModule) {
+  function waitForReady(targetNode, requestId, wasmModule, timeoutMs = WORKLET_INIT_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         targetNode.port.onmessage = null;
         reject(new Error('Timeout inicializando AudioWorklet/WASM'));
-      }, 12000);
+      }, timeoutMs);
       const handler = (ev) => {
         if (ev.data?.requestId !== requestId) return;
         if (ev.data?.type === 'ready') { clearTimeout(timeout); targetNode.port.onmessage = null; resolve(); }
@@ -79,6 +81,38 @@ export function createEngine(setStatus) {
       targetNode.port.onmessage = handler;
       targetNode.port.postMessage({ type: 'init', sampleRate: targetNode.context.sampleRate, wasmModule, requestId });
     });
+  }
+
+
+
+  async function initializeWorkletNode(targetContext, wasmModule) {
+    let attempt = 0;
+    let timeoutMs = WORKLET_INIT_TIMEOUT_MS;
+    let lastError = null;
+
+    while (attempt <= MAX_WORKLET_INIT_RETRIES) {
+      const attemptNumber = attempt + 1;
+      const requestId = `main-${initCounter + attemptNumber}`;
+      const localNode = new AudioWorkletNode(targetContext, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+
+      try {
+        await waitForReady(localNode, requestId, wasmModule, timeoutMs);
+        initCounter += attemptNumber;
+        return localNode;
+      } catch (err) {
+        lastError = err;
+        try { localNode.disconnect(); } catch (_) {}
+
+        if (attempt === MAX_WORKLET_INIT_RETRIES) break;
+
+        timeoutMs *= 1.5;
+        setStatus(`inicialização lenta (${attemptNumber}/${MAX_WORKLET_INIT_RETRIES + 1}), tentando novamente...`);
+      }
+
+      attempt += 1;
+    }
+
+    throw new Error(`Falha ao inicializar AudioWorklet/WASM após ${MAX_WORKLET_INIT_RETRIES + 1} tentativas: ${lastError?.message || 'erro desconhecido'}`);
   }
 
   async function ensureAudio() {
@@ -99,10 +133,7 @@ export function createEngine(setStatus) {
 
         if (node) return;
 
-        localNode = new AudioWorkletNode(ctx, 'dimension-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
-        const requestId = `main-${initCounter + 1}`;
-        await waitForReady(localNode, requestId, wasmModule);
-        initCounter += 1;
+        localNode = await initializeWorkletNode(ctx, wasmModule);
 
         // Re-check after async setup in case another overlapping ensureAudio already won initialization.
         if (node) {
