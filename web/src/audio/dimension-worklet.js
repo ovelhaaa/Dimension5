@@ -72,7 +72,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     const outL = output[0]; const outR = output[1];
     if (!this.ready || !this.wasmInstance) { outL.fill(0); outR.fill(0); return true; }
     this.syncParams(parameters);
-    const inL = input?.[0] || this.silence; const inR = input?.[1] || inL; const frames = inL.length;
+    const frames = outL.length;
     if (frames > this.maxFrames) {
       outL.fill(0); outR.fill(0);
       this.port.postMessage({ type: 'error', message: `bloco de áudio maior que capacidade pré-alocada (${frames} > ${this.maxFrames})` });
@@ -84,12 +84,21 @@ class DimensionProcessor extends AudioWorkletProcessor {
     }
     const heap = this.heap;
 
-    // Copy into wasm memory explicitly to avoid dynamic allocation via set/subarray when passing typed arrays
+    const inL = input?.[0];
+    const inR = input?.[1] || inL;
     const inLPtr = this.ptrs.inPtrL >> 2;
     const inRPtr = this.ptrs.inPtrR >> 2;
-    for (let i = 0; i < frames; i++) {
-        heap[inLPtr + i] = inL[i];
-        heap[inRPtr + i] = inR[i];
+
+    if (inL) {
+        heap.set(inL, inLPtr);
+    } else {
+        heap.fill(0, inLPtr, inLPtr + frames);
+    }
+
+    if (inR) {
+        heap.set(inR, inRPtr);
+    } else {
+        heap.fill(0, inRPtr, inRPtr + frames);
     }
 
     this.wasmInstance.exports.DimensionWasm_Process(this.ptrs.inPtrL,this.ptrs.inPtrR,this.ptrs.outPtrL,this.ptrs.outPtrR,frames,this.bypass ? 1 : 0);
