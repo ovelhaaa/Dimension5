@@ -83,12 +83,12 @@
         <div class="wb-col"><div class="col-label">MODO</div><div class="mode-grid" id="modeGrid"></div><button class="custom-btn" id="customBtn">CUSTOM</button></div>
         <div class="wb-col">
           <div class="col-label">SINAL</div>
-          <div class="param-col"><span class="param-name">SELECTOR DE MODO LEGADO</span><select id="modeSelect" class="t-btn"><option value="0">I</option><option value="1">II</option><option value="2">III</option><option value="3">IV</option><option value="4">CUSTOM</option></select></div>
+          <div class="param-col"><label class="param-name" id="modeSelectLabel" for="modeSelect">SELECTOR DE MODO LEGADO</label><select id="modeSelect" class="t-btn" aria-labelledby="modeSelectLabel"><option value="0">I</option><option value="1">II</option><option value="2">III</option><option value="3">IV</option><option value="4">CUSTOM</option></select></div>
         </div>
       </div>
-      <div class="custom-params" id="customParams"></div>
+      <div class="custom-params" id="customParams" role="region" aria-label="Parâmetros customizados" aria-live="polite"></div>
       <div class="transport"><span class="t-label">TRANSPORTE</span><button class="t-btn" id="playBtn">▶ PLAY</button><button class="t-btn" id="stopBtn">■ STOP</button><button class="t-btn" id="loopBtn">↻ LOOP</button><button class="t-btn bypass" id="bypassBtn">BYPASS</button><div class="t-spacer"></div><button class="t-btn" id="exportBtn">↓ EXPORT WAV</button></div>
-      <div class="drop-zone" id="dropZone" tabindex="0"><div class="drop-main">⬆ ARRASTE UM ARQUIVO WAV OU MP3</div><div class="drop-file" id="dropFile"></div><input id="audio-file" type="file" accept="audio/wav,audio/mp3,audio/*" hidden /></div>
+      <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-labelledby="dropMain" aria-describedby="dropFile" aria-controls="audio-file"><div class="drop-main" id="dropMain">⬆ ARRASTE UM ARQUIVO WAV OU MP3</div><div class="drop-file" id="dropFile" aria-live="polite">nenhum arquivo selecionado</div><input id="audio-file" type="file" accept="audio/wav,audio/mp3,audio/*" hidden /></div>
       <div class="log-wrap"><div class="log-label">LOG</div><div class="log-lines" id="logLines"></div></div>
     </div>
     <script type="module" src="/src/main.js"></script>

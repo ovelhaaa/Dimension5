@@ -18,6 +18,7 @@ const params = [
 ];
 
 const customContainer = $('customParams');
+const fileInput = $('audio-file');
 for (const [name, min, max, step, value] of params) {
   const col = document.createElement('label');
   col.className = 'param-col';
@@ -36,6 +37,7 @@ for (const [name, min, max, step, value] of params) {
 for (const [label, mode] of [['I', 0], ['II', 1], ['III', 2], ['IV', 3]]) {
   const btn = document.createElement('button');
   btn.className = 'mode-btn';
+  if (mode === 0) btn.classList.add('on');
   btn.dataset.mode = String(mode);
   btn.innerHTML = '<div class="mode-led"></div><span class="mode-numeral" aria-hidden="true"></span>';
   btn.title = `Modo ${label}`;
@@ -52,22 +54,21 @@ for (const [label, mode] of [['I', 0], ['II', 1], ['III', 2], ['IV', 3]]) {
 
 const customBtn = $('customBtn');
 customBtn.addEventListener('click', () => {
-  const on = customBtn.classList.toggle('on');
-  $('customParams').classList.toggle('visible', on);
-  if (on) {
-    document.querySelectorAll('.mode-btn').forEach((b) => b.classList.remove('on'));
-    $('modeSelect').value = '4';
-    engine.setMode(4);
-    addLog('modo: CUSTOM');
-  } else {
-    addLog('custom desligado');
-  }
+  if (customBtn.classList.contains('on')) return;
+  activateCustom();
+  engine.setMode(4);
+  addLog('modo: CUSTOM');
 });
 
 $('modeSelect').addEventListener('change', () => {
   const mode = Number($('modeSelect').value);
   engine.setMode(mode);
-  if (mode !== 4) deactivateCustom();
+  if (mode === 4) {
+    activateCustom();
+  } else {
+    deactivateCustom();
+  }
+  highlightGridButton(mode);
   addLog(`modo legado: ${mode === 4 ? 'CUSTOM' : mode + 1}`);
 });
 
@@ -118,30 +119,63 @@ $('exportBtn').addEventListener('click', async () => {
   }
 });
 
-let ready = false;
-async function ensureReady() {
-  if (ready) return;
-  await engine.initFromGesture();
-  ready = true;
-  statusLed.classList.add('ready');
-  statusText.textContent = 'PRONTO';
+let readyPromise = null;
+function ensureReady() {
+  if (!readyPromise) {
+    readyPromise = (async () => {
+      await engine.initFromGesture();
+      statusLed.classList.add('ready');
+      statusText.textContent = 'PRONTO';
+    })();
+  }
+  return readyPromise;
 }
 
 async function loadFromFile(file) {
   if (!file) return;
-  await ensureReady();
-  await engine.loadAudioFile(file);
-  $('dropFile').textContent = file.name;
-  addLog(`arquivo: ${file.name}`);
+  try {
+    await ensureReady();
+    await engine.loadAudioFile(file);
+    $('dropFile').textContent = file.name;
+    addLog(`arquivo: ${file.name}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    $('dropFile').textContent = 'falha ao carregar arquivo';
+    addLog(`erro ao carregar arquivo: ${msg}`);
+  }
 }
 
-$('audio-file').addEventListener('change', async (e) => loadFromFile(e.target.files?.[0]));
+fileInput.addEventListener('click', (e) => e.stopPropagation());
+fileInput.addEventListener('change', async (e) => {
+  await loadFromFile(e.target.files?.[0]);
+});
 const dropZone = $('dropZone');
 dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('over'); });
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
 dropZone.addEventListener('drop', async (e) => { e.preventDefault(); dropZone.classList.remove('over'); await loadFromFile(e.dataTransfer?.files?.[0]); });
-dropZone.addEventListener('click', () => $('audio-file').click());
-dropZone.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') $('audio-file').click(); });
+dropZone.addEventListener('click', (e) => {
+  if (e.target === fileInput) return;
+  fileInput.click();
+});
+dropZone.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    fileInput.click();
+  }
+});
+
+function highlightGridButton(mode) {
+  document.querySelectorAll('.mode-btn').forEach((b) => {
+    b.classList.toggle('on', Number(b.dataset.mode) === mode && mode !== 4);
+  });
+}
+
+function activateCustom() {
+  customBtn.classList.add('on');
+  $('customParams').classList.add('visible');
+  $('modeSelect').value = '4';
+  highlightGridButton(4);
+}
 
 function deactivateCustom() {
   customBtn.classList.remove('on');
