@@ -5,50 +5,92 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Dimension5 Workbench</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2710%27 fill=%27%23111%27/%3E%3Ctext x=%2732%27 y=%2742%27 font-size=%2732%27 text-anchor=%27middle%27 fill=%27%23f9a826%27%3ED5%3C/text%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@500;600&display=swap" rel="stylesheet" />
     <style>
-      :root { --bg:#0f1115; --panel:#1a1d23; --accent:#f9a826; --text:#e7e8ea; --muted:#8f96a3; }
-      body { margin:0; font-family:Inter,system-ui,sans-serif; background:radial-gradient(circle at top,#1d222b,#0b0d10 55%); color:var(--text); }
-      .rack { max-width:1100px; margin:24px auto; padding:20px; background:linear-gradient(180deg,#2a2f39,#1a1d23); border:1px solid #3a404f; border-radius:16px; box-shadow:0 16px 40px #0008; }
-      h1 { margin:0 0 4px; letter-spacing:.05em; }
-      .sub { color:var(--muted); margin-bottom:16px; }
-      .top { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
-      .panel { background:var(--panel); border:1px solid #323846; border-radius:12px; padding:14px; }
-      .btns { display:flex; gap:8px; flex-wrap:wrap; }
-      button, select, input[type=file] { background:#11151b; color:var(--text); border:1px solid #475066; border-radius:9px; padding:8px 12px; }
-      button.active, button:hover { border-color:var(--accent); }
-      #drop-zone { margin-top:10px; border:2px dashed #4b5261; border-radius:10px; padding:16px; text-align:center; color:var(--muted); }
-      #drop-zone.dragging { border-color:var(--accent); color:var(--text); }
-      #controls { margin-top:16px; display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
-      .control { display:grid; gap:6px; background:#10141b; border:1px solid #2f3544; border-radius:10px; padding:10px; }
-      .control span { text-transform:uppercase; font-size:12px; color:var(--muted); }
-      .status { margin-top:12px; background:#0e1218; border:1px solid #2f3544; border-radius:10px; padding:10px; color:#d6dbe5; }
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      :root {
+        --bg:#0c0b09; --panel:#131109; --surface:#181510; --rail:#252018;
+        --btn-idle:#1a1710; --btn-hover:#221e14; --led-off:#1c1006; --led-glow:#e8a030;
+        --led-dim:#7a4c0a; --text-hi:#d0c8a8; --text-mid:#888060; --text-dim:#453e2c;
+        --accent:#d98c18; --green:#3a9858; --green-dim:#1e4a2c; --border-dark:#0e0c08;
+        --border-mid:#252018; --border-light:#38301e;
+      }
+      body {
+        background: var(--bg); color: var(--text-hi); font-family: 'Share Tech Mono', monospace;
+        min-height: 100vh; display:flex; justify-content:center; padding:2.5rem 1rem 4rem;
+      }
+      .wb { width:100%; max-width: 840px; background:var(--panel); border:1px solid var(--border-mid); }
+      .wb-header { display:flex; align-items:center; justify-content:space-between; padding:1.25rem 1.75rem 1rem; border-bottom:1px solid var(--rail); background:var(--surface); }
+      .logo-name { font-family:'Rajdhani',sans-serif; font-size:24px; font-weight:600; letter-spacing:.18em; color:var(--led-glow); }
+      .logo-sub { font-size:9px; letter-spacing:.22em; color:var(--text-dim); }
+      .status-strip { display:flex; align-items:center; gap:10px; }
+      .status-led { width:9px; height:9px; border-radius:50%; background:var(--led-off); border:1px solid #0e0804; }
+      .status-led.ready { background:var(--green); }
+      .status-text { font-size:10px; letter-spacing:.14em; color:var(--text-dim); }
+      .status-led.ready + .status-text { color: var(--green); }
+      .wb-main { display:grid; grid-template-columns:1fr 1fr; }
+      .wb-col { padding:1.25rem 1.75rem 1.5rem; }
+      .wb-col + .wb-col { border-left:1px solid var(--rail); }
+      .col-label { font-size:9px; letter-spacing:.28em; color:var(--text-dim); margin-bottom:1rem; }
+      .mode-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:10px; }
+      .mode-btn { aspect-ratio:1; background:var(--btn-idle); border:1px solid var(--border-mid); cursor:pointer; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; }
+      .mode-btn:hover { background:var(--btn-hover); border-color:var(--border-light); }
+      .mode-led { width:8px; height:8px; border-radius:50%; background:var(--led-off); border:1px solid #0e0600; }
+      .mode-btn.on .mode-led { background:var(--led-glow); }
+      .mode-numeral { font-family:'Rajdhani',sans-serif; font-size:20px; font-weight:600; color:var(--text-dim); }
+      .mode-btn.on .mode-numeral { color:var(--led-glow); }
+      .mode-btn[data-mode="0"] .mode-numeral::after { content:'I'; }
+      .mode-btn[data-mode="1"] .mode-numeral::after { content:'II'; }
+      .mode-btn[data-mode="2"] .mode-numeral::after { content:'III'; }
+      .mode-btn[data-mode="3"] .mode-numeral::after { content:'IV'; }
+      .custom-btn,.t-btn { background:var(--btn-idle); border:1px solid var(--border-mid); color:var(--text-mid); font-family:'Share Tech Mono',monospace; cursor:pointer; }
+      .custom-btn { width:100%; padding:9px; font-size:10px; letter-spacing:.2em; color:var(--text-dim); }
+      .custom-btn.on,.t-btn.on { color:var(--led-glow); border-color:var(--led-dim); }
+      .custom-params { display:none; grid-template-columns:repeat(4,1fr); gap:1rem; padding:1rem 1.75rem 1.25rem; border-top:1px solid var(--rail); background:var(--surface); }
+      .custom-params.visible { display:grid; }
+      .param-col { display:flex; flex-direction:column; gap:5px; }
+      .param-name { font-size:9px; letter-spacing:.18em; color:var(--text-dim); }
+      .param-col input[type=range] { width:100%; accent-color:var(--accent); }
+      .param-val { font-size:10px; color:var(--led-glow); text-align:right; }
+      .transport { display:flex; align-items:center; gap:6px; padding:.85rem 1.75rem; border-top:1px solid var(--rail); border-bottom:1px solid var(--rail); background:var(--surface); flex-wrap:wrap; }
+      .t-label { font-size:9px; letter-spacing:.25em; color:var(--text-dim); margin-right:6px; }
+      .t-btn { padding:5px 13px; font-size:10px; letter-spacing:.1em; }
+      .t-btn.bypass.on { color:var(--green); border-color:var(--green-dim); }
+      .t-spacer { flex:1; }
+      .drop-zone { margin:1.25rem 1.75rem; border:1px dashed var(--border-mid); padding:1.5rem; text-align:center; cursor:pointer; }
+      .drop-zone.over { border-color:var(--led-dim); background:#18130a; }
+      .drop-main { font-size:10px; letter-spacing:.15em; color:var(--text-dim); }
+      .drop-file { margin-top:5px; font-size:11px; color:var(--led-glow); min-height:1em; }
+      .log-wrap { border-top:1px solid var(--rail); padding:.75rem 1.75rem 1rem; }
+      .log-label { font-size:9px; letter-spacing:.28em; color:var(--text-dim); margin-bottom:6px; }
+      .log-lines { font-size:10px; line-height:1.9; color:var(--text-mid); max-height:80px; overflow-y:auto; }
+      .log-line::before { content:'> '; color:var(--led-dim); }
+      @media (max-width: 760px) { .wb-main { grid-template-columns:1fr; } .wb-col + .wb-col { border-left:none; border-top:1px solid var(--rail); } .custom-params { grid-template-columns:1fr 1fr; } }
     </style>
   </head>
   <body>
-    <main class="rack">
-      <h1>DIMENSION5 // WEB WORKBENCH</h1>
-      <div class="sub">AudioWorklet + WASM DSP bridge</div>
-      <section class="top">
-        <div class="panel">
-          <div class="btns">
-            <button id="btn-play">Play</button>
-            <button id="btn-stop">Stop</button>
-            <button id="btn-repeat">Loop ON</button>
-            <button id="btn-bypass">Bypass OFF</button>
-            <button id="btn-render">Export WAV (Offline)</button>
-          </div>
-          <div style="margin-top:8px;">Modo:
-            <select id="mode"><option value="0">I</option><option value="1">II</option><option value="2">III</option><option value="3">IV</option><option value="4">Custom</option></select>
-          </div>
+    <div class="wb" role="main">
+      <header class="wb-header">
+        <div class="logo">
+          <div class="logo-name">DIMENSION5</div>
+          <div class="logo-sub">SDD-320 CHORUS EMULATOR · STM32H562 / WASM</div>
         </div>
-        <div class="panel">
-          <input id="audio-file" type="file" accept="audio/wav,audio/mp3,audio/*" />
-          <div id="drop-zone">Arraste WAV/MP3 aqui para processar em tempo real</div>
+        <div class="status-strip"><div class="status-led" id="statusLed"></div><span class="status-text" id="statusText">OFFLINE</span></div>
+      </header>
+      <div class="wb-main">
+        <div class="wb-col"><div class="col-label">MODO</div><div class="mode-grid" id="modeGrid"></div><button class="custom-btn" id="customBtn">CUSTOM</button></div>
+        <div class="wb-col">
+          <div class="col-label">SINAL</div>
+          <div class="param-col"><span class="param-name">SELECTOR DE MODO LEGADO</span><select id="modeSelect" class="t-btn"><option value="0">I</option><option value="1">II</option><option value="2">III</option><option value="3">IV</option><option value="4">CUSTOM</option></select></div>
         </div>
-      </section>
-      <section id="controls"></section>
-      <div id="status" class="status">inicializando...</div>
-    </main>
+      </div>
+      <div class="custom-params" id="customParams"></div>
+      <div class="transport"><span class="t-label">TRANSPORTE</span><button class="t-btn" id="playBtn">▶ PLAY</button><button class="t-btn" id="stopBtn">■ STOP</button><button class="t-btn" id="loopBtn">↻ LOOP</button><button class="t-btn bypass" id="bypassBtn">BYPASS</button><div class="t-spacer"></div><button class="t-btn" id="exportBtn">↓ EXPORT WAV</button></div>
+      <div class="drop-zone" id="dropZone" tabindex="0"><div class="drop-main">⬆ ARRASTE UM ARQUIVO WAV OU MP3</div><div class="drop-file" id="dropFile"></div><input id="audio-file" type="file" accept="audio/wav,audio/mp3,audio/*" hidden /></div>
+      <div class="log-wrap"><div class="log-label">LOG</div><div class="log-lines" id="logLines"></div></div>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
