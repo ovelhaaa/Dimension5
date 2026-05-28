@@ -10,6 +10,13 @@ function getExportFn(instance, names) {
   throw new Error(`Função WASM não encontrada: ${names.join(' ou ')}`);
 }
 
+function resolveAllocatorFns(instance) {
+  return {
+    malloc: getExportFn(instance, ['_malloc', 'malloc']),
+    free: getExportFn(instance, ['_free', 'free'])
+  };
+}
+
 
 class DimensionProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
@@ -20,6 +27,12 @@ class DimensionProcessor extends AudioWorkletProcessor {
     super();
     this.wasmInstance = null; this.ready = false; this.bypass = false; this.ptrs = null; this.maxFrames = 0; this.maxRenderFrames = 2048; this.silence = new Float32Array(this.maxRenderFrames);
     this.modulePromise = null;
+    this.alloc = null;
+    this.fnInit = null;
+    this.fnReset = null;
+    this.fnSetMode = null;
+    this.fnSetParam = null;
+    this.fnProcess = null;
     this.heap = null;
     this.lastParams = Array(PARAMS.length).fill(NaN);
     this.port.onmessage = async (event) => {
@@ -30,19 +43,41 @@ class DimensionProcessor extends AudioWorkletProcessor {
           const paramId = msg.paramId | 0;
           const value = Number(msg.value);
           if (paramId >= 0 && paramId < this.lastParams.length) this.lastParams[paramId] = value;
-          getExportFn(this.wasmInstance, ['_DimensionWasm_SetParam', 'DimensionWasm_SetParam'])(paramId, value);
+          this.fnSetParam(paramId, value);
         }
-        else if (msg.type === 'setMode' && this.wasmInstance) getExportFn(this.wasmInstance, ['_DimensionWasm_SetMode', 'DimensionWasm_SetMode'])(msg.mode | 0);
+        else if (msg.type === 'setMode' && this.wasmInstance) this.fnSetMode(msg.mode | 0);
         else if (msg.type === 'setBypass') this.bypass = !!msg.value;
-        else if (msg.type === 'reset' && this.wasmInstance) getExportFn(this.wasmInstance, ['_DimensionWasm_Reset', 'DimensionWasm_Reset'])();
+        else if (msg.type === 'reset' && this.wasmInstance) this.fnReset();
       } catch (err) {
         this.port.postMessage({ type: 'error', message: err?.message || String(err), requestId: msg.requestId ?? null });
       }
     };
   }
 
-  freeHeapBuffers() { if (!this.wasmInstance || !this.ptrs) return; Object.values(this.ptrs).forEach((p) => this.wasmInstance.exports._free(p)); this.ptrs = null; this.maxFrames = 0; }
-  ensureCapacity(frames) { if (!this.wasmInstance || (this.ptrs && this.maxFrames >= frames)) return; this.freeHeapBuffers(); const b = frames * 4; this.ptrs = { inPtrL:this.wasmInstance.exports._malloc(b), inPtrR:this.wasmInstance.exports._malloc(b), outPtrL:this.wasmInstance.exports._malloc(b), outPtrR:this.wasmInstance.exports._malloc(b)}; this.maxFrames = frames; }
+  freeHeapBuffers() {
+    if (!this.wasmInstance || !this.ptrs || !this.alloc) return;
+    Object.values(this.ptrs).forEach((p) => this.alloc.free(p));
+    this.ptrs = null;
+    this.maxFrames = 0;
+  }
+
+  ensureCapacity(frames) {
+    if (!this.wasmInstance || !this.alloc || (this.ptrs && this.maxFrames >= frames)) return true;
+    this.freeHeapBuffers();
+    const bytes = frames * 4;
+    this.ptrs = {
+      inPtrL: this.alloc.malloc(bytes),
+      inPtrR: this.alloc.malloc(bytes),
+      outPtrL: this.alloc.malloc(bytes),
+      outPtrR: this.alloc.malloc(bytes)
+    };
+    if (!this.ptrs.inPtrL || !this.ptrs.inPtrR || !this.ptrs.outPtrL || !this.ptrs.outPtrR) {
+      this.freeHeapBuffers();
+      throw new Error(`Falha ao alocar buffers WASM para ${frames} frames`);
+    }
+    this.maxFrames = frames;
+    return true;
+  }
 
   async initWasm(sr, requestId, wasmBytes) {
     this.ready = false;
@@ -60,9 +95,15 @@ class DimensionProcessor extends AudioWorkletProcessor {
       }
     }
     this.freeHeapBuffers();
+    this.alloc = resolveAllocatorFns(this.wasmInstance);
+    this.fnInit = getExportFn(this.wasmInstance, ['_DimensionWasm_Init', 'DimensionWasm_Init']);
+    this.fnReset = getExportFn(this.wasmInstance, ['_DimensionWasm_Reset', 'DimensionWasm_Reset']);
+    this.fnSetMode = getExportFn(this.wasmInstance, ['_DimensionWasm_SetMode', 'DimensionWasm_SetMode']);
+    this.fnSetParam = getExportFn(this.wasmInstance, ['_DimensionWasm_SetParam', 'DimensionWasm_SetParam']);
+    this.fnProcess = getExportFn(this.wasmInstance, ['_DimensionWasm_Process', 'DimensionWasm_Process']);
     this.heap = new Float32Array(this.wasmInstance.exports.memory.buffer);
     this.lastParams = Array(PARAMS.length).fill(NaN);
-    getExportFn(this.wasmInstance, ['_DimensionWasm_Init', 'DimensionWasm_Init'])(sr);
+    this.fnInit(sr);
     this.ensureCapacity(this.maxRenderFrames);
     this.ready = true;
     this.port.postMessage({ type: 'WASM_READY', requestId: requestId ?? null });
@@ -74,7 +115,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
       const value = parameters[PARAMS[i]]?.[0] ?? this.lastParams[i];
       if (!Object.is(value, this.lastParams[i])) {
         this.lastParams[i] = value;
-        getExportFn(this.wasmInstance, ['_DimensionWasm_SetParam', 'DimensionWasm_SetParam'])(i, value);
+        this.fnSetParam(i, value);
       }
     }
   }
@@ -113,7 +154,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
         heap.fill(0, inRPtr, inRPtr + frames);
     }
 
-    getExportFn(this.wasmInstance, ['_DimensionWasm_Process', 'DimensionWasm_Process'])(this.ptrs.inPtrL,this.ptrs.inPtrR,this.ptrs.outPtrL,this.ptrs.outPtrR,frames,this.bypass ? 1 : 0);
+    this.fnProcess(this.ptrs.inPtrL,this.ptrs.inPtrR,this.ptrs.outPtrL,this.ptrs.outPtrR,frames,this.bypass ? 1 : 0);
 
     // Copy out of wasm memory explicitly
     const outLPtr = this.ptrs.outPtrL >> 2;
