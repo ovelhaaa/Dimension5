@@ -17,6 +17,13 @@ static inline float dimension_sanitize_sample(float x) {
     return dimension_clampf(x, -2.0f, 2.0f);
 }
 
+static inline float dimension_sanitize_param(float x, float fallback, float lo, float hi) {
+    if (!isfinite(x)) {
+        x = fallback;
+    }
+    return dimension_clampf(x, lo, hi);
+}
+
 static inline float softclip_cubic(float x) {
     const float xc = dimension_clampf(x, -1.0f, 1.0f);
     return xc - (xc * xc * xc) * (1.0f / 3.0f);
@@ -46,6 +53,7 @@ static inline float delay_hermite(const float* buffer, float readPos) {
     return ((c3 * t + c2) * t + c1) * t + c0;
 }
 
+#if DIMENSION_INTERP_MODE == DIMENSION_INTERP_LINEAR
 static inline float delay_linear(const float* buffer, float readPos) {
     const int32_t base = (int32_t)floorf(readPos);
     const float t = readPos - (float)base;
@@ -54,6 +62,9 @@ static inline float delay_linear(const float* buffer, float readPos) {
     return buffer[i0] + t * (buffer[i1] - buffer[i0]);
 }
 
+#endif
+
+#if DIMENSION_INTERP_MODE == DIMENSION_INTERP_LAGRANGE3
 static inline float delay_lagrange3(const float* buffer, float readPos) {
     const int32_t base = (int32_t)floorf(readPos);
     const float t = readPos - (float)base;
@@ -71,6 +82,8 @@ static inline float delay_lagrange3(const float* buffer, float readPos) {
     const float c3 = ((t + 1.0f) * t * (t - 1.0f)) * (1.0f / 6.0f);
     return xm1 * c0 + x0 * c1 + x1 * c2 + x2 * c3;
 }
+
+#endif
 
 static inline float delay_interp(const float* buffer, float readPos) {
 #if DIMENSION_INTERP_MODE == DIMENSION_INTERP_LINEAR
@@ -219,6 +232,21 @@ void Dimension_SetParams(DimensionDSP* d, const DimensionParams* p) {
         return;
     }
     d->params = *p;
+    d->params.sampleRate = dimension_sanitize_param(d->params.sampleRate, DIMENSION_SAMPLE_RATE_DEFAULT, 1000.0f, 192000.0f);
+    d->params.inputGain = dimension_sanitize_param(d->params.inputGain, 1.0f, 0.0f, 8.0f);
+    d->params.outputGain = dimension_sanitize_param(d->params.outputGain, 1.0f, 0.0f, 8.0f);
+    d->params.dryGain = dimension_sanitize_param(d->params.dryGain, 0.83f, 0.0f, 2.0f);
+    d->params.wetDirectGain = dimension_sanitize_param(d->params.wetDirectGain, 0.50f, 0.0f, 2.0f);
+    d->params.wetCrossGain = dimension_sanitize_param(d->params.wetCrossGain, 0.35f, 0.0f, 2.0f);
+    d->params.baseDelayMs = dimension_sanitize_param(d->params.baseDelayMs, 7.0f, 1.0f, DIMENSION_DELAY_MAX_MS);
+    d->params.depthMs = dimension_sanitize_param(d->params.depthMs, 0.9f, 0.0f, DIMENSION_DELAY_MAX_MS);
+    d->params.rateHz = dimension_sanitize_param(d->params.rateHz, 0.25f, 0.01f, 8.0f);
+    d->params.hpfHz = dimension_sanitize_param(d->params.hpfHz, 120.0f, 1.0f, 2000.0f);
+    d->params.lpfHz = dimension_sanitize_param(d->params.lpfHz, 8000.0f, 200.0f, 22000.0f);
+    d->params.analogAmount = dimension_sanitize_param(d->params.analogAmount, 0.35f, 0.0f, 1.0f);
+    d->params.companderAmount = dimension_sanitize_param(d->params.companderAmount, 0.35f, 0.0f, 1.0f);
+    d->params.noiseAmount = dimension_sanitize_param(d->params.noiseAmount, 0.0f, 0.0f, 1.0f);
+    d->params.width = dimension_sanitize_param(d->params.width, 1.0f, 0.0f, 2.0f);
     if (d->params.mode != DIMENSION_MODE_CUSTOM) {
         dimension_apply_mode_preset(&d->params, d->params.mode);
     }
@@ -258,6 +286,13 @@ void Dimension_ProcessBlock(
     const float msToSamples = sr * 0.001f;
     const float atkC = expf(-1.0f / (0.005f * sr));
     const float relC = expf(-1.0f / (0.080f * sr));
+    d->smoothHpfHz += smoothCoeff * (d->params.hpfHz - d->smoothHpfHz);
+    d->smoothLpfHz += smoothCoeff * (d->params.lpfHz - d->smoothLpfHz);
+    d->smoothAnalogAmount += smoothCoeff * (d->params.analogAmount - d->smoothAnalogAmount);
+    const float hpfAlpha = one_pole_alpha(d->smoothHpfHz, sr);
+    const float lpfAlpha = one_pole_alpha(d->smoothLpfHz, sr);
+    const float analogAmount = dimension_clampf(d->smoothAnalogAmount, 0.0f, 1.0f);
+    const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - analogAmount), sr);
 
     for (uint32_t i = 0U; i < n; ++i) {
         float xL = dimension_sanitize_sample(inL[i]) * inputGain;
@@ -272,9 +307,6 @@ void Dimension_ProcessBlock(
         d->smoothBaseDelayMs += smoothCoeff * (d->params.baseDelayMs - d->smoothBaseDelayMs);
         d->smoothWetDirectGain += smoothCoeff * (d->params.wetDirectGain - d->smoothWetDirectGain);
         d->smoothWetCrossGain += smoothCoeff * (d->params.wetCrossGain - d->smoothWetCrossGain);
-        d->smoothHpfHz += smoothCoeff * (d->params.hpfHz - d->smoothHpfHz);
-        d->smoothLpfHz += smoothCoeff * (d->params.lpfHz - d->smoothLpfHz);
-        d->smoothAnalogAmount += smoothCoeff * (d->params.analogAmount - d->smoothAnalogAmount);
         d->smoothCompanderAmount += smoothCoeff * (d->params.companderAmount - d->smoothCompanderAmount);
 
         const float gWet1 = dimension_clampf(d->smoothWetDirectGain * width, 0.0f, 2.0f);
@@ -285,10 +317,6 @@ void Dimension_ProcessBlock(
         const float depthMax = fminf(baseDelay - 1.0f, maxDelaySpan - baseDelay);
         const float depthDelay = dimension_clampf(d->smoothDepthMs * msToSamples, 0.0f, depthMax);
         const float amount = dimension_clampf(d->smoothCompanderAmount, 0.0f, 1.0f);
-        const float hpfAlpha = one_pole_alpha(d->smoothHpfHz, sr);
-        const float lpfAlpha = one_pole_alpha(d->smoothLpfHz, sr);
-        const float analogAmount = dimension_clampf(d->smoothAnalogAmount, 0.0f, 1.0f);
-        const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - analogAmount), sr);
 
         d->hpfStateL = (1.0f - hpfAlpha) * d->hpfStateL + hpfAlpha * wetL;
         d->hpfStateR = (1.0f - hpfAlpha) * d->hpfStateR + hpfAlpha * wetR;

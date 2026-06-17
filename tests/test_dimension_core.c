@@ -1,4 +1,3 @@
-#include <assert.h>
 #include <float.h>
 #include <math.h>
 #include <stdbool.h>
@@ -11,13 +10,14 @@
 #define TEST_SR 48000.0f
 #define BLOCK 64U
 #define PI_F 3.14159265358979323846f
+#define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "CHECK failed: %s at %s:%d\n", #cond, __FILE__, __LINE__); return 1; } } while (0)
 
 static float frand_uniform(uint32_t* state) {
     *state = (*state * 1664525u) + 1013904223u;
     return ((float)((*state >> 8) & 0x00FFFFFFu) / 8388608.0f) - 1.0f;
 }
 
-static void process_constant(DimensionDSP* d, float value, uint32_t total, float* peak, float* dc_acc) {
+static int process_constant(DimensionDSP* d, float value, uint32_t total, float* peak, float* dc_acc) {
     float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
     uint32_t rem = total;
     while (rem > 0U) {
@@ -25,7 +25,7 @@ static void process_constant(DimensionDSP* d, float value, uint32_t total, float
         for (uint32_t i = 0; i < n; ++i) inL[i] = inR[i] = value;
         Dimension_ProcessBlock(d, inL, inR, outL, outR, n);
         for (uint32_t i = 0; i < n; ++i) {
-            assert(isfinite(outL[i]) && isfinite(outR[i]));
+            CHECK(isfinite(outL[i]) && isfinite(outR[i]));
             const float a = fabsf(outL[i]);
             const float b = fabsf(outR[i]);
             if (a > *peak) *peak = a;
@@ -34,21 +34,23 @@ static void process_constant(DimensionDSP* d, float value, uint32_t total, float
         }
         rem -= n;
     }
+    return 0;
 }
 
-static void test_zero_input_long_no_nan_low_dc(void) {
+static int test_zero_input_long_no_nan_low_dc(void) {
     DimensionDSP d;
     Dimension_Init(&d, TEST_SR);
     Dimension_SetMode(&d, DIMENSION_MODE_II);
     float peak = 0.0f, dc = 0.0f;
     const uint32_t total = (uint32_t)TEST_SR * 8U;
-    process_constant(&d, 0.0f, total, &peak, &dc);
+    CHECK(process_constant(&d, 0.0f, total, &peak, &dc) == 0);
     dc /= (float)total;
-    assert(fabsf(dc) < 1e-4f);
-    assert(peak < 1e-6f);
+    CHECK(fabsf(dc) < 1e-4f);
+    CHECK(peak < 1e-6f);
+    return 0;
 }
 
-static void test_impulse_delay_correct(void) {
+static int test_impulse_delay_correct(void) {
     DimensionDSP d;
     Dimension_Init(&d, TEST_SR);
     DimensionParams p;
@@ -83,12 +85,13 @@ static void test_impulse_delay_correct(void) {
         }
         t += BLOCK;
     }
-    assert(idx != 0xFFFFFFFFu);
-    assert((int32_t)idx >= (int32_t)expected - 8);
-    assert((int32_t)idx <= (int32_t)expected + 24);
+    CHECK(idx != 0xFFFFFFFFu);
+    CHECK((int32_t)idx >= (int32_t)expected - 8);
+    CHECK((int32_t)idx <= (int32_t)expected + 24);
+    return 0;
 }
 
-static void test_sine_1khz_low_distortion_analog_zero(void) {
+static int test_sine_1khz_low_distortion_analog_zero(void) {
     DimensionDSP d;
     Dimension_Init(&d, TEST_SR);
     DimensionParams p;
@@ -110,15 +113,16 @@ static void test_sine_1khz_low_distortion_analog_zero(void) {
         for (uint32_t i = 0; i < BLOCK; ++i) {
             const float o = 0.5f * (outL[i] + outR[i]);
             const float e = o - inL[i];
-            ein += inL[i] * inL[i];
-            eerr += e * e;
+            ein += (double)inL[i] * (double)inL[i];
+            eerr += (double)e * (double)e;
         }
     }
     const double nrmse = sqrt(eerr / (ein + DBL_MIN));
-    assert(nrmse < 0.35);
+    CHECK(nrmse < 0.35);
+    return 0;
 }
 
-static void test_sine_100hz_center_preserved(void) {
+static int test_sine_100hz_center_preserved(void) {
     DimensionDSP d;
     Dimension_Init(&d, TEST_SR);
     float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
@@ -131,22 +135,24 @@ static void test_sine_100hz_center_preserved(void) {
         }
         Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
         for (uint32_t i = 0; i < BLOCK; ++i) {
-            inMid += inL[i] * inL[i];
+            inMid += (double)inL[i] * (double)inL[i];
             const float m = 0.5f * (outL[i] + outR[i]);
-            outMid += m * m;
+            outMid += (double)m * (double)m;
         }
     }
     const double ratio = sqrt(outMid / (inMid + DBL_MIN));
-    assert(ratio > 0.55 && ratio < 1.25);
+    CHECK(ratio > 0.55 && ratio < 1.25);
+    return 0;
 }
 
-static void test_input_plusminus2_safe_saturation(void) {
+static int test_input_plusminus2_safe_saturation(void) {
     DimensionDSP d;
     Dimension_Init(&d, TEST_SR);
     float peak = 0.0f, dc = 0.0f;
-    process_constant(&d, 2.0f, TEST_SR, &peak, &dc);
-    process_constant(&d, -2.0f, TEST_SR, &peak, &dc);
-    assert(peak <= 2.0f);
+    CHECK(process_constant(&d, 2.0f, TEST_SR, &peak, &dc) == 0);
+    CHECK(process_constant(&d, -2.0f, TEST_SR, &peak, &dc) == 0);
+    CHECK(peak <= 2.0f);
+    return 0;
 }
 
 static float run_mode_switch_step(bool switchMode) {
@@ -183,15 +189,16 @@ static float run_mode_switch_step(bool switchMode) {
     return maxStep;
 }
 
-static void test_mode_switch_1s_no_clicks(void) {
+static int test_mode_switch_1s_no_clicks(void) {
     const float baselineMaxStep = run_mode_switch_step(false);
     const float switchedMaxStep = run_mode_switch_step(true);
 
-    assert(switchedMaxStep < 0.01f);
-    assert((switchedMaxStep - baselineMaxStep) < 0.003f);
+    CHECK(switchedMaxStep < 0.01f);
+    CHECK((switchedMaxStep - baselineMaxStep) < 0.003f);
+    return 0;
 }
 
-static void test_noise_stability(void) {
+static int test_noise_stability(void) {
     DimensionDSP d;
     Dimension_Init(&d, TEST_SR);
     float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
@@ -205,22 +212,134 @@ static void test_noise_stability(void) {
         }
         Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
         for (uint32_t i = 0; i < BLOCK; ++i) {
-            assert(isfinite(outL[i]) && isfinite(outR[i]));
+            CHECK(isfinite(outL[i]) && isfinite(outR[i]));
             float a = fabsf(outL[i]); if (a > peak) peak = a;
             float b = fabsf(outR[i]); if (b > peak) peak = b;
         }
     }
-    assert(peak < 2.0f);
+    CHECK(peak < 2.0f);
+    return 0;
+}
+
+
+static int test_sample_rates_and_block_limits(void) {
+    const float rates[] = {44100.0f, 48000.0f, 96000.0f};
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    for (uint32_t r = 0; r < 3U; ++r) {
+        DimensionDSP d;
+        Dimension_Init(&d, rates[r]);
+        for (uint32_t mode = 0; mode < 4U; ++mode) {
+            Dimension_SetMode(&d, (DimensionMode)mode);
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                inL[i] = 0.2f * sinf(2.0f * PI_F * 440.0f * (float)i / rates[r]);
+                inR[i] = -inL[i];
+            }
+            Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+            for (uint32_t i = 0; i < BLOCK; ++i) CHECK(isfinite(outL[i]) && isfinite(outR[i]));
+        }
+    }
+    return 0;
+}
+
+static double deterministic_energy(uint32_t seed) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    Dimension_SetMode(&d, DIMENSION_MODE_IV);
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    uint32_t rng = seed;
+    double energy = 0.0;
+    for (uint32_t n = 0; n < TEST_SR; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            inL[i] = 0.25f * frand_uniform(&rng);
+            inR[i] = 0.25f * frand_uniform(&rng);
+        }
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) energy += (double)outL[i] * (double)outL[i] + (double)outR[i] * (double)outR[i];
+    }
+    return energy;
+}
+
+static int test_determinism_between_runs(void) {
+    const double a = deterministic_energy(0xabcdef01u);
+    const double b = deterministic_energy(0xabcdef01u);
+    CHECK(fabs(a - b) < 1e-9);
+    return 0;
+}
+
+static int test_extreme_and_nonfinite_params_are_clamped(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    DimensionParams p;
+    Dimension_GetParams(&d, &p);
+    p.mode = DIMENSION_MODE_CUSTOM;
+    p.sampleRate = NAN;
+    p.inputGain = INFINITY;
+    p.outputGain = INFINITY;
+    p.baseDelayMs = -1000.0f;
+    p.depthMs = INFINITY;
+    p.rateHz = NAN;
+    p.hpfHz = -1.0f;
+    p.lpfHz = INFINITY;
+    p.analogAmount = NAN;
+    p.companderAmount = INFINITY;
+    p.width = INFINITY;
+    Dimension_SetParams(&d, &p);
+    Dimension_GetParams(&d, &p);
+    CHECK(isfinite(p.sampleRate) && p.sampleRate == DIMENSION_SAMPLE_RATE_DEFAULT);
+    CHECK(p.baseDelayMs >= 1.0f && p.baseDelayMs <= DIMENSION_DELAY_MAX_MS);
+    CHECK(p.depthMs >= 0.0f && p.depthMs <= DIMENSION_DELAY_MAX_MS);
+    float peak = 0.0f, dc = 0.0f;
+    CHECK(process_constant(&d, 0.5f, TEST_SR / 10U, &peak, &dc) == 0);
+    CHECK(isfinite(peak));
+    return 0;
+}
+
+static int test_regression_signal_metrics(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    uint32_t rng = 0x31415926u;
+    double sum = 0.0, energy = 0.0;
+    float peak = 0.0f;
+    const uint32_t total = TEST_SR * 2U;
+    for (uint32_t n = 0; n < total; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const uint32_t t = n + i;
+            float x = 0.12f * sinf(2.0f * PI_F * 330.0f * (float)t / TEST_SR) + 0.03f * frand_uniform(&rng);
+            if (t == 200U) x += 0.5f;
+            inL[i] = x;
+            inR[i] = x;
+        }
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float m = 0.5f * (outL[i] + outR[i]);
+            const float a = fabsf(m);
+            if (a > peak) peak = a;
+            sum += (double)m;
+            energy += (double)m * (double)m;
+        }
+    }
+    const double dc = sum / (double)total;
+    const double rms = sqrt(energy / (double)total);
+    CHECK(peak > 0.02f && peak < 1.0f);
+    CHECK(fabs(dc) < 0.01);
+    CHECK(rms > 0.02 && rms < 0.30);
+    return 0;
 }
 
 int main(void) {
-    test_zero_input_long_no_nan_low_dc();
-    test_impulse_delay_correct();
-    test_sine_1khz_low_distortion_analog_zero();
-    test_sine_100hz_center_preserved();
-    test_input_plusminus2_safe_saturation();
-    test_mode_switch_1s_no_clicks();
-    test_noise_stability();
+#define RUN_TEST(fn) do { if ((fn)() != 0) return 1; } while (0)
+    RUN_TEST(test_zero_input_long_no_nan_low_dc);
+    RUN_TEST(test_impulse_delay_correct);
+    RUN_TEST(test_sine_1khz_low_distortion_analog_zero);
+    RUN_TEST(test_sine_100hz_center_preserved);
+    RUN_TEST(test_input_plusminus2_safe_saturation);
+    RUN_TEST(test_mode_switch_1s_no_clicks);
+    RUN_TEST(test_noise_stability);
+    RUN_TEST(test_sample_rates_and_block_limits);
+    RUN_TEST(test_determinism_between_runs);
+    RUN_TEST(test_extreme_and_nonfinite_params_are_clamped);
+    RUN_TEST(test_regression_signal_metrics);
     puts("test_dimension_core: OK");
     return 0;
 }
