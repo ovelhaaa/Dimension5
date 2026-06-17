@@ -286,10 +286,13 @@ void Dimension_ProcessBlock(
     const float msToSamples = sr * 0.001f;
     const float atkC = expf(-1.0f / (0.005f * sr));
     const float relC = expf(-1.0f / (0.080f * sr));
-    float hpfAlpha = one_pole_alpha(d->smoothHpfHz, sr);
-    float lpfAlpha = one_pole_alpha(d->smoothLpfHz, sr);
-    float analogAmount = dimension_clampf(d->smoothAnalogAmount, 0.0f, 1.0f);
-    float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - analogAmount), sr);
+    d->smoothHpfHz += smoothCoeff * (d->params.hpfHz - d->smoothHpfHz);
+    d->smoothLpfHz += smoothCoeff * (d->params.lpfHz - d->smoothLpfHz);
+    d->smoothAnalogAmount += smoothCoeff * (d->params.analogAmount - d->smoothAnalogAmount);
+    const float hpfAlpha = one_pole_alpha(d->smoothHpfHz, sr);
+    const float lpfAlpha = one_pole_alpha(d->smoothLpfHz, sr);
+    const float analogAmount = dimension_clampf(d->smoothAnalogAmount, 0.0f, 1.0f);
+    const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - analogAmount), sr);
 
     for (uint32_t i = 0U; i < n; ++i) {
         float xL = dimension_sanitize_sample(inL[i]) * inputGain;
@@ -304,9 +307,6 @@ void Dimension_ProcessBlock(
         d->smoothBaseDelayMs += smoothCoeff * (d->params.baseDelayMs - d->smoothBaseDelayMs);
         d->smoothWetDirectGain += smoothCoeff * (d->params.wetDirectGain - d->smoothWetDirectGain);
         d->smoothWetCrossGain += smoothCoeff * (d->params.wetCrossGain - d->smoothWetCrossGain);
-        d->smoothHpfHz += smoothCoeff * (d->params.hpfHz - d->smoothHpfHz);
-        d->smoothLpfHz += smoothCoeff * (d->params.lpfHz - d->smoothLpfHz);
-        d->smoothAnalogAmount += smoothCoeff * (d->params.analogAmount - d->smoothAnalogAmount);
         d->smoothCompanderAmount += smoothCoeff * (d->params.companderAmount - d->smoothCompanderAmount);
 
         const float gWet1 = dimension_clampf(d->smoothWetDirectGain * width, 0.0f, 2.0f);

@@ -1,10 +1,17 @@
 #include "dimension_dsp.h"
 
+#include <errno.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
 #define SR 48000U
 #define BLOCK DIMENSION_MAX_BLOCK_SIZE
@@ -33,6 +40,19 @@ static int write_wav(const char* path, const float* l, const float* r, uint32_t 
         le16(f, (uint16_t)li); le16(f, (uint16_t)ri);
     }
     return fclose(f);
+}
+
+static int create_output_dir(const char* out_dir) {
+#if defined(_WIN32)
+    const int rc = _mkdir(out_dir);
+#else
+    const int rc = mkdir(out_dir, 0777);
+#endif
+    if (rc == 0 || errno == EEXIST) {
+        return 0;
+    }
+    fprintf(stderr, "failed to create output directory %s: %s\n", out_dir, strerror(errno));
+    return -1;
 }
 
 static void render_mode(int mode, const char* out_dir) {
@@ -69,7 +89,9 @@ static void render_mode(int mode, const char* out_dir) {
 
 int main(int argc, char** argv) {
     const char* out_dir = (argc > 1) ? argv[1] : "out";
-    char cmd[300]; snprintf(cmd, sizeof(cmd), "mkdir -p %s", out_dir); if (system(cmd) != 0) return 1;
+    if (create_output_dir(out_dir) != 0) {
+        return 1;
+    }
     for (int mode = 0; mode < 4; ++mode) render_mode(mode, out_dir);
     return 0;
 }
