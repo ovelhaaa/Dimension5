@@ -21,6 +21,19 @@ typedef enum DimensionQuality {
     DIMENSION_QUALITY_BBD_LITE
 } DimensionQuality;
 
+/* Public realtime DSP API contract:
+ * - Supported sample rates: 44.1, 48, and 96 kHz are validated; other rates above
+ *   1 kHz are clamped internally to safe ranges. Default is 48 kHz.
+ * - Maximum block size per call is DIMENSION_MAX_BLOCK_SIZE frames. Larger n values
+ *   are truncated defensively; host code should split bigger buffers.
+ * - Audio format is non-interleaved planar float32: inL/inR -> outL/outR, nominal
+ *   range [-1.0, +1.0]. External input is sanitized/clamped to [-2.0, +2.0].
+ * - Public parameters are clamped to musical/safe ranges by Dimension_SetParams.
+ * - DimensionDSP is caller-owned static storage; no malloc/free is used by the core.
+ * - Dimension_ProcessBlock performs no I/O and is realtime-safe after initialization.
+ * - Thread-safety: one DimensionDSP instance may be used by one audio thread at a time.
+ *   Synchronize externally if UI/control and audio threads touch the same instance.
+ */
 typedef struct DimensionParams {
     float sampleRate;
     DimensionMode mode;
