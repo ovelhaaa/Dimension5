@@ -1,0 +1,36 @@
+{
+  "build": {
+    "core": "stm32",
+    "cpu": "cortex-m33",
+    "extra_flags": "-DSTM32H562xx",
+    "f_cpu": "250000000L",
+    "mcu": "stm32h562vit6"
+  },
+  "debug": {
+    "default_tools": [
+      "jlink"
+    ],
+    "jlink_device": "STM32H562VI",
+    "openocd_target": "stm32h5x",
+    "svd_path": "STM32H562.svd"
+  },
+  "frameworks": [
+    "cmsis",
+    "stm32cube",
+    "zephyr"
+  ],
+  "name": "WeAct Studio STM32H562",
+  "upload": {
+    "maximum_ram_size": 655360,
+    "maximum_size": 2097152,
+    "protocol": "jlink",
+    "protocols": [
+      "jlink",
+      "stlink",
+      "blackmagic",
+      "dfu"
+    ]
+  },
+  "url": "https://github.com/WeActStudio/WeActStudio.MiniSTM32H5xx",
+  "vendor": "WeAct Studio"
+}
