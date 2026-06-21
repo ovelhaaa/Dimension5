@@ -2,9 +2,19 @@
 #include "dimension_dsp.h"
 
 // STM32H5 Baremetal Headers
+#define FLASH_BASE    0x40022000U
+#define FLASH_ACR     (*(volatile uint32_t*)(FLASH_BASE + 0x00U))
+
+#define PWR_BASE      0x44020800U
+#define PWR_VOSCR     (*(volatile uint32_t*)(PWR_BASE + 0x10U))
+#define PWR_VOSSR     (*(volatile uint32_t*)(PWR_BASE + 0x14U))
+
 #define RCC_BASE      0x44020C00U
 #define RCC_CR        (*(volatile uint32_t*)(RCC_BASE + 0x00U))
 #define RCC_CFGR      (*(volatile uint32_t*)(RCC_BASE + 0x1CU))
+#define RCC_PLL1CFGR  (*(volatile uint32_t*)(RCC_BASE + 0x28U))
+#define RCC_PLL1DIVR  (*(volatile uint32_t*)(RCC_BASE + 0x2CU))
+#define RCC_PLL1FRACR (*(volatile uint32_t*)(RCC_BASE + 0x30U))
 #define RCC_PLL2CFGR  (*(volatile uint32_t*)(RCC_BASE + 0x34U))
 #define RCC_PLL2DIVR  (*(volatile uint32_t*)(RCC_BASE + 0x38U))
 #define RCC_PLL2FRACR (*(volatile uint32_t*)(RCC_BASE + 0x3CU))
@@ -73,8 +83,17 @@ extern void Audio_ProcessHalfBuffer(int32_t* rx, int32_t* tx, uint32_t frames);
 
 #define BUFFER_SAMPLES (DIMENSION_MAX_BLOCK_SIZE * 2)
 
-static int32_t rx_buf[2][BUFFER_SAMPLES];
-static int32_t tx_buf[2][BUFFER_SAMPLES];
+typedef struct {
+    uint32_t CTR1;
+    uint32_t CTR2;
+    uint32_t BR1;
+    uint32_t SAR;
+    uint32_t DAR;
+    uint32_t LLR;
+} GPDMA_Node;
+
+static int32_t rx_buf[2][BUFFER_SAMPLES] __attribute__((aligned(32)));
+static int32_t tx_buf[2][BUFFER_SAMPLES] __attribute__((aligned(32)));
 
 volatile uint32_t dma_rx_ht = 0;
 volatile uint32_t dma_rx_tc = 0;
@@ -95,6 +114,8 @@ void Reset_Handler(void) {
 
     // FPU Enable
     *(volatile uint32_t*)0xE000ED88 |= (0xF << 20);
+    __asm volatile ("dsb");
+    __asm volatile ("isb");
 
     int main(void);
     main();
@@ -112,10 +133,46 @@ void (*const g_pfnVectors[])(void) = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
+#define CLOCK_TIMEOUT 0xFFFFFFU
+
 void SystemClock_Config(void) {
-    // 25MHz HSE to 250MHz sysclock, and precise PLL2 for audio
+    uint32_t timeout = 0;
+
+    // Enable HSE
     RCC_CR |= (1 << 16); // HSEON
-    while((RCC_CR & (1 << 17)) == 0); // HSERDY
+    timeout = 0;
+    while((RCC_CR & (1 << 17)) == 0) { // HSERDY
+        if (++timeout > CLOCK_TIMEOUT) return;
+    }
+
+    // Power Scaling VOS0
+    PWR_VOSCR |= (0 << 4);
+    timeout = 0;
+    while((PWR_VOSSR & (1 << 4)) == 0) {
+        if (++timeout > CLOCK_TIMEOUT) return;
+    }
+
+    // Flash Wait States
+    FLASH_ACR = (FLASH_ACR & ~(0x1F)) | 5; // 5 WS for 250MHz at VOS0
+
+    // Configure PLL1 for System Clock (250 MHz)
+    // HSE = 25 MHz. PLL1M = 5 (5MHz ref), PLL1N = 100 (500MHz vco), PLL1P = 2 (250MHz sysclk)
+    RCC_PLL1CFGR = (2 << 2) | (0 << 16) | (1 << 4); // Source HSE, DIVP enable, frac disable
+    RCC_PLL1DIVR = ((2 - 1) << 9) | ((100 - 1) << 0);
+    RCC_PLL1CFGR |= (5 << 8); // M = 5
+
+    RCC_CR |= (1 << 24); // PLL1ON
+    timeout = 0;
+    while((RCC_CR & (1 << 25)) == 0) {
+        if (++timeout > CLOCK_TIMEOUT) return;
+    }
+
+    // Switch SYSCLK to PLL1
+    RCC_CFGR |= 3;
+    timeout = 0;
+    while(((RCC_CFGR >> 3) & 7) != 3) {
+        if (++timeout > CLOCK_TIMEOUT) return;
+    }
 
     // Configure PLL2 for I2S. We need 48kHz. Assuming 24-bit I2S -> 32-bit slot = 64 bits/frame
     // MCK = 256 * Fs = 12.288 MHz
@@ -124,7 +181,10 @@ void SystemClock_Config(void) {
     RCC_PLL2DIVR = ((8 - 1) << 9) | ((98 - 1) << 0);
 
     RCC_CR |= (1 << 26);
-    while((RCC_CR & (1 << 27)) == 0);
+    timeout = 0;
+    while((RCC_CR & (1 << 27)) == 0) {
+        if (++timeout > CLOCK_TIMEOUT) return;
+    }
 }
 
 void Periph_Init(void) {
@@ -140,14 +200,14 @@ void Periph_Init(void) {
     // I2S1 TX (PA4 WS, PA5 CK, PA6 MCK, PA7 SD)
     GPIOA_MODER &= ~0x0000FF00;
     GPIOA_MODER |=  0x0000AA00;
-    GPIOA_AFRL &= ~0xFFF00000;
-    GPIOA_AFRL |=  0x55500000;
+    GPIOA_AFRL &= ~0xFFFF0000;
+    GPIOA_AFRL |=  0x55550000;
 
-    // I2S2 RX (PC1 SD, PC2 ext_SD, PC3 CK) (Arbitrary examples, adjusting AF5 mapping)
+    // I2S2 RX (PC1 SD, PC2 ext_SD, PC3 CK)
     GPIOC_MODER &= ~0x000000FC;
     GPIOC_MODER |=  0x000000A8;
-    GPIOC_AFRL &= ~0x0000FF00;
-    GPIOC_AFRL |=  0x00005500;
+    GPIOC_AFRL &= ~0x0000FFF0;
+    GPIOC_AFRL |=  0x00005550;
 
     // SPI1_I2SCFGR: I2SMOD(5)=1, I2SCFG(1:2)=2(Master TX), DATLEN(24bit)=1, CHLEN(32bit)=1, MCKOE=1
     SPI1_I2SCFGR = (1 << 9) | (1 << 5) | (2 << 1) | (1 << 2) | (1 << 0);
@@ -159,27 +219,42 @@ void Periph_Init(void) {
     SPI2_CFG1 = (7 << 16) | (1 << 14); // RXDMAEN
     SPI2_CR1 = (1 << 0);
 
-    // GPDMA1 CH0 (RX)
-    GPDMA1_C0CR = 0;
-    GPDMA1_C0TR1 = (2 << 16) | (2 << 18) | (1 << 1) | (0 << 0); // Dest Inc
-    GPDMA1_C0TR2 = (1 << 1) | (1 << 0); // HTIE | TCIE
-    GPDMA1_C0TR2 |= (18 << 24); // REQSEL = 18 for SPI2_RX on STM32H562
-    GPDMA1_C0BR1 = sizeof(rx_buf);
-    GPDMA1_C0SAR = (uint32_t)&SPI2_RXDR;
-    GPDMA1_C0DAR = (uint32_t)rx_buf;
-    GPDMA1_C0LLR = (1 << 16); // Circular mode (dummy/simplified LLR config)
-    GPDMA1_C0CR = (1 << 0);
+    static GPDMA_Node rx_node __attribute__((aligned(32)));
+    static GPDMA_Node tx_node __attribute__((aligned(32)));
 
-    // GPDMA1 CH1 (TX)
+    // GPDMA1 CH0 (RX) Circular Configuration via LLR
+    rx_node.CTR1 = (2 << 16) | (2 << 18) | (1 << 11); // 32-bit src/dest, Dest Inc (bit 11)
+    rx_node.CTR2 = 18; // REQSEL = 18 for SPI2_RX
+    rx_node.BR1 = sizeof(rx_buf);
+    rx_node.SAR = (uint32_t)&SPI2_RXDR;
+    rx_node.DAR = (uint32_t)rx_buf;
+    rx_node.LLR = ((uint32_t)&rx_node & 0xFFFFFFFCU) | 0x003F0000U; // Loop to itself, update all registers
+
+    GPDMA1_C0CR = 0;
+    GPDMA1_C0TR1 = rx_node.CTR1;
+    GPDMA1_C0TR2 = rx_node.CTR2;
+    GPDMA1_C0BR1 = rx_node.BR1;
+    GPDMA1_C0SAR = rx_node.SAR;
+    GPDMA1_C0DAR = rx_node.DAR;
+    GPDMA1_C0LLR = rx_node.LLR;
+    GPDMA1_C0CR = (1 << 9) | (1 << 8) | (1 << 0); // HTIE | TCIE | EN
+
+    // GPDMA1 CH1 (TX) Circular Configuration via LLR
+    tx_node.CTR1 = (2 << 16) | (2 << 18) | (1 << 3); // 32-bit src/dest, Src Inc (bit 3)
+    tx_node.CTR2 = 15; // REQSEL = 15 for SPI1_TX
+    tx_node.BR1 = sizeof(tx_buf);
+    tx_node.SAR = (uint32_t)tx_buf;
+    tx_node.DAR = (uint32_t)&SPI1_TXDR;
+    tx_node.LLR = ((uint32_t)&tx_node & 0xFFFFFFFCU) | 0x003F0000U; // Loop to itself, update all registers
+
     GPDMA1_C1CR = 0;
-    GPDMA1_C1TR1 = (2 << 16) | (2 << 18) | (0 << 1) | (1 << 0); // Src Inc
-    GPDMA1_C1TR2 = (1 << 1) | (1 << 0);
-    GPDMA1_C1TR2 |= (15 << 24); // REQSEL = 15 for SPI1_TX
-    GPDMA1_C1BR1 = sizeof(tx_buf);
-    GPDMA1_C1SAR = (uint32_t)tx_buf;
-    GPDMA1_C1DAR = (uint32_t)&SPI1_TXDR;
-    (*(volatile uint32_t*)(GPDMA1_BASE + 0xD0U + 0x2CU)) = (1 << 16);
-    GPDMA1_C1CR = (1 << 0);
+    GPDMA1_C1TR1 = tx_node.CTR1;
+    GPDMA1_C1TR2 = tx_node.CTR2;
+    GPDMA1_C1BR1 = tx_node.BR1;
+    GPDMA1_C1SAR = tx_node.SAR;
+    GPDMA1_C1DAR = tx_node.DAR;
+    (*(volatile uint32_t*)(GPDMA1_BASE + 0xD0U + 0x2CU)) = tx_node.LLR;
+    GPDMA1_C1CR = (1 << 0); // EN
 
     // Enable IRQ32 in NVIC
     NVIC_ISER1 |= (1 << 0);

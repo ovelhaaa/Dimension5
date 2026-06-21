@@ -15,11 +15,11 @@ static inline float dimension_int32_to_float32(int32_t x) {
 static inline int32_t dimension_float32_to_int32(float x) {
     if (x > 1.0f) x = 1.0f;
     if (x < -1.0f) x = -1.0f;
-    return (int32_t)(x * 2147483647.0f);
+    return (int32_t)lrintf(x * 2147483647.0f);
 }
 
 void Dimension_ExampleInit(void) {
-    Dimension_Init(&g_dimension, DIMENSION_SAMPLE_RATE_DEFAULT);
+    Dimension_Init(&g_dimension, 48000.0f);
 }
 
 void Audio_ProcessHalfBuffer(int32_t* rx, int32_t* tx, uint32_t frames) {
