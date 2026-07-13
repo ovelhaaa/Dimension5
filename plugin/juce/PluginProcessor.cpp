@@ -3,6 +3,7 @@
 
 namespace {
 constexpr const char* kModeParamId = "mode";
+constexpr const char* kMixParamId = "mix";
 
 juce::StringArray modeChoices() {
     return { "I", "II", "III", "IV", "Custom" };
@@ -45,6 +46,7 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
 
     const int totalFrames = buffer.getNumSamples();
     const int channels = buffer.getNumChannels();
+    const float mix = getMix();
     int pos = 0;
 
     while (pos < totalFrames) {
@@ -62,9 +64,11 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         float* dstL = buffer.getWritePointer(0, pos);
         float* dstR = (channels > 1) ? buffer.getWritePointer(1, pos) : nullptr;
         for (int i = 0; i < n; ++i) {
-            dstL[i] = outL[(size_t)i];
+            const float dryL = inL[(size_t)i];
+            const float dryR = inR[(size_t)i];
+            dstL[i] = dryL + mix * (outL[(size_t)i] - dryL);
             if (dstR != nullptr) {
-                dstR[i] = outR[(size_t)i];
+                dstR[i] = dryR + mix * (outR[(size_t)i] - dryR);
             }
         }
 
@@ -140,6 +144,8 @@ Dimension5AudioProcessor::ValueTreeState::ParameterLayout Dimension5AudioProcess
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID(kModeParamId, 1), "Mode", modeChoices(), DIMENSION_MODE_I));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID(kMixParamId, 1), "Mix", juce::NormalisableRange<float>(0.0f, 1.0f), 1.0f));
 
     for (uint32_t i = 0; i < (uint32_t)DIMENSION_PARAM_COUNT; ++i) {
         const DimensionParamDescriptor* desc = Dimension_GetParamDescriptor((DimensionParamId)i);
@@ -201,6 +207,10 @@ void Dimension5AudioProcessor::syncParametersToDsp() {
 float Dimension5AudioProcessor::getFloatParam(const char* id) const {
     const auto* value = parameters.getRawParameterValue(id);
     return value != nullptr ? value->load() : 0.0f;
+}
+
+float Dimension5AudioProcessor::getMix() const {
+    return juce::jlimit(0.0f, 1.0f, getFloatParam(kMixParamId));
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {

@@ -45,6 +45,7 @@ public:
 private:
     void syncParametersToDsp();
     float getFloatParam(const char* id) const;
+    float getMix() const;
 
     DimensionDSP dsp;
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> inL {};

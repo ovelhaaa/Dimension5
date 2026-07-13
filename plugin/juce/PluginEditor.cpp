@@ -37,20 +37,17 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
     configureSlider(inputSlider, "x");
     configureSlider(outputSlider, "x");
     configureSlider(widthSlider, "");
-    configureSlider(colorSlider, " Hz");
-    configureSlider(analogSlider, "");
+    configureSlider(mixSlider, "");
 
     addAndMakeVisible(inputSlider);
     addAndMakeVisible(outputSlider);
     addAndMakeVisible(widthSlider);
-    addAndMakeVisible(colorSlider);
-    addAndMakeVisible(analogSlider);
+    addAndMakeVisible(mixSlider);
 
     sliderAttachments[0] = std::make_unique<SliderAttachment>(audioProcessor.parameters, "inputGain", inputSlider);
     sliderAttachments[1] = std::make_unique<SliderAttachment>(audioProcessor.parameters, "outputGain", outputSlider);
     sliderAttachments[2] = std::make_unique<SliderAttachment>(audioProcessor.parameters, "width", widthSlider);
-    sliderAttachments[3] = std::make_unique<SliderAttachment>(audioProcessor.parameters, "lpfHz", colorSlider);
-    sliderAttachments[4] = std::make_unique<SliderAttachment>(audioProcessor.parameters, "analogAmount", analogSlider);
+    sliderAttachments[3] = std::make_unique<SliderAttachment>(audioProcessor.parameters, "mix", mixSlider);
 }
 
 void Dimension5AudioProcessorEditor::paint(juce::Graphics& g) {
@@ -68,8 +65,7 @@ void Dimension5AudioProcessorEditor::paint(juce::Graphics& g) {
     g.drawText("INPUT", inputSlider.getBounds().withY(inputSlider.getBottom() - 18), juce::Justification::centred);
     g.drawText("OUTPUT", outputSlider.getBounds().withY(outputSlider.getBottom() - 18), juce::Justification::centred);
     g.drawText("WIDTH", widthSlider.getBounds().withY(widthSlider.getBottom() - 18), juce::Justification::centred);
-    g.drawText("COLOR", colorSlider.getBounds().withY(colorSlider.getBottom() - 18), juce::Justification::centred);
-    g.drawText("ANALOG", analogSlider.getBounds().withY(analogSlider.getBottom() - 18), juce::Justification::centred);
+    g.drawText("MIX", mixSlider.getBounds().withY(mixSlider.getBottom() - 18), juce::Justification::centred);
 }
 
 void Dimension5AudioProcessorEditor::resized() {
@@ -81,12 +77,11 @@ void Dimension5AudioProcessorEditor::resized() {
     modeBox.setBounds(header.removeFromRight(150).withSizeKeepingCentre(128, 30));
 
     area.removeFromTop(34);
-    const int controlWidth = area.getWidth() / 5;
+    const int controlWidth = area.getWidth() / 4;
     inputSlider.setBounds(area.removeFromLeft(controlWidth).withHeight(kControlHeight));
     outputSlider.setBounds(area.removeFromLeft(controlWidth).withHeight(kControlHeight));
     widthSlider.setBounds(area.removeFromLeft(controlWidth).withHeight(kControlHeight));
-    colorSlider.setBounds(area.removeFromLeft(controlWidth).withHeight(kControlHeight));
-    analogSlider.setBounds(area.withHeight(kControlHeight));
+    mixSlider.setBounds(area.withHeight(kControlHeight));
 }
 
 void Dimension5AudioProcessorEditor::configureSlider(juce::Slider& slider, const juce::String& suffix) {

@@ -26,10 +26,9 @@ private:
     juce::Slider inputSlider;
     juce::Slider outputSlider;
     juce::Slider widthSlider;
-    juce::Slider colorSlider;
-    juce::Slider analogSlider;
+    juce::Slider mixSlider;
     std::unique_ptr<ComboAttachment> modeAttachment;
-    std::array<std::unique_ptr<SliderAttachment>, 5> sliderAttachments;
+    std::array<std::unique_ptr<SliderAttachment>, 4> sliderAttachments;
 
     void configureSlider(juce::Slider& slider, const juce::String& suffix);
 

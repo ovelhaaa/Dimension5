@@ -23,6 +23,10 @@ cmake -S . -B build-plugin -G Ninja ^
 cmake --build build-plugin --parallel
 ```
 
-The initial plugin exposes the existing DSP parameters directly. The product UI
-should later promote a small set of musical controls and keep raw DSP controls in
-an advanced panel.
+The preferred build path is GitHub Actions. The `CI` workflow has a
+`workflow_dispatch` trigger and uploads the Windows VST3 bundle as the
+`dimension5-vst3-windows` artifact.
+
+The initial product UI promotes the musical controls `Mode`, `Input`, `Output`,
+`Width`, and `Mix`. Raw DSP parameters remain exposed to the host and are most
+useful with `Mode = Custom`; a later advanced panel can surface them directly.
