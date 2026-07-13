@@ -1,5 +1,4 @@
-const PARAMS = ['inputGain','outputGain','dryGain','wetDirectGain','wetCrossGain','baseDelayMs','depthMs','rateHz','hpfHz','lpfHz','analogAmount','companderAmount','width'];
-const PARAM_DEFAULTS = [1,1,0.83,0.5,0.35,7,0.9,0.25,120,8000,0.35,0.35,1];
+import { PARAM_DESCRIPTORS, PARAM_NAMES } from '../params.js';
 
 function getExportFn(instance, names) {
   const exports = instance?.exports || {};
@@ -20,7 +19,13 @@ function resolveAllocatorFns(instance) {
 
 class DimensionProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
-    return PARAMS.map((name, i) => ({ name, defaultValue: PARAM_DEFAULTS[i], automationRate: 'k-rate' }));
+    return PARAM_DESCRIPTORS.map((param) => ({
+      name: param.stableId,
+      defaultValue: param.defaultValue,
+      minValue: param.minValue,
+      maxValue: param.maxValue,
+      automationRate: 'k-rate'
+    }));
   }
 
   constructor() {
@@ -34,7 +39,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.fnSetParam = null;
     this.fnProcess = null;
     this.heap = null;
-    this.lastParams = Array(PARAMS.length).fill(NaN);
+    this.lastParams = Array(PARAM_DESCRIPTORS.length).fill(NaN);
     this.port.onmessage = async (event) => {
       const msg = event.data || {};
       try {
@@ -102,7 +107,7 @@ class DimensionProcessor extends AudioWorkletProcessor {
     this.fnSetParam = getExportFn(this.wasmInstance, ['_DimensionWasm_SetParam', 'DimensionWasm_SetParam']);
     this.fnProcess = getExportFn(this.wasmInstance, ['_DimensionWasm_Process', 'DimensionWasm_Process']);
     this.heap = new Float32Array(this.wasmInstance.exports.memory.buffer);
-    this.lastParams = Array(PARAMS.length).fill(NaN);
+    this.lastParams = Array(PARAM_DESCRIPTORS.length).fill(NaN);
     this.fnInit(sr);
     this.ensureCapacity(this.maxRenderFrames);
     this.ready = true;
@@ -111,8 +116,8 @@ class DimensionProcessor extends AudioWorkletProcessor {
 
   syncParams(parameters) {
     if (!this.wasmInstance) return;
-    for (let i = 0; i < PARAMS.length; i += 1) {
-      const value = parameters[PARAMS[i]]?.[0] ?? this.lastParams[i];
+    for (let i = 0; i < PARAM_NAMES.length; i += 1) {
+      const value = parameters[PARAM_NAMES[i]]?.[0] ?? this.lastParams[i];
       if (!Object.is(value, this.lastParams[i])) {
         this.lastParams[i] = value;
         this.fnSetParam(i, value);

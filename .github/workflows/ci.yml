@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   native:
@@ -53,3 +54,31 @@ jobs:
         with:
           name: dimension5-web
           path: web/dist
+
+  vst3:
+    name: VST3 plugin (Windows/JUCE)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout JUCE
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          ref: 8.0.6
+          path: external/JUCE
+
+      - name: Configure plugin
+        run: >
+          cmake -S . -B build-plugin
+          -DDIMENSION5_BUILD_JUCE_PLUGIN=ON
+          -DDIMENSION5_JUCE_DIR="${{ github.workspace }}/external/JUCE"
+
+      - name: Build VST3
+        run: cmake --build build-plugin --config Release --target Dimension5Plugin_VST3 --parallel
+
+      - name: Upload VST3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dimension5-vst3-windows
+          path: build-plugin/plugin/juce/Dimension5Plugin_artefacts/Release/VST3/*.vst3

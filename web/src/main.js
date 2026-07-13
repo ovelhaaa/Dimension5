@@ -1,4 +1,5 @@
 import { createEngine } from './audio/engine.js';
+import { PARAM_DESCRIPTORS } from './params.js';
 
 const $ = (id) => document.getElementById(id);
 const logLines = $('logLines');
@@ -10,27 +11,21 @@ const engine = createEngine((msg) => {
   addLog(msg);
 });
 
-const params = [
-  ['inputGain', 0, 4, 0.01, 1], ['outputGain', 0, 4, 0.01, 1], ['dryGain', 0, 2, 0.01, 0.83],
-  ['wetDirectGain', 0, 2, 0.01, 0.5], ['wetCrossGain', 0, 2, 0.01, 0.35], ['baseDelayMs', 1, 20, 0.01, 7],
-  ['depthMs', 0, 6, 0.01, 0.9], ['rateHz', 0.01, 4, 0.01, 0.25], ['hpfHz', 20, 400, 1, 120],
-  ['lpfHz', 2000, 12000, 1, 8000], ['analogAmount', 0, 1, 0.01, 0.35], ['companderAmount', 0, 1, 0.01, 0.35], ['width', 0, 2, 0.01, 1]
-];
-
 const customContainer = $('customParams');
 const fileInput = $('audio-file');
-for (const [name, min, max, step, value] of params) {
+for (const param of PARAM_DESCRIPTORS) {
   const col = document.createElement('label');
   col.className = 'param-col';
-  col.innerHTML = `<span class="param-name">${name.toUpperCase()}</span><input type="range" min="${min}" max="${max}" step="${step}" value="${value}"><span class="param-val">${value}</span>`;
+  col.dataset.role = param.role;
+  col.innerHTML = `<span class="param-name">${param.displayName.toUpperCase()}</span><input type="range" min="${param.minValue}" max="${param.maxValue}" step="${param.step}" value="${param.defaultValue}"><span class="param-val">${formatParamValue(param, param.defaultValue)}</span>`;
   const slider = col.querySelector('input');
   const valueEl = col.querySelector('.param-val');
   slider.addEventListener('input', () => {
     const v = Number(slider.value);
-    valueEl.textContent = slider.value;
-    engine.setParam(name, v);
+    valueEl.textContent = formatParamValue(param, v);
+    engine.setParam(param.stableId, v);
   });
-  engine.setParam(name, value);
+  engine.setParam(param.stableId, param.defaultValue);
   customContainer.appendChild(col);
 }
 
@@ -188,6 +183,12 @@ function addLog(msg) {
   row.textContent = msg;
   logLines.appendChild(row);
   logLines.scrollTop = logLines.scrollHeight;
+}
+
+function formatParamValue(param, value) {
+  const decimals = param.step < 0.1 ? 2 : 0;
+  const text = Number(value).toFixed(decimals);
+  return param.unit ? `${text} ${param.unit}` : text;
 }
 
 addLog('inicializando...');

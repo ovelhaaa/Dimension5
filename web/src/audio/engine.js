@@ -1,23 +1,8 @@
+import { PARAM_IDS } from '../params.js';
+
 const WORKLET_URL = new URL('./dimension-worklet.js', import.meta.url);
 const WASM_BIN_PATH = new URL('wasm/dimension_dsp.wasm', globalThis.location?.origin ? new URL(import.meta.env.BASE_URL, globalThis.location.origin) : import.meta.env.BASE_URL).toString();
 
-const PARAMS = {
-  inputGain: 0,
-  outputGain: 1,
-  dryGain: 2,
-  wetDirectGain: 3,
-  wetCrossGain: 4,
-  baseDelayMs: 5,
-  depthMs: 6,
-  rateHz: 7,
-  hpfHz: 8,
-  lpfHz: 9,
-  analogAmount: 10,
-  companderAmount: 11,
-  width: 12
-};
-
-const PARAM_NAMES = Object.keys(PARAMS);
 const hasOwn = Object.prototype.hasOwnProperty;
 const WORKLET_INIT_TIMEOUT_MS = 20000;
 
@@ -65,8 +50,8 @@ export function createEngine(setStatus) {
     targetNode.port.postMessage({ type: 'setMode', mode: currentMode });
     targetNode.port.postMessage({ type: 'setBypass', value: bypass });
     for (const [name, value] of paramState.entries()) {
-      if (!hasOwn.call(PARAMS, name)) continue;
-      const paramId = PARAMS[name];
+      if (!hasOwn.call(PARAM_IDS, name)) continue;
+      const paramId = PARAM_IDS[name];
       const param = targetNode.parameters.get(name);
       if (param) param.setValueAtTime(value, targetNode.context.currentTime);
       targetNode.port.postMessage({ type: 'setParam', paramId, value });
@@ -171,10 +156,10 @@ export function createEngine(setStatus) {
     async stopPlayback() { if (sourceNode) { try { sourceNode.stop(); } catch (_) {} sourceNode.disconnect(); sourceNode = null; } setStatus('playback parado'); },
     setMode(mode) { currentMode = mode; if (node) node.port.postMessage({ type: 'setMode', mode }); },
     setParam(name, value) {
-      if (!hasOwn.call(PARAMS, name)) return;
+      if (!hasOwn.call(PARAM_IDS, name)) return;
       paramState.set(name, value);
       if (node) {
-        const paramId = PARAMS[name];
+        const paramId = PARAM_IDS[name];
         const p = node.parameters.get(name);
         if (p) p.setValueAtTime(value, ctx.currentTime);
         node.port.postMessage({ type: 'setParam', paramId, value });
