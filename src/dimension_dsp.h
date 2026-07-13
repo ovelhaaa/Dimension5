@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "dimension_config.h"
+#include "dimension_params.h"
 
 #ifdef __cplusplus
 extern "C" {

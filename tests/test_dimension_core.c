@@ -327,6 +327,27 @@ static int test_regression_signal_metrics(void) {
     return 0;
 }
 
+static int test_parameter_schema_is_stable(void) {
+    CHECK(DIMENSION_PARAM_SCHEMA_VERSION == 1U);
+    CHECK(DIMENSION_PARAM_COUNT == 13);
+    CHECK(DIMENSION_PARAM_INPUT_GAIN == 0);
+    CHECK(DIMENSION_PARAM_WIDTH == 12);
+
+    for (uint32_t i = 0U; i < (uint32_t)DIMENSION_PARAM_COUNT; ++i) {
+        const DimensionParamDescriptor* desc = Dimension_GetParamDescriptor((DimensionParamId)i);
+        CHECK(desc != NULL);
+        CHECK((uint32_t)desc->id == i);
+        CHECK(desc->stableId != NULL);
+        CHECK(desc->displayName != NULL);
+        CHECK(desc->minValue <= desc->defaultValue);
+        CHECK(desc->defaultValue <= desc->maxValue);
+        CHECK(desc->automatable == 1U);
+    }
+
+    CHECK(Dimension_GetParamDescriptor((DimensionParamId)DIMENSION_PARAM_COUNT) == NULL);
+    return 0;
+}
+
 int main(void) {
 #define RUN_TEST(fn) do { if ((fn)() != 0) return 1; } while (0)
     RUN_TEST(test_zero_input_long_no_nan_low_dc);
@@ -340,6 +361,7 @@ int main(void) {
     RUN_TEST(test_determinism_between_runs);
     RUN_TEST(test_extreme_and_nonfinite_params_are_clamped);
     RUN_TEST(test_regression_signal_metrics);
+    RUN_TEST(test_parameter_schema_is_stable);
     puts("test_dimension_core: OK");
     return 0;
 }

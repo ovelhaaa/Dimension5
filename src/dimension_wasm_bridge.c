@@ -36,19 +36,19 @@ DIM_WASM_EXPORT void DimensionWasm_SetParam(int paramId, float value) {
     DimensionParams p;
     Dimension_GetParams(&g_dsp, &p);
     switch (paramId) {
-        case 0: p.inputGain = value; break;
-        case 1: p.outputGain = value; break;
-        case 2: p.dryGain = value; break;
-        case 3: p.wetDirectGain = value; break;
-        case 4: p.wetCrossGain = value; break;
-        case 5: p.baseDelayMs = value; p.mode = DIMENSION_MODE_CUSTOM; break;
-        case 6: p.depthMs = value; p.mode = DIMENSION_MODE_CUSTOM; break;
-        case 7: p.rateHz = value; p.mode = DIMENSION_MODE_CUSTOM; break;
-        case 8: p.hpfHz = value; p.mode = DIMENSION_MODE_CUSTOM; break;
-        case 9: p.lpfHz = value; p.mode = DIMENSION_MODE_CUSTOM; break;
-        case 10: p.analogAmount = value; p.mode = DIMENSION_MODE_CUSTOM; break;
-        case 11: p.companderAmount = value; p.mode = DIMENSION_MODE_CUSTOM; break;
-        case 12: p.width = value; break;
+        case DIMENSION_PARAM_INPUT_GAIN: p.inputGain = value; break;
+        case DIMENSION_PARAM_OUTPUT_GAIN: p.outputGain = value; break;
+        case DIMENSION_PARAM_DRY_GAIN: p.dryGain = value; break;
+        case DIMENSION_PARAM_WET_DIRECT_GAIN: p.wetDirectGain = value; break;
+        case DIMENSION_PARAM_WET_CROSS_GAIN: p.wetCrossGain = value; break;
+        case DIMENSION_PARAM_BASE_DELAY_MS: p.baseDelayMs = value; p.mode = DIMENSION_MODE_CUSTOM; break;
+        case DIMENSION_PARAM_DEPTH_MS: p.depthMs = value; p.mode = DIMENSION_MODE_CUSTOM; break;
+        case DIMENSION_PARAM_RATE_HZ: p.rateHz = value; p.mode = DIMENSION_MODE_CUSTOM; break;
+        case DIMENSION_PARAM_HPF_HZ: p.hpfHz = value; p.mode = DIMENSION_MODE_CUSTOM; break;
+        case DIMENSION_PARAM_LPF_HZ: p.lpfHz = value; p.mode = DIMENSION_MODE_CUSTOM; break;
+        case DIMENSION_PARAM_ANALOG_AMOUNT: p.analogAmount = value; p.mode = DIMENSION_MODE_CUSTOM; break;
+        case DIMENSION_PARAM_COMPANDER_AMOUNT: p.companderAmount = value; p.mode = DIMENSION_MODE_CUSTOM; break;
+        case DIMENSION_PARAM_WIDTH: p.width = value; break;
         default: return;
     }
     Dimension_SetParams(&g_dsp, &p);
