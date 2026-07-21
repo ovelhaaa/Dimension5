@@ -19,13 +19,16 @@ public:
 private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
 
     Dimension5AudioProcessor& audioProcessor;
     juce::ComboBox presetBox;
     juce::ComboBox modeBox;
+    juce::TextButton bypassButton;
     juce::TextButton advancedButton;
     juce::Label titleLabel;
     juce::Label subtitleLabel;
+    juce::Label advancedHintLabel;
     juce::Slider inputSlider;
     juce::Slider outputSlider;
     juce::Slider widthSlider;
@@ -33,6 +36,7 @@ private:
     std::array<juce::Slider, 6> advancedSliders;
     std::array<juce::Label, 6> advancedLabels;
     std::unique_ptr<ComboAttachment> modeAttachment;
+    std::unique_ptr<ButtonAttachment> bypassAttachment;
     std::array<std::unique_ptr<SliderAttachment>, 4> sliderAttachments;
     std::array<std::unique_ptr<SliderAttachment>, 6> advancedAttachments;
     float meterLeft = 0.0f;
@@ -42,6 +46,7 @@ private:
     void configureSlider(juce::Slider& slider, const juce::String& suffix);
     void configureAdvancedSlider(juce::Slider& slider);
     void setAdvancedVisible(bool shouldBeVisible);
+    void switchAdvancedToCustom();
     void drawMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float value, const juce::String& label);
     void timerCallback() override;
 

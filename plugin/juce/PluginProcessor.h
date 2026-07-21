@@ -46,11 +46,13 @@ public:
 
     float getOutputMeterLeft() const;
     float getOutputMeterRight() const;
+    void switchToCustomMode();
 
 private:
     void syncParametersToDsp();
     float getFloatParam(const char* id) const;
     float getMix() const;
+    float getBypassTarget() const;
     void applyFactoryPreset(int index);
     void setFloatParam(const char* id, float value);
 
@@ -61,6 +63,8 @@ private:
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> outR {};
     std::atomic<float> outputMeterLeft { 0.0f };
     std::atomic<float> outputMeterRight { 0.0f };
+    float bypassEffectLevel = 1.0f;
+    float bypassSmoothCoeff = 1.0f;
     int currentMode = DIMENSION_MODE_I;
     int currentProgram = 0;
 

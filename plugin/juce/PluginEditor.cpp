@@ -61,6 +61,15 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
     addAndMakeVisible(modeBox);
     modeAttachment = std::make_unique<ComboAttachment>(audioProcessor.parameters, "mode", modeBox);
 
+    bypassButton.setButtonText("BYPASS");
+    bypassButton.setClickingTogglesState(true);
+    bypassButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(29, 26, 20));
+    bypassButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour::fromRGB(24, 48, 31));
+    bypassButton.setColour(juce::TextButton::textColourOffId, juce::Colour::fromRGB(137, 129, 99));
+    bypassButton.setColour(juce::TextButton::textColourOnId, juce::Colour::fromRGB(58, 152, 88));
+    addAndMakeVisible(bypassButton);
+    bypassAttachment = std::make_unique<ButtonAttachment>(audioProcessor.parameters, "bypass", bypassButton);
+
     advancedButton.setButtonText("ADVANCED");
     advancedButton.setClickingTogglesState(true);
     advancedButton.onClick = [this] {
@@ -89,6 +98,9 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
 
     for (size_t i = 0; i < advancedSliders.size(); ++i) {
         configureAdvancedSlider(advancedSliders[i]);
+        advancedSliders[i].onDragStart = [this] {
+            switchAdvancedToCustom();
+        };
         advancedLabels[i].setText(kAdvancedControls[i].label, juce::dontSendNotification);
         advancedLabels[i].setJustificationType(juce::Justification::centredLeft);
         advancedLabels[i].setColour(juce::Label::textColourId, juce::Colour::fromRGB(132, 82, 12));
@@ -98,6 +110,12 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
         advancedAttachments[i] = std::make_unique<SliderAttachment>(
             audioProcessor.parameters, kAdvancedControls[i].id, advancedSliders[i]);
     }
+
+    advancedHintLabel.setText("Advanced edits switch to Custom mode", juce::dontSendNotification);
+    advancedHintLabel.setJustificationType(juce::Justification::centredLeft);
+    advancedHintLabel.setColour(juce::Label::textColourId, juce::Colour::fromRGB(99, 91, 69));
+    advancedHintLabel.setFont(juce::Font(12.0f));
+    addAndMakeVisible(advancedHintLabel);
     setAdvancedVisible(false);
 
     startTimerHz(30);
@@ -152,11 +170,13 @@ void Dimension5AudioProcessorEditor::resized() {
     widthSlider.setBounds(area.removeFromLeft(controlWidth).withHeight(kControlHeight));
     mixSlider.setBounds(area.removeFromLeft(controlWidth).withHeight(kControlHeight));
     advancedButton.setBounds(getWidth() - kMargin - 104, kHeaderHeight + kMargin + 5, 104, 26);
+    bypassButton.setBounds(advancedButton.getX() - 92, advancedButton.getY(), 84, 26);
 
     if (advancedVisible) {
         auto advancedArea = getLocalBounds().reduced(kMargin);
         advancedArea.removeFromTop(kHeaderHeight + 128);
         advancedArea.removeFromBottom(34);
+        advancedHintLabel.setBounds(advancedArea.removeFromTop(18));
         advancedArea.removeFromTop(14);
 
         const int rowHeight = 28;
@@ -198,9 +218,14 @@ void Dimension5AudioProcessorEditor::setAdvancedVisible(bool shouldBeVisible) {
         advancedLabels[i].setVisible(advancedVisible);
         advancedSliders[i].setVisible(advancedVisible);
     }
+    advancedHintLabel.setVisible(advancedVisible);
     setSize(getWidth(), advancedVisible ? kExpandedHeight : kCompactHeight);
     resized();
     repaint();
+}
+
+void Dimension5AudioProcessorEditor::switchAdvancedToCustom() {
+    audioProcessor.switchToCustomMode();
 }
 
 void Dimension5AudioProcessorEditor::drawMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float value, const juce::String& label) {

@@ -1,9 +1,12 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cmath>
+
 namespace {
 constexpr const char* kModeParamId = "mode";
 constexpr const char* kMixParamId = "mix";
+constexpr const char* kBypassParamId = "bypass";
 
 struct FactoryPreset {
     const char* name;
@@ -43,6 +46,9 @@ Dimension5AudioProcessor::Dimension5AudioProcessor()
 void Dimension5AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
     juce::ignoreUnused(samplesPerBlock);
     Dimension_Init(&dsp, (float)sampleRate);
+    const double safeSampleRate = sampleRate > 1000.0 ? sampleRate : (double)DIMENSION_SAMPLE_RATE_DEFAULT;
+    bypassSmoothCoeff = (float)(1.0 - std::exp(-1.0 / (0.020 * safeSampleRate)));
+    bypassEffectLevel = getBypassTarget();
     syncParametersToDsp();
 }
 
@@ -65,6 +71,7 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     const int totalFrames = buffer.getNumSamples();
     const int channels = buffer.getNumChannels();
     const float mix = getMix();
+    const float bypassTarget = getBypassTarget();
     float blockPeakL = 0.0f;
     float blockPeakR = 0.0f;
     int pos = 0;
@@ -86,8 +93,10 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         for (int i = 0; i < n; ++i) {
             const float dryL = inL[(size_t)i];
             const float dryR = inR[(size_t)i];
-            const float mixedL = dryL + mix * (outL[(size_t)i] - dryL);
-            const float mixedR = dryR + mix * (outR[(size_t)i] - dryR);
+            bypassEffectLevel += bypassSmoothCoeff * (bypassTarget - bypassEffectLevel);
+            const float effectiveMix = mix * bypassEffectLevel;
+            const float mixedL = dryL + effectiveMix * (outL[(size_t)i] - dryL);
+            const float mixedR = dryR + effectiveMix * (outR[(size_t)i] - dryR);
             dstL[i] = mixedL;
             if (dstR != nullptr) {
                 dstR[i] = mixedR;
@@ -177,6 +186,8 @@ Dimension5AudioProcessor::ValueTreeState::ParameterLayout Dimension5AudioProcess
         juce::ParameterID(kModeParamId, 1), "Mode", modeChoices(), DIMENSION_MODE_I));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID(kMixParamId, 1), "Mix", juce::NormalisableRange<float>(0.0f, 1.0f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID(kBypassParamId, 1), "Bypass", false));
 
     for (uint32_t i = 0; i < (uint32_t)DIMENSION_PARAM_COUNT; ++i) {
         const DimensionParamDescriptor* desc = Dimension_GetParamDescriptor((DimensionParamId)i);
@@ -212,6 +223,11 @@ float Dimension5AudioProcessor::getOutputMeterLeft() const {
 
 float Dimension5AudioProcessor::getOutputMeterRight() const {
     return outputMeterRight.load(std::memory_order_relaxed);
+}
+
+void Dimension5AudioProcessor::switchToCustomMode() {
+    setFloatParam(kModeParamId, (float)DIMENSION_MODE_CUSTOM);
+    syncParametersToDsp();
 }
 
 void Dimension5AudioProcessor::syncParametersToDsp() {
@@ -260,6 +276,10 @@ float Dimension5AudioProcessor::getMix() const {
     return juce::jlimit(0.0f, 1.0f, getFloatParam(kMixParamId));
 }
 
+float Dimension5AudioProcessor::getBypassTarget() const {
+    return getFloatParam(kBypassParamId) >= 0.5f ? 0.0f : 1.0f;
+}
+
 void Dimension5AudioProcessor::applyFactoryPreset(int index) {
     currentProgram = juce::jlimit(0, getNumPrograms() - 1, index);
     const auto& preset = kFactoryPresets[currentProgram];
@@ -269,6 +289,7 @@ void Dimension5AudioProcessor::applyFactoryPreset(int index) {
     setFloatParam("outputGain", preset.outputGain);
     setFloatParam("width", preset.width);
     setFloatParam(kMixParamId, preset.mix);
+    setFloatParam(kBypassParamId, 0.0f);
     syncParametersToDsp();
 }
 

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="620" height="320" viewBox="0 0 620 320" role="img" aria-labelledby="title desc">
   <title id="title">Dimension5 current plugin GUI mockup</title>
-  <desc id="desc">A dark hardware-style Dimension5 chorus plugin interface with preset and mode selectors plus Input, Output, Width, and Mix knobs.</desc>
+  <desc id="desc">A dark hardware-style Dimension5 chorus plugin interface with preset and mode selectors, Bypass and Advanced buttons, plus Input, Output, Width, and Mix knobs.</desc>
 
   <defs>
     <linearGradient id="outerBg" x1="0" y1="0" x2="0" y2="1">
@@ -38,6 +38,11 @@
     </g>
 
     <line x1="0" y1="70" x2="572" y2="70" stroke="#201c14"/>
+  </g>
+
+  <g transform="translate(400 99)">
+    <rect x="0" y="0" width="84" height="26" rx="4" fill="#1d1a14" stroke="#3f3422"/>
+    <text x="42" y="17" text-anchor="middle" fill="#898163" font-family="Segoe UI, Arial, sans-serif" font-size="10" font-weight="700" letter-spacing="1.1">BYPASS</text>
   </g>
 
   <g transform="translate(492 99)">
