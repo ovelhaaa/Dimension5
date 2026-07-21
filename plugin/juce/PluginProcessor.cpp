@@ -65,6 +65,8 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     const int totalFrames = buffer.getNumSamples();
     const int channels = buffer.getNumChannels();
     const float mix = getMix();
+    float blockPeakL = 0.0f;
+    float blockPeakR = 0.0f;
     int pos = 0;
 
     while (pos < totalFrames) {
@@ -84,14 +86,21 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         for (int i = 0; i < n; ++i) {
             const float dryL = inL[(size_t)i];
             const float dryR = inR[(size_t)i];
-            dstL[i] = dryL + mix * (outL[(size_t)i] - dryL);
+            const float mixedL = dryL + mix * (outL[(size_t)i] - dryL);
+            const float mixedR = dryR + mix * (outR[(size_t)i] - dryR);
+            dstL[i] = mixedL;
             if (dstR != nullptr) {
-                dstR[i] = dryR + mix * (outR[(size_t)i] - dryR);
+                dstR[i] = mixedR;
             }
+            blockPeakL = juce::jmax(blockPeakL, std::abs(mixedL));
+            blockPeakR = juce::jmax(blockPeakR, std::abs(mixedR));
         }
 
         pos += n;
     }
+
+    outputMeterLeft.store(juce::jlimit(0.0f, 1.0f, blockPeakL), std::memory_order_relaxed);
+    outputMeterRight.store(juce::jlimit(0.0f, 1.0f, blockPeakR), std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* Dimension5AudioProcessor::createEditor() {
@@ -195,6 +204,14 @@ juce::StringArray Dimension5AudioProcessor::factoryPresetNames() {
         names.add(preset.name);
     }
     return names;
+}
+
+float Dimension5AudioProcessor::getOutputMeterLeft() const {
+    return outputMeterLeft.load(std::memory_order_relaxed);
+}
+
+float Dimension5AudioProcessor::getOutputMeterRight() const {
+    return outputMeterRight.load(std::memory_order_relaxed);
 }
 
 void Dimension5AudioProcessor::syncParametersToDsp() {

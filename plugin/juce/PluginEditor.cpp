@@ -4,6 +4,7 @@ namespace {
 constexpr int kMargin = 24;
 constexpr int kHeaderHeight = 70;
 constexpr int kControlHeight = 94;
+constexpr int kMeterHeight = 12;
 
 juce::Colour panelColour() {
     return juce::Colour::fromRGB(18, 17, 15);
@@ -58,6 +59,8 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
     sliderAttachments[1] = std::make_unique<SliderAttachment>(audioProcessor.parameters, "outputGain", outputSlider);
     sliderAttachments[2] = std::make_unique<SliderAttachment>(audioProcessor.parameters, "width", widthSlider);
     sliderAttachments[3] = std::make_unique<SliderAttachment>(audioProcessor.parameters, "mix", mixSlider);
+
+    startTimerHz(30);
 }
 
 void Dimension5AudioProcessorEditor::paint(juce::Graphics& g) {
@@ -76,6 +79,11 @@ void Dimension5AudioProcessorEditor::paint(juce::Graphics& g) {
     g.drawText("OUTPUT", outputSlider.getBounds().withY(outputSlider.getBottom() - 18), juce::Justification::centred);
     g.drawText("WIDTH", widthSlider.getBounds().withY(widthSlider.getBottom() - 18), juce::Justification::centred);
     g.drawText("MIX", mixSlider.getBounds().withY(mixSlider.getBottom() - 18), juce::Justification::centred);
+
+    auto meterArea = getLocalBounds().reduced(kMargin).removeFromBottom(24);
+    drawMeter(g, meterArea.removeFromTop(kMeterHeight), meterLeft, "L");
+    meterArea.removeFromTop(4);
+    drawMeter(g, meterArea.removeFromTop(kMeterHeight), meterRight, "R");
 }
 
 void Dimension5AudioProcessorEditor::resized() {
@@ -106,4 +114,29 @@ void Dimension5AudioProcessorEditor::configureSlider(juce::Slider& slider, const
     slider.setColour(juce::Slider::thumbColourId, accentColour());
     slider.setColour(juce::Slider::textBoxTextColourId, juce::Colour::fromRGB(208, 200, 168));
     slider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+}
+
+void Dimension5AudioProcessorEditor::drawMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float value, const juce::String& label) {
+    const auto labelArea = bounds.removeFromLeft(18);
+    g.setColour(juce::Colour::fromRGB(99, 91, 69));
+    g.drawText(label, labelArea, juce::Justification::centredLeft);
+
+    auto meterBounds = bounds.reduced(0, 2);
+    g.setColour(juce::Colour::fromRGB(25, 22, 17));
+    g.fillRect(meterBounds);
+
+    const int fillWidth = juce::roundToInt((float)meterBounds.getWidth() * juce::jlimit(0.0f, 1.0f, value));
+    auto fillBounds = meterBounds.withWidth(fillWidth);
+    g.setColour(accentColour());
+    g.fillRect(fillBounds);
+
+    g.setColour(juce::Colour::fromRGB(54, 45, 30));
+    g.drawRect(meterBounds);
+}
+
+void Dimension5AudioProcessorEditor::timerCallback() {
+    const float decay = 0.82f;
+    meterLeft = juce::jmax(audioProcessor.getOutputMeterLeft(), meterLeft * decay);
+    meterRight = juce::jmax(audioProcessor.getOutputMeterRight(), meterRight * decay);
+    repaint();
 }

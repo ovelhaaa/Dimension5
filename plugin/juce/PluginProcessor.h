@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 
 #include <JuceHeader.h>
 
@@ -43,6 +44,9 @@ public:
     static ValueTreeState::ParameterLayout createParameterLayout();
     static juce::StringArray factoryPresetNames();
 
+    float getOutputMeterLeft() const;
+    float getOutputMeterRight() const;
+
 private:
     void syncParametersToDsp();
     float getFloatParam(const char* id) const;
@@ -55,6 +59,8 @@ private:
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> inR {};
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> outL {};
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> outR {};
+    std::atomic<float> outputMeterLeft { 0.0f };
+    std::atomic<float> outputMeterRight { 0.0f };
     int currentMode = DIMENSION_MODE_I;
     int currentProgram = 0;
 
