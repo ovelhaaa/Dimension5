@@ -41,11 +41,14 @@ public:
     ValueTreeState parameters;
 
     static ValueTreeState::ParameterLayout createParameterLayout();
+    static juce::StringArray factoryPresetNames();
 
 private:
     void syncParametersToDsp();
     float getFloatParam(const char* id) const;
     float getMix() const;
+    void applyFactoryPreset(int index);
+    void setFloatParam(const char* id, float value);
 
     DimensionDSP dsp;
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> inL {};
@@ -53,6 +56,7 @@ private:
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> outL {};
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> outR {};
     int currentMode = DIMENSION_MODE_I;
+    int currentProgram = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Dimension5AudioProcessor)
 };

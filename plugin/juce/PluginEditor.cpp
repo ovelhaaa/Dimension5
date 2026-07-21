@@ -30,6 +30,16 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
     subtitleLabel.setFont(juce::Font(13.0f));
     addAndMakeVisible(subtitleLabel);
 
+    presetBox.addItemList(Dimension5AudioProcessor::factoryPresetNames(), 1);
+    presetBox.setSelectedItemIndex(audioProcessor.getCurrentProgram(), juce::dontSendNotification);
+    presetBox.onChange = [this] {
+        const int selected = presetBox.getSelectedItemIndex();
+        if (selected >= 0) {
+            audioProcessor.setCurrentProgram(selected);
+        }
+    };
+    addAndMakeVisible(presetBox);
+
     modeBox.addItemList({ "I", "II", "III", "IV", "Custom" }, 1);
     addAndMakeVisible(modeBox);
     modeAttachment = std::make_unique<ComboAttachment>(audioProcessor.parameters, "mode", modeBox);
@@ -74,7 +84,10 @@ void Dimension5AudioProcessorEditor::resized() {
     auto textArea = header.removeFromLeft(360);
     titleLabel.setBounds(textArea.removeFromTop(34));
     subtitleLabel.setBounds(textArea.removeFromTop(24));
-    modeBox.setBounds(header.removeFromRight(150).withSizeKeepingCentre(128, 30));
+    auto selectors = header.removeFromRight(210);
+    presetBox.setBounds(selectors.removeFromTop(30));
+    selectors.removeFromTop(8);
+    modeBox.setBounds(selectors.removeFromTop(30));
 
     area.removeFromTop(34);
     const int controlWidth = area.getWidth() / 4;

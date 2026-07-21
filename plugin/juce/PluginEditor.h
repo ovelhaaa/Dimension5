@@ -20,6 +20,7 @@ private:
     using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     Dimension5AudioProcessor& audioProcessor;
+    juce::ComboBox presetBox;
     juce::ComboBox modeBox;
     juce::Label titleLabel;
     juce::Label subtitleLabel;

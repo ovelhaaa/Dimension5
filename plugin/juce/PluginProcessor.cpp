@@ -5,6 +5,24 @@ namespace {
 constexpr const char* kModeParamId = "mode";
 constexpr const char* kMixParamId = "mix";
 
+struct FactoryPreset {
+    const char* name;
+    int mode;
+    float inputGain;
+    float outputGain;
+    float width;
+    float mix;
+};
+
+constexpr FactoryPreset kFactoryPresets[] = {
+    { "Studio Dimension", DIMENSION_MODE_I, 1.0f, 1.0f, 1.00f, 1.00f },
+    { "Vocal Halo", DIMENSION_MODE_II, 1.0f, 1.0f, 1.15f, 0.72f },
+    { "Bass Safe Wide", DIMENSION_MODE_I, 1.0f, 1.0f, 0.65f, 0.48f },
+    { "Clean Guitar Rack", DIMENSION_MODE_III, 1.0f, 0.95f, 1.20f, 0.82f },
+    { "Synth Pad Bloom", DIMENSION_MODE_IV, 1.0f, 0.92f, 1.45f, 0.88f },
+    { "Mix Bus Subtle", DIMENSION_MODE_I, 1.0f, 1.0f, 0.80f, 0.32f }
+};
+
 juce::StringArray modeChoices() {
     return { "I", "II", "III", "IV", "Custom" };
 }
@@ -105,20 +123,22 @@ double Dimension5AudioProcessor::getTailLengthSeconds() const {
 }
 
 int Dimension5AudioProcessor::getNumPrograms() {
-    return 1;
+    return (int)std::size(kFactoryPresets);
 }
 
 int Dimension5AudioProcessor::getCurrentProgram() {
-    return 0;
+    return currentProgram;
 }
 
 void Dimension5AudioProcessor::setCurrentProgram(int index) {
-    juce::ignoreUnused(index);
+    applyFactoryPreset(index);
 }
 
 const juce::String Dimension5AudioProcessor::getProgramName(int index) {
-    juce::ignoreUnused(index);
-    return {};
+    if (index < 0 || index >= getNumPrograms()) {
+        return {};
+    }
+    return kFactoryPresets[index].name;
 }
 
 void Dimension5AudioProcessor::changeProgramName(int index, const juce::String& newName) {
@@ -128,6 +148,7 @@ void Dimension5AudioProcessor::changeProgramName(int index, const juce::String& 
 void Dimension5AudioProcessor::getStateInformation(juce::MemoryBlock& destData) {
     if (auto state = parameters.copyState(); state.isValid()) {
         std::unique_ptr<juce::XmlElement> xml(state.createXml());
+        xml->setAttribute("program", currentProgram);
         copyXmlToBinary(*xml, destData);
     }
 }
@@ -135,6 +156,7 @@ void Dimension5AudioProcessor::getStateInformation(juce::MemoryBlock& destData) 
 void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInBytes) {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName(parameters.state.getType())) {
+        currentProgram = juce::jlimit(0, getNumPrograms() - 1, xml->getIntAttribute("program", currentProgram));
         parameters.replaceState(juce::ValueTree::fromXml(*xml));
         syncParametersToDsp();
     }
@@ -165,6 +187,14 @@ Dimension5AudioProcessor::ValueTreeState::ParameterLayout Dimension5AudioProcess
     }
 
     return { params.begin(), params.end() };
+}
+
+juce::StringArray Dimension5AudioProcessor::factoryPresetNames() {
+    juce::StringArray names;
+    for (const auto& preset : kFactoryPresets) {
+        names.add(preset.name);
+    }
+    return names;
 }
 
 void Dimension5AudioProcessor::syncParametersToDsp() {
@@ -211,6 +241,26 @@ float Dimension5AudioProcessor::getFloatParam(const char* id) const {
 
 float Dimension5AudioProcessor::getMix() const {
     return juce::jlimit(0.0f, 1.0f, getFloatParam(kMixParamId));
+}
+
+void Dimension5AudioProcessor::applyFactoryPreset(int index) {
+    currentProgram = juce::jlimit(0, getNumPrograms() - 1, index);
+    const auto& preset = kFactoryPresets[currentProgram];
+
+    setFloatParam(kModeParamId, (float)preset.mode);
+    setFloatParam("inputGain", preset.inputGain);
+    setFloatParam("outputGain", preset.outputGain);
+    setFloatParam("width", preset.width);
+    setFloatParam(kMixParamId, preset.mix);
+    syncParametersToDsp();
+}
+
+void Dimension5AudioProcessor::setFloatParam(const char* id, float value) {
+    if (auto* param = parameters.getParameter(id)) {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+        param->endChangeGesture();
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {
