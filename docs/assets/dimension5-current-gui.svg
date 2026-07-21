@@ -40,6 +40,11 @@
     <line x1="0" y1="70" x2="572" y2="70" stroke="#201c14"/>
   </g>
 
+  <g transform="translate(492 99)">
+    <rect x="0" y="0" width="104" height="26" rx="4" fill="#1d1a14" stroke="#3f3422"/>
+    <text x="52" y="17" text-anchor="middle" fill="#898163" font-family="Segoe UI, Arial, sans-serif" font-size="10" font-weight="700" letter-spacing="1.1">ADVANCED</text>
+  </g>
+
   <g transform="translate(48 126)" filter="url(#softShadow)">
     <g transform="translate(0 0)">
       <circle cx="52" cy="48" r="43" fill="#100f0c" stroke="#352d1f" stroke-width="2"/>

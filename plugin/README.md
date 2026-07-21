@@ -29,6 +29,5 @@ The preferred build path is GitHub Actions. The `CI` workflow has a
 
 The initial product UI promotes factory presets plus the musical controls
 `Mode`, `Input`, `Output`, `Width`, and `Mix`, with lightweight L/R output
-meters for gain staging. Raw DSP parameters remain exposed to the host and are
-most useful with `Mode = Custom`; a later advanced panel can surface them
-directly.
+meters for gain staging. The `Advanced` panel exposes the main raw DSP tuning
+parameters and is most useful with `Mode = Custom`.
