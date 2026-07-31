@@ -201,7 +201,7 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             compareStates[1] = juce::ValueTree::fromXml(*slotXml);
             slotXml->setTagName("CompareB");
         }
-        std::unique_ptr<juce::XmlElement> stateXml(xml->createCopy());
+        auto stateXml = std::make_unique<juce::XmlElement>(*xml);
         if (auto* slotXml = stateXml->getChildByName("CompareA")) {
             stateXml->removeChildElement(slotXml, true);
         }
