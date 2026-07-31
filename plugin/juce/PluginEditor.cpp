@@ -61,6 +61,32 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
     addAndMakeVisible(modeBox);
     modeAttachment = std::make_unique<ComboAttachment>(audioProcessor.parameters, "mode", modeBox);
 
+    compareAButton.setButtonText("A");
+    compareAButton.setClickingTogglesState(false);
+    compareAButton.onClick = [this] {
+        audioProcessor.selectCompareSlot(0);
+        updateCompareButtons();
+    };
+    configureSmallButton(compareAButton);
+    addAndMakeVisible(compareAButton);
+
+    compareBButton.setButtonText("B");
+    compareBButton.setClickingTogglesState(false);
+    compareBButton.onClick = [this] {
+        audioProcessor.selectCompareSlot(1);
+        updateCompareButtons();
+    };
+    configureSmallButton(compareBButton);
+    addAndMakeVisible(compareBButton);
+
+    compareCopyButton.setButtonText("COPY");
+    compareCopyButton.onClick = [this] {
+        audioProcessor.copyCompareToOtherSlot();
+    };
+    configureSmallButton(compareCopyButton);
+    addAndMakeVisible(compareCopyButton);
+    updateCompareButtons();
+
     bypassButton.setButtonText("BYPASS");
     bypassButton.setClickingTogglesState(true);
     bypassButton.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(29, 26, 20));
@@ -171,6 +197,9 @@ void Dimension5AudioProcessorEditor::resized() {
     mixSlider.setBounds(area.removeFromLeft(controlWidth).withHeight(kControlHeight));
     advancedButton.setBounds(getWidth() - kMargin - 104, kHeaderHeight + kMargin + 5, 104, 26);
     bypassButton.setBounds(advancedButton.getX() - 92, advancedButton.getY(), 84, 26);
+    compareAButton.setBounds(kMargin, kHeaderHeight + kMargin + 5, 32, 26);
+    compareBButton.setBounds(compareAButton.getRight() + 6, compareAButton.getY(), 32, 26);
+    compareCopyButton.setBounds(compareBButton.getRight() + 6, compareAButton.getY(), 58, 26);
 
     if (advancedVisible) {
         auto advancedArea = getLocalBounds().reduced(kMargin);
@@ -202,6 +231,13 @@ void Dimension5AudioProcessorEditor::configureSlider(juce::Slider& slider, const
     slider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
 }
 
+void Dimension5AudioProcessorEditor::configureSmallButton(juce::TextButton& button) {
+    button.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(29, 26, 20));
+    button.setColour(juce::TextButton::buttonOnColourId, juce::Colour::fromRGB(43, 33, 18));
+    button.setColour(juce::TextButton::textColourOffId, juce::Colour::fromRGB(137, 129, 99));
+    button.setColour(juce::TextButton::textColourOnId, accentColour());
+}
+
 void Dimension5AudioProcessorEditor::configureAdvancedSlider(juce::Slider& slider) {
     slider.setSliderStyle(juce::Slider::LinearHorizontal);
     slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 76, 18);
@@ -222,6 +258,12 @@ void Dimension5AudioProcessorEditor::setAdvancedVisible(bool shouldBeVisible) {
     setSize(getWidth(), advancedVisible ? kExpandedHeight : kCompactHeight);
     resized();
     repaint();
+}
+
+void Dimension5AudioProcessorEditor::updateCompareButtons() {
+    const bool aActive = audioProcessor.getActiveCompareSlot() == 0;
+    compareAButton.setToggleState(aActive, juce::dontSendNotification);
+    compareBButton.setToggleState(!aActive, juce::dontSendNotification);
 }
 
 void Dimension5AudioProcessorEditor::switchAdvancedToCustom() {

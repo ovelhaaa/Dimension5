@@ -47,8 +47,13 @@ public:
     float getOutputMeterLeft() const;
     float getOutputMeterRight() const;
     void switchToCustomMode();
+    void selectCompareSlot(int slot);
+    void copyCompareToOtherSlot();
+    int getActiveCompareSlot() const;
 
 private:
+    void captureCompareSlot(int slot);
+    void recallCompareSlot(int slot);
     void syncParametersToDsp();
     float getFloatParam(const char* id) const;
     float getMix() const;
@@ -65,8 +70,10 @@ private:
     std::atomic<float> outputMeterRight { 0.0f };
     float bypassEffectLevel = 1.0f;
     float bypassSmoothCoeff = 1.0f;
+    std::array<juce::ValueTree, 2> compareStates;
     int currentMode = DIMENSION_MODE_I;
     int currentProgram = 0;
+    int activeCompareSlot = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Dimension5AudioProcessor)
 };

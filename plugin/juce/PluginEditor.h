@@ -24,6 +24,9 @@ private:
     Dimension5AudioProcessor& audioProcessor;
     juce::ComboBox presetBox;
     juce::ComboBox modeBox;
+    juce::TextButton compareAButton;
+    juce::TextButton compareBButton;
+    juce::TextButton compareCopyButton;
     juce::TextButton bypassButton;
     juce::TextButton advancedButton;
     juce::Label titleLabel;
@@ -44,8 +47,10 @@ private:
     bool advancedVisible = false;
 
     void configureSlider(juce::Slider& slider, const juce::String& suffix);
+    void configureSmallButton(juce::TextButton& button);
     void configureAdvancedSlider(juce::Slider& slider);
     void setAdvancedVisible(bool shouldBeVisible);
+    void updateCompareButtons();
     void switchAdvancedToCustom();
     void drawMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float value, const juce::String& label);
     void timerCallback() override;

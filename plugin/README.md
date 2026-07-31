@@ -28,7 +28,8 @@ The preferred build path is GitHub Actions. The `CI` workflow has a
 `dimension5-vst3-windows` artifact.
 
 The initial product UI promotes factory presets plus the musical controls
-`Mode`, `Input`, `Output`, `Width`, `Mix`, and `Bypass`, with lightweight L/R
-output meters for gain staging. `Bypass` crossfades to the dry signal in the
-plugin wrapper while the DSP keeps running. The `Advanced` panel exposes the main
-raw DSP tuning parameters and switches the plugin to `Mode = Custom` when edited.
+`Mode`, `Input`, `Output`, `Width`, `Mix`, and `Bypass`, with A/B compare and
+lightweight L/R output meters for gain staging. `Bypass` crossfades to the dry
+signal in the plugin wrapper while the DSP keeps running. The `Advanced` panel
+exposes the main raw DSP tuning parameters and switches the plugin to
+`Mode = Custom` when edited.

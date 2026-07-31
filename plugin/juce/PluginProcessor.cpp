@@ -41,6 +41,8 @@ Dimension5AudioProcessor::Dimension5AudioProcessor()
           .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       parameters(*this, nullptr, "PARAMETERS", createParameterLayout()) {
     Dimension_Init(&dsp, DIMENSION_SAMPLE_RATE_DEFAULT);
+    compareStates[0] = parameters.copyState();
+    compareStates[1] = parameters.copyState();
 }
 
 void Dimension5AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
@@ -167,6 +169,19 @@ void Dimension5AudioProcessor::getStateInformation(juce::MemoryBlock& destData) 
     if (auto state = parameters.copyState(); state.isValid()) {
         std::unique_ptr<juce::XmlElement> xml(state.createXml());
         xml->setAttribute("program", currentProgram);
+        xml->setAttribute("activeCompareSlot", activeCompareSlot);
+        if (compareStates[0].isValid()) {
+            if (auto slotXml = compareStates[0].createXml()) {
+                slotXml->setTagName("CompareA");
+                xml->addChildElement(slotXml.release());
+            }
+        }
+        if (compareStates[1].isValid()) {
+            if (auto slotXml = compareStates[1].createXml()) {
+                slotXml->setTagName("CompareB");
+                xml->addChildElement(slotXml.release());
+            }
+        }
         copyXmlToBinary(*xml, destData);
     }
 }
@@ -175,7 +190,31 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName(parameters.state.getType())) {
         currentProgram = juce::jlimit(0, getNumPrograms() - 1, xml->getIntAttribute("program", currentProgram));
-        parameters.replaceState(juce::ValueTree::fromXml(*xml));
+        activeCompareSlot = juce::jlimit(0, 1, xml->getIntAttribute("activeCompareSlot", activeCompareSlot));
+        if (auto* slotXml = xml->getChildByName("CompareA")) {
+            slotXml->setTagName(parameters.state.getType());
+            compareStates[0] = juce::ValueTree::fromXml(*slotXml);
+            slotXml->setTagName("CompareA");
+        }
+        if (auto* slotXml = xml->getChildByName("CompareB")) {
+            slotXml->setTagName(parameters.state.getType());
+            compareStates[1] = juce::ValueTree::fromXml(*slotXml);
+            slotXml->setTagName("CompareB");
+        }
+        std::unique_ptr<juce::XmlElement> stateXml(xml->createCopy());
+        if (auto* slotXml = stateXml->getChildByName("CompareA")) {
+            stateXml->removeChildElement(slotXml, true);
+        }
+        if (auto* slotXml = stateXml->getChildByName("CompareB")) {
+            stateXml->removeChildElement(slotXml, true);
+        }
+        parameters.replaceState(juce::ValueTree::fromXml(*stateXml));
+        if (!compareStates[0].isValid()) {
+            compareStates[0] = parameters.copyState();
+        }
+        if (!compareStates[1].isValid()) {
+            compareStates[1] = parameters.copyState();
+        }
         syncParametersToDsp();
     }
 }
@@ -227,6 +266,39 @@ float Dimension5AudioProcessor::getOutputMeterRight() const {
 
 void Dimension5AudioProcessor::switchToCustomMode() {
     setFloatParam(kModeParamId, (float)DIMENSION_MODE_CUSTOM);
+    syncParametersToDsp();
+}
+
+void Dimension5AudioProcessor::selectCompareSlot(int slot) {
+    const int nextSlot = juce::jlimit(0, 1, slot);
+    if (nextSlot == activeCompareSlot) {
+        return;
+    }
+
+    captureCompareSlot(activeCompareSlot);
+    activeCompareSlot = nextSlot;
+    recallCompareSlot(activeCompareSlot);
+}
+
+void Dimension5AudioProcessor::copyCompareToOtherSlot() {
+    captureCompareSlot(activeCompareSlot);
+    compareStates[1 - activeCompareSlot] = compareStates[activeCompareSlot].createCopy();
+}
+
+int Dimension5AudioProcessor::getActiveCompareSlot() const {
+    return activeCompareSlot;
+}
+
+void Dimension5AudioProcessor::captureCompareSlot(int slot) {
+    compareStates[(size_t)juce::jlimit(0, 1, slot)] = parameters.copyState();
+}
+
+void Dimension5AudioProcessor::recallCompareSlot(int slot) {
+    const int safeSlot = juce::jlimit(0, 1, slot);
+    if (!compareStates[(size_t)safeSlot].isValid()) {
+        compareStates[(size_t)safeSlot] = parameters.copyState();
+    }
+    parameters.replaceState(compareStates[(size_t)safeSlot].createCopy());
     syncParametersToDsp();
 }
 
