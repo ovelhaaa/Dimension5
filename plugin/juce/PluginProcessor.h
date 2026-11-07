@@ -11,7 +11,8 @@ extern "C" {
 }
 
 class Dimension5AudioProcessor final : public juce::AudioProcessor,
-                                       private juce::AudioProcessorValueTreeState::Listener {
+                                       private juce::AudioProcessorValueTreeState::Listener,
+                                       private juce::AsyncUpdater {
 public:
     using ValueTreeState = juce::AudioProcessorValueTreeState;
 
@@ -60,12 +61,14 @@ public:
     int getActiveCompareSlot() const;
 
     void applyModePresetToAdvancedParameters(DimensionMode mode);
-    bool isUpdatingModePreset() const { return isUpdatingFromModePreset.load(std::memory_order_relaxed); }
+    bool isUpdatingModePreset() const { return isSyncingModePreset.load(std::memory_order_relaxed); }
     void getEffectiveConfig(PluginConfig& outConfig) const;
+    void getLastAppliedConfig(PluginConfig& outConfig) const;
     float getFloatParam(const char* id) const;
 
 private:
     void parameterChanged(const juce::String& parameterID, float newValue) override;
+    void handleAsyncUpdate() override;
 
     void captureCompareSlot(int slot);
     void recallCompareSlot(int slot);
@@ -93,13 +96,21 @@ private:
     std::atomic<int> currentProgram { 0 };
     std::atomic<int> activeCompareSlot { 0 };
 
+    PluginConfig stagedConfig {};
     PluginConfig activeConfig {};
+    PluginConfig lastAppliedConfig {};
     bool hasActiveConfig = false;
     std::atomic<float> currentSampleRate { DIMENSION_SAMPLE_RATE_DEFAULT };
 
-    std::atomic<uint32_t> presetUpdateSeq { 0 };
-    std::atomic<bool> isUpdatingFromModePreset { false };
+    mutable std::atomic<uint32_t> presetUpdateSeq { 0 };
+    mutable std::atomic<uint32_t> appliedConfigSeq { 0 };
+    std::atomic<int> batchDepth { 0 };
+    std::atomic<int> lastPresetMode { (int)DIMENSION_MODE_I };
+    std::atomic<int> effectiveMode { (int)DIMENSION_MODE_I };
+    std::atomic<bool> isSyncingModePreset { false };
     std::atomic<bool> isBatchRestoring { false };
+    std::atomic<bool> modeNeedsSyncToCustom { false };
+    std::atomic<bool> presetNeedsSyncToParams { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Dimension5AudioProcessor)
 };

@@ -31,8 +31,8 @@ juce::Colour accentColour() {
 }
 }
 
-Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioProcessor& processor)
-    : AudioProcessorEditor(&processor), audioProcessor(processor) {
+Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioProcessor& ownerProcessor)
+    : AudioProcessorEditor(&ownerProcessor), audioProcessor(ownerProcessor) {
     setSize(620, kCompactHeight);
 
     titleLabel.setText("DIMENSION5", juce::dontSendNotification);
@@ -60,12 +60,6 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
     modeBox.addItemList({ "I", "II", "III", "IV", "Custom" }, 1);
     addAndMakeVisible(modeBox);
     modeAttachment = std::make_unique<ComboAttachment>(audioProcessor.parameters, "mode", modeBox);
-    modeBox.onChange = [this] {
-        const int selected = modeBox.getSelectedItemIndex();
-        if (selected >= (int)DIMENSION_MODE_I && selected < (int)DIMENSION_MODE_CUSTOM) {
-            audioProcessor.applyModePresetToAdvancedParameters((DimensionMode)selected);
-        }
-    };
 
     compareAButton.setButtonText("A");
     compareAButton.setClickingTogglesState(false);
@@ -130,14 +124,6 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
 
     for (size_t i = 0; i < advancedSliders.size(); ++i) {
         configureAdvancedSlider(advancedSliders[i]);
-        advancedSliders[i].onDragStart = [this] {
-            switchAdvancedToCustom();
-        };
-        advancedSliders[i].onValueChange = [this] {
-            if (!audioProcessor.isUpdatingModePreset()) {
-                switchAdvancedToCustom();
-            }
-        };
         advancedLabels[i].setText(kAdvancedControls[i].label, juce::dontSendNotification);
         advancedLabels[i].setJustificationType(juce::Justification::centredLeft);
         advancedLabels[i].setColour(juce::Label::textColourId, juce::Colour::fromRGB(132, 82, 12));
@@ -275,10 +261,6 @@ void Dimension5AudioProcessorEditor::updateCompareButtons() {
     const bool aActive = audioProcessor.getActiveCompareSlot() == 0;
     compareAButton.setToggleState(aActive, juce::dontSendNotification);
     compareBButton.setToggleState(!aActive, juce::dontSendNotification);
-}
-
-void Dimension5AudioProcessorEditor::switchAdvancedToCustom() {
-    audioProcessor.switchToCustomMode();
 }
 
 void Dimension5AudioProcessorEditor::drawMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float value, const juce::String& label) {

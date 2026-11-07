@@ -10,7 +10,7 @@
 class Dimension5AudioProcessorEditor final : public juce::AudioProcessorEditor,
                                              private juce::Timer {
 public:
-    explicit Dimension5AudioProcessorEditor(Dimension5AudioProcessor& processor);
+    explicit Dimension5AudioProcessorEditor(Dimension5AudioProcessor& ownerProcessor);
     ~Dimension5AudioProcessorEditor() override = default;
 
     void paint(juce::Graphics& g) override;
@@ -51,7 +51,6 @@ private:
     void configureAdvancedSlider(juce::Slider& slider);
     void setAdvancedVisible(bool shouldBeVisible);
     void updateCompareButtons();
-    void switchAdvancedToCustom();
     void drawMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float value, const juce::String& label);
     void timerCallback() override;
 
