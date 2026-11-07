@@ -68,29 +68,30 @@ void applySingleParamToDspParams(DimensionParams& p, const juce::String& id, flo
     else if (id == "analogAmount")      p.analogAmount = value;
     else if (id == "companderAmount")   p.companderAmount = value;
 }
-
-class ScopedConfigUpdate {
-public:
-    explicit ScopedConfigUpdate(std::atomic<uint32_t>& seq, std::atomic<int>& depth)
-        : sequence(seq), batchDepth(depth) {
-        if (batchDepth.fetch_add(1, std::memory_order_acq_rel) == 0) {
-            const uint32_t cur = sequence.load(std::memory_order_relaxed);
-            sequence.store((cur + 1) | 1U, std::memory_order_release);
+void updateValueTreeWithConfig(juce::ValueTree& state, const Dimension5AudioProcessor::PluginConfig& cfg) {
+    auto setVal = [&](const char* id, float val) {
+        auto child = state.getChildWithProperty("id", id);
+        if (child.isValid()) {
+            child.setProperty("value", (double)val, nullptr);
         }
-    }
-
-    ~ScopedConfigUpdate() {
-        if (batchDepth.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            const uint32_t cur = sequence.load(std::memory_order_relaxed);
-            const uint32_t nextEven = (cur & 1U) ? (cur + 1) : (cur + 2);
-            sequence.store(nextEven, std::memory_order_release);
-        }
-    }
-
-private:
-    std::atomic<uint32_t>& sequence;
-    std::atomic<int>& batchDepth;
-};
+    };
+    setVal(kModeParamId, (float)cfg.dspParams.mode);
+    setVal("dryGain", cfg.dspParams.dryGain);
+    setVal("wetDirectGain", cfg.dspParams.wetDirectGain);
+    setVal("wetCrossGain", cfg.dspParams.wetCrossGain);
+    setVal("baseDelayMs", cfg.dspParams.baseDelayMs);
+    setVal("depthMs", cfg.dspParams.depthMs);
+    setVal("rateHz", cfg.dspParams.rateHz);
+    setVal("hpfHz", cfg.dspParams.hpfHz);
+    setVal("lpfHz", cfg.dspParams.lpfHz);
+    setVal("analogAmount", cfg.dspParams.analogAmount);
+    setVal("companderAmount", cfg.dspParams.companderAmount);
+    setVal("inputGain", cfg.dspParams.inputGain);
+    setVal("outputGain", cfg.dspParams.outputGain);
+    setVal("width", cfg.dspParams.width);
+    setVal(kMixParamId, cfg.mix);
+    setVal(kBypassParamId, cfg.bypassTarget <= 0.5f ? 1.0f : 0.0f);
+}
 } // namespace
 
 Dimension5AudioProcessor::Dimension5AudioProcessor()
@@ -112,8 +113,7 @@ Dimension5AudioProcessor::Dimension5AudioProcessor()
     stagedConfig.bypassTarget = getBypassTarget();
 
     activeConfig = stagedConfig;
-    lastAppliedConfig = stagedConfig;
-    hasActiveConfig = true;
+    appliedSnapshotBuffer.publish(stagedConfig);
 
     compareStates[0] = parameters.copyState();
     compareStates[1] = parameters.copyState();
@@ -152,12 +152,16 @@ void Dimension5AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBl
     mixSmoothCoeff = (float)(1.0 - std::exp(-1.0 / (0.020 * (double)safeSampleRate)));
 
     {
-        ScopedConfigUpdate guard(presetUpdateSeq, batchDepth);
+        std::lock_guard<std::recursive_mutex> lock(controlMutex);
         stagedConfig.dspParams.sampleRate = safeSampleRate;
+        publishConfigToAudio(stagedConfig);
     }
 
-    activeConfig = stagedConfig;
-    hasActiveConfig = true;
+    PluginConfig incoming;
+    while (configQueue.tryDequeue(incoming)) {
+        activeConfig = incoming;
+    }
+    fallbackMailbox.consume(activeConfig);
 
     if (activeConfig.dspParams.mode != dsp.params.mode) {
         Dimension_SetMode(&dsp, activeConfig.dspParams.mode);
@@ -168,11 +172,7 @@ void Dimension5AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBl
     bypassEffectLevel = activeConfig.bypassTarget;
     smoothMix = activeConfig.mix;
 
-    {
-        appliedConfigSeq.fetch_add(1, std::memory_order_release);
-        lastAppliedConfig = activeConfig;
-        appliedConfigSeq.fetch_add(1, std::memory_order_release);
-    }
+    appliedSnapshotBuffer.publish(activeConfig);
 }
 
 void Dimension5AudioProcessor::releaseResources() {
@@ -207,26 +207,24 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         return;
     }
 
-    /* Lock-free, real-time safe configuration capture:
-     * Check sequence counter before and after copying.
-     * If an update is in progress (seq odd) or coincided with copy (seqBefore != seqAfter),
-     * retain the last valid configuration without touching DSP. */
-    const uint32_t seqBefore = presetUpdateSeq.load(std::memory_order_acquire);
-    if ((seqBefore & 1U) == 0U) {
-        PluginConfig candidate = stagedConfig;
-        const uint32_t seqAfter = presetUpdateSeq.load(std::memory_order_acquire);
-        if (seqBefore == seqAfter) {
-            activeConfig = candidate;
-            hasActiveConfig = true;
-            if (activeConfig.dspParams.mode != dsp.params.mode) {
-                Dimension_SetMode(&dsp, activeConfig.dspParams.mode);
-            }
-            Dimension_SetParams(&dsp, &activeConfig.dspParams);
+    // Lock-free, wait-free configuration capture from producers
+    PluginConfig newConfig;
+    bool configUpdated = false;
+    while (configQueue.tryDequeue(newConfig)) {
+        activeConfig = newConfig;
+        configUpdated = true;
+    }
+    if (fallbackMailbox.consume(newConfig)) {
+        activeConfig = newConfig;
+        configUpdated = true;
+    }
 
-            appliedConfigSeq.fetch_add(1, std::memory_order_release);
-            lastAppliedConfig = activeConfig;
-            appliedConfigSeq.fetch_add(1, std::memory_order_release);
+    if (configUpdated) {
+        if (activeConfig.dspParams.mode != dsp.params.mode) {
+            Dimension_SetMode(&dsp, activeConfig.dspParams.mode);
         }
+        Dimension_SetParams(&dsp, &activeConfig.dspParams);
+        appliedSnapshotBuffer.publish(activeConfig);
     }
 
     const float targetMix = activeConfig.mix;
@@ -238,8 +236,6 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     while (pos < totalFrames) {
         const int n = juce::jmin<int>(DIMENSION_MAX_BLOCK_SIZE, totalFrames - pos);
 
-        /* Read input source safely: mono inputs feed both L and R paths;
-         * channel 1 is never read when only mono input is provided. */
         const float* srcL = buffer.getReadPointer(0, pos);
         const float* srcR = (numInChannels > 1) ? buffer.getReadPointer(1, pos) : srcL;
 
@@ -265,13 +261,11 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
             const float mixedR = dryR + effectiveMix * (outR[(size_t)i] - dryR);
 
             if (dstR != nullptr) {
-                /* Stereo output: deliver distinct modulated channels */
                 dstL[i] = mixedL;
                 dstR[i] = mixedR;
                 blockPeakL = juce::jmax(blockPeakL, std::abs(mixedL));
                 blockPeakR = juce::jmax(blockPeakR, std::abs(mixedR));
             } else {
-                /* Mono output: balanced symmetrical downmix of both Dimension channels */
                 const float monoOut = 0.5f * (mixedL + mixedR);
                 dstL[i] = monoOut;
                 blockPeakL = juce::jmax(blockPeakL, std::abs(monoOut));
@@ -282,7 +276,6 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         pos += n;
     }
 
-    /* Clear any remaining output channels beyond numOutChannels to prevent trailing data */
     for (int ch = numOutChannels; ch < buffer.getNumChannels(); ++ch) {
         buffer.clear(ch, 0, totalFrames);
     }
@@ -291,19 +284,54 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     outputMeterRight.store(juce::jlimit(0.0f, 1.0f, blockPeakR), std::memory_order_relaxed);
 }
 
+void Dimension5AudioProcessor::publishConfigToAudio(const PluginConfig& cfg) {
+    if (!configQueue.tryEnqueue(cfg)) {
+        fallbackMailbox.publish(cfg);
+        saturationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void Dimension5AudioProcessor::setInternalParamValue(const char* id, float value) {
+    if (auto* param = parameters.getParameter(id)) {
+        isInternalPresentationSync.store(true, std::memory_order_release);
+        param->setValue(param->convertTo0to1(value));
+        isInternalPresentationSync.store(false, std::memory_order_release);
+    }
+}
+
+void Dimension5AudioProcessor::setFloatParamHost(const char* id, float value) {
+    if (auto* param = parameters.getParameter(id)) {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+        param->endChangeGesture();
+    }
+}
+
+void Dimension5AudioProcessor::syncAdvancedParamsInternal(const DimensionParams& p) {
+    juce::ignoreUnused(p);
+}
+
 void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID, float newValue) {
-    if (isBatchRestoring.load(std::memory_order_relaxed)) {
+    if (isBatchRestoring.load(std::memory_order_acquire) || isInternalPresentationSync.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(controlMutex);
+
+    if (isBatchRestoring.load(std::memory_order_relaxed) || isInternalPresentationSync.load(std::memory_order_relaxed)) {
         return;
     }
 
     if (parameterID == kModeParamId) {
         const int requestedModeInt = juce::jlimit(0, 4, juce::roundToInt(newValue));
         const auto requestedMode = (DimensionMode)requestedModeInt;
+        const uint64_t newGen = ++stateGeneration;
 
-        ScopedConfigUpdate guard(presetUpdateSeq, batchDepth);
+        // An explicit mode change invalidates any pending custom transition or previous sync
+        pendingModeSyncGeneration.store(0, std::memory_order_release);
+        pendingPresetSyncGeneration.store(0, std::memory_order_release);
 
         if (requestedMode < DIMENSION_MODE_CUSTOM) {
-            // Explicit factory mode selection (I..IV)
             lastPresetMode.store((int)requestedMode, std::memory_order_release);
             effectiveMode.store((int)requestedMode, std::memory_order_release);
 
@@ -315,34 +343,35 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
             p.width = stagedConfig.dspParams.width;
 
             stagedConfig.dspParams = p;
+            publishConfigToAudio(stagedConfig);
 
-            presetNeedsSyncToParams.store(true, std::memory_order_release);
+            // Synchronize internal parameter values immediately so state persistence is instant
+            syncAdvancedParamsInternal(p);
+
+            // Schedule deferred message-thread presentation notification to host
+            pendingPresetSyncGeneration.store(newGen, std::memory_order_release);
+            pendingPresetSyncMode.store((int)requestedMode, std::memory_order_release);
             triggerAsyncUpdate();
         } else {
-            // Explicit Custom mode selection:
-            // Baseline is the active/last preset mode (preserves sonic configuration)
             effectiveMode.store((int)DIMENSION_MODE_CUSTOM, std::memory_order_release);
             stagedConfig.dspParams.mode = DIMENSION_MODE_CUSTOM;
+            publishConfigToAudio(stagedConfig);
 
-            presetNeedsSyncToParams.store(true, std::memory_order_release);
+            pendingPresetSyncGeneration.store(newGen, std::memory_order_release);
+            pendingPresetSyncMode.store((int)DIMENSION_MODE_CUSTOM, std::memory_order_release);
             triggerAsyncUpdate();
         }
         return;
     }
 
     if (isAdvancedParamId(parameterID)) {
-        if (isSyncingModePreset.load(std::memory_order_relaxed)) {
-            return;
-        }
-
-        ScopedConfigUpdate guard(presetUpdateSeq, batchDepth);
-
-        // Cancel pending preset-to-params sync so delayed updates cannot overwrite this edit
-        presetNeedsSyncToParams.store(false, std::memory_order_release);
+        const uint64_t newGen = ++stateGeneration;
+        // Advanced edits invalidate pending preset updates
+        pendingPresetSyncGeneration.store(0, std::memory_order_release);
 
         const int curEffMode = effectiveMode.load(std::memory_order_acquire);
         if (curEffMode < (int)DIMENSION_MODE_CUSTOM) {
-            // First advanced edit while a factory mode is active -> Transition to Custom!
+            // First advanced edit while a preset mode is active -> Transition to Custom!
             effectiveMode.store((int)DIMENSION_MODE_CUSTOM, std::memory_order_release);
 
             const auto baseMode = (DimensionMode)lastPresetMode.load(std::memory_order_acquire);
@@ -356,72 +385,121 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
 
             stagedConfig.dspParams = p;
 
-            modeNeedsSyncToCustom.store(true, std::memory_order_release);
+            auto modeChild = parameters.state.getChildWithProperty("id", kModeParamId);
+            if (modeChild.isValid()) {
+                modeChild.setProperty("value", (double)DIMENSION_MODE_CUSTOM, nullptr);
+            }
+
+            // Schedule deferred presentation notification to host tagged with newGen
+            pendingModeSyncGeneration.store(newGen, std::memory_order_release);
+            pendingHostMode.store((int)DIMENSION_MODE_CUSTOM, std::memory_order_release);
             triggerAsyncUpdate();
         }
 
         applySingleParamToDspParams(stagedConfig.dspParams, parameterID, newValue);
+        publishConfigToAudio(stagedConfig);
         return;
     }
 
-    {
-        ScopedConfigUpdate guard(presetUpdateSeq, batchDepth);
-        if (parameterID == kMixParamId) {
-            stagedConfig.mix = juce::jlimit(0.0f, 1.0f, newValue);
-        } else if (parameterID == kBypassParamId) {
-            stagedConfig.bypassTarget = (newValue >= 0.5f) ? 0.0f : 1.0f;
-        } else if (parameterID == "inputGain") {
-            stagedConfig.dspParams.inputGain = newValue;
-        } else if (parameterID == "outputGain") {
-            stagedConfig.dspParams.outputGain = newValue;
-        } else if (parameterID == "width") {
-            stagedConfig.dspParams.width = newValue;
-        }
+    if (parameterID == kMixParamId) {
+        stagedConfig.mix = juce::jlimit(0.0f, 1.0f, newValue);
+        publishConfigToAudio(stagedConfig);
+    } else if (parameterID == kBypassParamId) {
+        stagedConfig.bypassTarget = (newValue >= 0.5f) ? 0.0f : 1.0f;
+        publishConfigToAudio(stagedConfig);
+    } else if (parameterID == "inputGain") {
+        stagedConfig.dspParams.inputGain = newValue;
+        publishConfigToAudio(stagedConfig);
+    } else if (parameterID == "outputGain") {
+        stagedConfig.dspParams.outputGain = newValue;
+        publishConfigToAudio(stagedConfig);
+    } else if (parameterID == "width") {
+        stagedConfig.dspParams.width = newValue;
+        publishConfigToAudio(stagedConfig);
     }
 }
 
 void Dimension5AudioProcessor::handleAsyncUpdate() {
-    if (modeNeedsSyncToCustom.exchange(false, std::memory_order_acq_rel)) {
-        if (auto* modeParam = parameters.getParameter(kModeParamId)) {
-            const float customVal = modeParam->convertTo0to1((float)DIMENSION_MODE_CUSTOM);
-            if (std::abs(modeParam->getValue() - customVal) > 1e-4f) {
-                isSyncingModePreset.store(true, std::memory_order_release);
-                modeParam->setValueNotifyingHost(customVal);
-                isSyncingModePreset.store(false, std::memory_order_release);
+    uint64_t modeGen = 0;
+    int targetMode = -1;
+    uint64_t presetGen = 0;
+    int presetMode = -1;
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(controlMutex);
+        modeGen = pendingModeSyncGeneration.load(std::memory_order_acquire);
+        targetMode = pendingHostMode.load(std::memory_order_acquire);
+
+        // Discard mode sync if obsolete (newer decision occurred or mode is no longer target)
+        if (modeGen != 0) {
+            if (targetMode != effectiveMode.load(std::memory_order_relaxed)) {
+                pendingModeSyncGeneration.store(0, std::memory_order_release);
+                modeGen = 0;
+            }
+        }
+
+        presetGen = pendingPresetSyncGeneration.load(std::memory_order_acquire);
+        presetMode = pendingPresetSyncMode.load(std::memory_order_acquire);
+        if (presetGen != 0) {
+            if (presetMode != effectiveMode.load(std::memory_order_relaxed)) {
+                pendingPresetSyncGeneration.store(0, std::memory_order_release);
+                presetGen = 0;
             }
         }
     }
 
-    if (presetNeedsSyncToParams.exchange(false, std::memory_order_acq_rel)) {
-        const int curMode = effectiveMode.load(std::memory_order_acquire);
-        if (curMode >= (int)DIMENSION_MODE_I && curMode < (int)DIMENSION_MODE_CUSTOM) {
-            DimensionParams p;
-            Dimension_GetModeParams((DimensionMode)curMode, &p);
-            isSyncingModePreset.store(true, std::memory_order_release);
-            setFloatParam("dryGain", p.dryGain);
-            setFloatParam("wetDirectGain", p.wetDirectGain);
-            setFloatParam("wetCrossGain", p.wetCrossGain);
-            setFloatParam("baseDelayMs", p.baseDelayMs);
-            setFloatParam("depthMs", p.depthMs);
-            setFloatParam("rateHz", p.rateHz);
-            setFloatParam("hpfHz", p.hpfHz);
-            setFloatParam("lpfHz", p.lpfHz);
-            setFloatParam("analogAmount", p.analogAmount);
-            setFloatParam("companderAmount", p.companderAmount);
-            isSyncingModePreset.store(false, std::memory_order_release);
-        } else if (curMode == (int)DIMENSION_MODE_CUSTOM) {
-            isSyncingModePreset.store(true, std::memory_order_release);
-            setFloatParam("dryGain", stagedConfig.dspParams.dryGain);
-            setFloatParam("wetDirectGain", stagedConfig.dspParams.wetDirectGain);
-            setFloatParam("wetCrossGain", stagedConfig.dspParams.wetCrossGain);
-            setFloatParam("baseDelayMs", stagedConfig.dspParams.baseDelayMs);
-            setFloatParam("depthMs", stagedConfig.dspParams.depthMs);
-            setFloatParam("rateHz", stagedConfig.dspParams.rateHz);
-            setFloatParam("hpfHz", stagedConfig.dspParams.hpfHz);
-            setFloatParam("lpfHz", stagedConfig.dspParams.lpfHz);
-            setFloatParam("analogAmount", stagedConfig.dspParams.analogAmount);
-            setFloatParam("companderAmount", stagedConfig.dspParams.companderAmount);
-            isSyncingModePreset.store(false, std::memory_order_release);
+    // Deliver Custom mode notification to host safely if still valid
+    if (modeGen != 0 && targetMode == (int)DIMENSION_MODE_CUSTOM) {
+        if (auto* modeParam = parameters.getParameter(kModeParamId)) {
+            const float customVal = modeParam->convertTo0to1((float)DIMENSION_MODE_CUSTOM);
+            if (std::abs(modeParam->getValue() - customVal) > 1e-4f) {
+                isInternalPresentationSync.store(true, std::memory_order_release);
+                modeParam->setValueNotifyingHost(customVal);
+                isInternalPresentationSync.store(false, std::memory_order_release);
+            }
+        }
+        std::lock_guard<std::recursive_mutex> lock(controlMutex);
+        if (pendingModeSyncGeneration.load(std::memory_order_relaxed) == modeGen) {
+            pendingModeSyncGeneration.store(0, std::memory_order_release);
+        }
+    }
+
+    // Deliver advanced parameter notifications to host safely if still valid
+    if (presetGen != 0) {
+        DimensionParams p;
+        bool valid = false;
+        {
+            std::lock_guard<std::recursive_mutex> lock(controlMutex);
+            if (pendingPresetSyncGeneration.load(std::memory_order_relaxed) == presetGen &&
+                presetMode == effectiveMode.load(std::memory_order_relaxed)) {
+                if (presetMode >= (int)DIMENSION_MODE_I && presetMode < (int)DIMENSION_MODE_CUSTOM) {
+                    Dimension_GetModeParams((DimensionMode)presetMode, &p);
+                    valid = true;
+                } else if (presetMode == (int)DIMENSION_MODE_CUSTOM) {
+                    p = stagedConfig.dspParams;
+                    valid = true;
+                }
+            }
+        }
+
+        if (valid) {
+            isInternalPresentationSync.store(true, std::memory_order_release);
+            setFloatParamHost("dryGain", p.dryGain);
+            setFloatParamHost("wetDirectGain", p.wetDirectGain);
+            setFloatParamHost("wetCrossGain", p.wetCrossGain);
+            setFloatParamHost("baseDelayMs", p.baseDelayMs);
+            setFloatParamHost("depthMs", p.depthMs);
+            setFloatParamHost("rateHz", p.rateHz);
+            setFloatParamHost("hpfHz", p.hpfHz);
+            setFloatParamHost("lpfHz", p.lpfHz);
+            setFloatParamHost("analogAmount", p.analogAmount);
+            setFloatParamHost("companderAmount", p.companderAmount);
+            isInternalPresentationSync.store(false, std::memory_order_release);
+
+            std::lock_guard<std::recursive_mutex> lock(controlMutex);
+            if (pendingPresetSyncGeneration.load(std::memory_order_relaxed) == presetGen) {
+                pendingPresetSyncGeneration.store(0, std::memory_order_release);
+            }
         }
     }
 }
@@ -431,23 +509,21 @@ void Dimension5AudioProcessor::applyModePresetToAdvancedParameters(DimensionMode
         return;
     }
 
-    isSyncingModePreset.store(true, std::memory_order_release);
-
     DimensionParams p;
     Dimension_GetModeParams(mode, &p);
 
-    setFloatParam("dryGain", p.dryGain);
-    setFloatParam("wetDirectGain", p.wetDirectGain);
-    setFloatParam("wetCrossGain", p.wetCrossGain);
-    setFloatParam("baseDelayMs", p.baseDelayMs);
-    setFloatParam("depthMs", p.depthMs);
-    setFloatParam("rateHz", p.rateHz);
-    setFloatParam("hpfHz", p.hpfHz);
-    setFloatParam("lpfHz", p.lpfHz);
-    setFloatParam("analogAmount", p.analogAmount);
-    setFloatParam("companderAmount", p.companderAmount);
-
-    isSyncingModePreset.store(false, std::memory_order_release);
+    isInternalPresentationSync.store(true, std::memory_order_release);
+    setFloatParamHost("dryGain", p.dryGain);
+    setFloatParamHost("wetDirectGain", p.wetDirectGain);
+    setFloatParamHost("wetCrossGain", p.wetCrossGain);
+    setFloatParamHost("baseDelayMs", p.baseDelayMs);
+    setFloatParamHost("depthMs", p.depthMs);
+    setFloatParamHost("rateHz", p.rateHz);
+    setFloatParamHost("hpfHz", p.hpfHz);
+    setFloatParamHost("lpfHz", p.lpfHz);
+    setFloatParamHost("analogAmount", p.analogAmount);
+    setFloatParamHost("companderAmount", p.companderAmount);
+    isInternalPresentationSync.store(false, std::memory_order_release);
 }
 
 juce::AudioProcessorEditor* Dimension5AudioProcessor::createEditor() {
@@ -502,9 +578,10 @@ void Dimension5AudioProcessor::changeProgramName(int index, const juce::String& 
 }
 
 void Dimension5AudioProcessor::getStateInformation(juce::MemoryBlock& destData) {
-    std::lock_guard<std::mutex> lock(controlMutex);
-    handleAsyncUpdate();
+    std::lock_guard<std::recursive_mutex> lock(controlMutex);
     if (auto state = parameters.copyState(); state.isValid()) {
+        updateValueTreeWithConfig(state, stagedConfig);
+
         std::unique_ptr<juce::XmlElement> xml(state.createXml());
         xml->setAttribute("program", currentProgram.load(std::memory_order_relaxed));
         xml->setAttribute("activeCompareSlot", activeCompareSlot.load(std::memory_order_relaxed));
@@ -527,13 +604,13 @@ void Dimension5AudioProcessor::getStateInformation(juce::MemoryBlock& destData) 
 void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInBytes) {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName(parameters.state.getType())) {
-        std::lock_guard<std::mutex> lock(controlMutex);
+        std::lock_guard<std::recursive_mutex> lock(controlMutex);
         isBatchRestoring.store(true, std::memory_order_release);
         cancelPendingUpdate();
-        modeNeedsSyncToCustom.store(false, std::memory_order_release);
-        presetNeedsSyncToParams.store(false, std::memory_order_release);
 
-        ScopedConfigUpdate guard(presetUpdateSeq, batchDepth);
+        ++stateGeneration;
+        pendingModeSyncGeneration.store(0, std::memory_order_release);
+        pendingPresetSyncGeneration.store(0, std::memory_order_release);
 
         currentProgram.store(juce::jlimit(0, getNumPrograms() - 1, xml->getIntAttribute("program", currentProgram.load())), std::memory_order_relaxed);
         activeCompareSlot.store(juce::jlimit(0, 1, xml->getIntAttribute("activeCompareSlot", activeCompareSlot.load())), std::memory_order_relaxed);
@@ -575,18 +652,8 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             stagedConfig.mix = getMix();
             stagedConfig.bypassTarget = getBypassTarget();
 
-            isSyncingModePreset.store(true, std::memory_order_release);
-            setFloatParam("dryGain", p.dryGain);
-            setFloatParam("wetDirectGain", p.wetDirectGain);
-            setFloatParam("wetCrossGain", p.wetCrossGain);
-            setFloatParam("baseDelayMs", p.baseDelayMs);
-            setFloatParam("depthMs", p.depthMs);
-            setFloatParam("rateHz", p.rateHz);
-            setFloatParam("hpfHz", p.hpfHz);
-            setFloatParam("lpfHz", p.lpfHz);
-            setFloatParam("analogAmount", p.analogAmount);
-            setFloatParam("companderAmount", p.companderAmount);
-            isSyncingModePreset.store(false, std::memory_order_release);
+            publishConfigToAudio(stagedConfig);
+            syncAdvancedParamsInternal(p);
         } else {
             effectiveMode.store((int)DIMENSION_MODE_CUSTOM, std::memory_order_release);
             stagedConfig.dspParams.sampleRate = sr;
@@ -608,6 +675,8 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             stagedConfig.dspParams.width = getFloatParam("width");
             stagedConfig.mix = getMix();
             stagedConfig.bypassTarget = getBypassTarget();
+
+            publishConfigToAudio(stagedConfig);
         }
 
         if (!compareStates[0].isValid()) {
@@ -667,18 +736,20 @@ float Dimension5AudioProcessor::getOutputMeterRight() const {
 }
 
 void Dimension5AudioProcessor::switchToCustomMode() {
-    std::lock_guard<std::mutex> lock(controlMutex);
+    std::lock_guard<std::recursive_mutex> lock(controlMutex);
     const int curMode = effectiveMode.load(std::memory_order_acquire);
     if (curMode < (int)DIMENSION_MODE_CUSTOM) {
         effectiveMode.store((int)DIMENSION_MODE_CUSTOM, std::memory_order_release);
-        ScopedConfigUpdate guard(presetUpdateSeq, batchDepth);
         stagedConfig.dspParams.mode = DIMENSION_MODE_CUSTOM;
+        publishConfigToAudio(stagedConfig);
     }
-    setFloatParam(kModeParamId, (float)DIMENSION_MODE_CUSTOM);
+    isInternalPresentationSync.store(true, std::memory_order_release);
+    setFloatParamHost(kModeParamId, (float)DIMENSION_MODE_CUSTOM);
+    isInternalPresentationSync.store(false, std::memory_order_release);
 }
 
 void Dimension5AudioProcessor::selectCompareSlot(int slot) {
-    std::lock_guard<std::mutex> lock(controlMutex);
+    std::lock_guard<std::recursive_mutex> lock(controlMutex);
     const int nextSlot = juce::jlimit(0, 1, slot);
     if (nextSlot == activeCompareSlot.load(std::memory_order_relaxed)) {
         return;
@@ -690,7 +761,7 @@ void Dimension5AudioProcessor::selectCompareSlot(int slot) {
 }
 
 void Dimension5AudioProcessor::copyCompareToOtherSlot() {
-    std::lock_guard<std::mutex> lock(controlMutex);
+    std::lock_guard<std::recursive_mutex> lock(controlMutex);
     const int active = activeCompareSlot.load(std::memory_order_relaxed);
     captureCompareSlot(active);
     compareStates[(size_t)(1 - active)] = compareStates[(size_t)active].createCopy();
@@ -702,8 +773,9 @@ int Dimension5AudioProcessor::getActiveCompareSlot() const {
 
 void Dimension5AudioProcessor::captureCompareSlot(int slot) {
     const size_t s = (size_t)juce::jlimit(0, 1, slot);
-    handleAsyncUpdate();
-    compareStates[s] = parameters.copyState();
+    auto state = parameters.copyState();
+    updateValueTreeWithConfig(state, stagedConfig);
+    compareStates[s] = state;
 }
 
 void Dimension5AudioProcessor::recallCompareSlot(int slot) {
@@ -714,10 +786,10 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
 
     isBatchRestoring.store(true, std::memory_order_release);
     cancelPendingUpdate();
-    modeNeedsSyncToCustom.store(false, std::memory_order_release);
-    presetNeedsSyncToParams.store(false, std::memory_order_release);
 
-    ScopedConfigUpdate guard(presetUpdateSeq, batchDepth);
+    ++stateGeneration;
+    pendingModeSyncGeneration.store(0, std::memory_order_release);
+    pendingPresetSyncGeneration.store(0, std::memory_order_release);
 
     parameters.replaceState(compareStates[safeSlot].createCopy());
 
@@ -738,6 +810,9 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
         stagedConfig.dspParams = p;
         stagedConfig.mix = getMix();
         stagedConfig.bypassTarget = getBypassTarget();
+
+        publishConfigToAudio(stagedConfig);
+        syncAdvancedParamsInternal(p);
     } else {
         effectiveMode.store((int)DIMENSION_MODE_CUSTOM, std::memory_order_release);
         stagedConfig.dspParams.sampleRate = sr;
@@ -759,6 +834,8 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
         stagedConfig.dspParams.width = getFloatParam("width");
         stagedConfig.mix = getMix();
         stagedConfig.bypassTarget = getBypassTarget();
+
+        publishConfigToAudio(stagedConfig);
     }
 
     isBatchRestoring.store(false, std::memory_order_release);
@@ -769,21 +846,16 @@ void Dimension5AudioProcessor::captureCurrentConfig(PluginConfig& outConfig) con
 }
 
 void Dimension5AudioProcessor::getEffectiveConfig(PluginConfig& outConfig) const {
-    uint32_t seqBefore, seqAfter;
-    do {
-        seqBefore = presetUpdateSeq.load(std::memory_order_acquire);
-        outConfig = stagedConfig;
-        seqAfter = presetUpdateSeq.load(std::memory_order_acquire);
-    } while ((seqBefore & 1U) != 0U || seqBefore != seqAfter);
+    std::lock_guard<std::recursive_mutex> lock(controlMutex);
+    outConfig = stagedConfig;
 }
 
 void Dimension5AudioProcessor::getLastAppliedConfig(PluginConfig& outConfig) const {
-    uint32_t seqBefore, seqAfter;
-    do {
-        seqBefore = appliedConfigSeq.load(std::memory_order_acquire);
-        outConfig = lastAppliedConfig;
-        seqAfter = appliedConfigSeq.load(std::memory_order_acquire);
-    } while ((seqBefore & 1U) != 0U || seqBefore != seqAfter);
+    appliedSnapshotBuffer.read(outConfig);
+}
+
+uint32_t Dimension5AudioProcessor::getSaturationCount() const {
+    return saturationCount.load(std::memory_order_relaxed);
 }
 
 float Dimension5AudioProcessor::getFloatParam(const char* id) const {
@@ -800,23 +872,24 @@ float Dimension5AudioProcessor::getBypassTarget() const {
 }
 
 void Dimension5AudioProcessor::applyFactoryPreset(int index) {
-    std::lock_guard<std::mutex> lock(controlMutex);
+    std::lock_guard<std::recursive_mutex> lock(controlMutex);
     currentProgram.store(juce::jlimit(0, getNumPrograms() - 1, index), std::memory_order_relaxed);
     const auto& preset = kFactoryPresets[currentProgram.load()];
 
-    isBatchRestoring.store(true, std::memory_order_release);
     cancelPendingUpdate();
-    modeNeedsSyncToCustom.store(false, std::memory_order_release);
-    presetNeedsSyncToParams.store(false, std::memory_order_release);
 
-    ScopedConfigUpdate guard(presetUpdateSeq, batchDepth);
+    ++stateGeneration;
+    pendingModeSyncGeneration.store(0, std::memory_order_release);
+    pendingPresetSyncGeneration.store(0, std::memory_order_release);
 
-    setFloatParam(kModeParamId, (float)preset.mode);
-    setFloatParam("inputGain", preset.inputGain);
-    setFloatParam("outputGain", preset.outputGain);
-    setFloatParam("width", preset.width);
-    setFloatParam(kMixParamId, preset.mix);
-    setFloatParam(kBypassParamId, 0.0f);
+    isBatchRestoring.store(true, std::memory_order_release);
+
+    setFloatParamHost(kModeParamId, (float)preset.mode);
+    setFloatParamHost("inputGain", preset.inputGain);
+    setFloatParamHost("outputGain", preset.outputGain);
+    setFloatParamHost("width", preset.width);
+    setFloatParamHost(kMixParamId, preset.mix);
+    setFloatParamHost(kBypassParamId, 0.0f);
 
     lastPresetMode.store(preset.mode, std::memory_order_release);
     effectiveMode.store(preset.mode, std::memory_order_release);
@@ -831,29 +904,11 @@ void Dimension5AudioProcessor::applyFactoryPreset(int index) {
     stagedConfig.dspParams = p;
     stagedConfig.mix = preset.mix;
     stagedConfig.bypassTarget = 1.0f;
+    publishConfigToAudio(stagedConfig);
 
-    isSyncingModePreset.store(true, std::memory_order_release);
-    setFloatParam("dryGain", p.dryGain);
-    setFloatParam("wetDirectGain", p.wetDirectGain);
-    setFloatParam("wetCrossGain", p.wetCrossGain);
-    setFloatParam("baseDelayMs", p.baseDelayMs);
-    setFloatParam("depthMs", p.depthMs);
-    setFloatParam("rateHz", p.rateHz);
-    setFloatParam("hpfHz", p.hpfHz);
-    setFloatParam("lpfHz", p.lpfHz);
-    setFloatParam("analogAmount", p.analogAmount);
-    setFloatParam("companderAmount", p.companderAmount);
-    isSyncingModePreset.store(false, std::memory_order_release);
+    syncAdvancedParamsInternal(p);
 
     isBatchRestoring.store(false, std::memory_order_release);
-}
-
-void Dimension5AudioProcessor::setFloatParam(const char* id, float value) {
-    if (auto* param = parameters.getParameter(id)) {
-        param->beginChangeGesture();
-        param->setValueNotifyingHost(param->convertTo0to1(value));
-        param->endChangeGesture();
-    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {

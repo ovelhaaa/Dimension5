@@ -543,6 +543,352 @@ void test_partial_blocks_and_large_buffers() {
         }
     }
 }
+void deliverMessageThreadUpdates(Dimension5AudioProcessor& proc) {
+    proc.deliverPendingUpdates();
+}
+
+// 14. Deferred update: Mode II -> edit Depth -> Mode IV -> deliver pending async update
+void test_deferred_mode_II_depth_then_mode_IV() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // 1. Select Mode II
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    processStereoTestSignal(proc);
+
+    // 2. Edit Depth to 2.2 ms (triggers auto-transition to Custom with delayed async publication)
+    setParamHostValue(proc, "depthMs", 2.2f);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfgMid;
+    proc.getLastAppliedConfig(cfgMid);
+    check(cfgMid.dspParams.mode == DIMENSION_MODE_CUSTOM, "effective mode transitioned to Custom");
+    check(std::abs(cfgMid.dspParams.depthMs - 2.2f) < 1e-4f, "depth updated to 2.2 ms");
+
+    // 3. Select Mode IV BEFORE delivering pending message-thread updates
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_IV);
+
+    // 4. Deliver pending message-thread updates now
+    deliverMessageThreadUpdates(proc);
+
+    // 5. Process audio block
+    processStereoTestSignal(proc);
+
+    // Verify: Mode IV remains selected and applied! Stale Custom notification was discarded.
+    Dimension5AudioProcessor::PluginConfig cfgFinal;
+    proc.getLastAppliedConfig(cfgFinal);
+    check(cfgFinal.dspParams.mode == DIMENSION_MODE_IV, "applied mode is Mode IV, NOT overwritten by Custom");
+    check(std::abs(proc.getFloatParam("mode") - (float)DIMENSION_MODE_IV) < 1e-4f, "host mode parameter is Mode IV");
+    check(std::abs(cfgFinal.dspParams.depthMs - 2.4f) < 1e-4f, "applied depth is Mode IV baseline (2.4 ms)");
+    check(std::abs(cfgFinal.dspParams.baseDelayMs - 11.5f) < 1e-4f, "applied baseDelay is Mode IV baseline (11.5 ms)");
+    check(std::abs(cfgFinal.dspParams.rateHz - 0.50f) < 1e-4f, "applied rate is Mode IV baseline (0.50 Hz)");
+}
+
+// 15. Deferred update: Mode II -> edit Depth -> apply preset -> deliver pending async update
+void test_deferred_mode_II_depth_then_preset() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    processStereoTestSignal(proc);
+
+    setParamHostValue(proc, "depthMs", 2.2f);
+    processStereoTestSignal(proc);
+
+    // Apply factory preset 3 ("Clean Guitar Rack" -> Mode III) before dispatching messages
+    proc.setCurrentProgram(3);
+
+    deliverMessageThreadUpdates(proc);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_III, "applied mode is Mode III from preset");
+    check(std::abs(proc.getFloatParam("mode") - (float)DIMENSION_MODE_III) < 1e-4f, "host mode parameter is Mode III");
+    check(std::abs(cfg.dspParams.depthMs - 1.8f) < 1e-4f, "depth is Mode III preset value (1.8 ms)");
+    check(std::abs(cfg.dspParams.baseDelayMs - 10.0f) < 1e-4f, "baseDelay is Mode III preset value (10.0 ms)");
+}
+
+// 16. Deferred update: Edit -> restore session -> deliver pending async update
+void test_deferred_edit_then_restore_session() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Edit Depth in Mode II
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    processStereoTestSignal(proc);
+    setParamHostValue(proc, "depthMs", 2.2f);
+    processStereoTestSignal(proc);
+
+    // Prepare session XML for Mode I
+    juce::XmlElement xml("PARAMETERS");
+    xml.setAttribute("program", 0);
+    xml.setAttribute("activeCompareSlot", 0);
+    auto addParam = [&](const char* id, float val) {
+        auto* child = xml.createNewChildElement("PARAM");
+        child->setAttribute("id", id);
+        child->setAttribute("value", (double)val);
+    };
+    addParam("mode", 0.0f); // Mode I
+    addParam("baseDelayMs", 7.0f);
+    addParam("depthMs", 0.9f);
+    addParam("rateHz", 0.25f);
+    addParam("dryGain", 0.83f);
+    addParam("inputGain", 1.0f);
+    addParam("width", 1.0f);
+
+    juce::MemoryBlock mem;
+    Dimension5AudioProcessor::copyXmlToBinary(xml, mem);
+
+    // Restore session immediately before dispatching messages
+    proc.setStateInformation(mem.getData(), (int)mem.getSize());
+
+    deliverMessageThreadUpdates(proc);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_I, "restored Mode I prevails");
+    check(std::abs(proc.getFloatParam("mode") - (float)DIMENSION_MODE_I) < 1e-4f, "host mode is Mode I");
+    check(std::abs(cfg.dspParams.depthMs - 0.9f) < 1e-4f, "restored depth is 0.9 ms");
+    check(std::abs(cfg.dspParams.baseDelayMs - 7.0f) < 1e-4f, "restored baseDelay is 7.0 ms");
+}
+
+// 17. Deferred update: Edit -> switch A/B -> deliver pending async update
+void test_deferred_edit_then_switch_ab() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Slot A: Mode II, edit Depth to 2.2 ms
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    processStereoTestSignal(proc);
+    setParamHostValue(proc, "depthMs", 2.2f);
+    processStereoTestSignal(proc);
+
+    // Switch to Slot B (Mode I) before delivering async updates
+    proc.selectCompareSlot(1);
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+
+    deliverMessageThreadUpdates(proc);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfgB;
+    proc.getLastAppliedConfig(cfgB);
+    check(cfgB.dspParams.mode == DIMENSION_MODE_I, "Slot B is Mode I");
+
+    // Switch back to Slot A
+    proc.selectCompareSlot(0);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfgA;
+    proc.getLastAppliedConfig(cfgA);
+    check(cfgA.dspParams.mode == DIMENSION_MODE_CUSTOM, "Slot A preserved Custom mode");
+    check(std::abs(cfgA.dspParams.depthMs - 2.2f) < 1e-4f, "Slot A preserved depth 2.2 ms");
+    check(std::abs(cfgA.dspParams.baseDelayMs - 8.5f) < 1e-4f, "Slot A preserved Mode II baseline (8.5 ms)");
+}
+
+// 18. Deferred update: Multiple rapid edits before delivery -> latest valid state prevails
+void test_deferred_multiple_edits_latest_prevails() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    setParamHostValue(proc, "depthMs", 2.2f);
+    setParamHostValue(proc, "rateHz", 0.45f);
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_IV);
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_III);
+
+    deliverMessageThreadUpdates(proc);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_III, "final applied mode is Mode III");
+    check(std::abs(proc.getFloatParam("mode") - (float)DIMENSION_MODE_III) < 1e-4f, "final host mode is Mode III");
+    check(std::abs(cfg.dspParams.depthMs - 1.8f) < 1e-4f, "Mode III depth is 1.8 ms");
+    check(std::abs(cfg.dspParams.baseDelayMs - 10.0f) < 1e-4f, "Mode III baseDelay is 10.0 ms");
+}
+
+// 19. Cross-thread configuration consistency: No torn configurations
+void test_cross_thread_configuration_consistency_no_tearing() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    auto makeStateXml = [](int mode, float inG, float outG, float w, float m) {
+        juce::XmlElement xml("PARAMETERS");
+        xml.setAttribute("program", 0);
+        xml.setAttribute("activeCompareSlot", 0);
+        auto addParam = [&](const char* id, float val) {
+            auto* child = xml.createNewChildElement("PARAM");
+            child->setAttribute("id", id);
+            child->setAttribute("value", (double)val);
+        };
+        addParam("mode", (float)mode);
+        addParam("inputGain", inG);
+        addParam("outputGain", outG);
+        addParam("width", w);
+        addParam("mix", m);
+        juce::MemoryBlock mem;
+        Dimension5AudioProcessor::copyXmlToBinary(xml, mem);
+        return mem;
+    };
+
+    const juce::MemoryBlock memA = makeStateXml(DIMENSION_MODE_I, 0.50f, 1.50f, 0.60f, 0.40f);
+    const juce::MemoryBlock memB = makeStateXml(DIMENSION_MODE_IV, 1.60f, 0.60f, 1.80f, 0.90f);
+
+    proc.setStateInformation(memA.getData(), (int)memA.getSize());
+    processStereoTestSignal(proc);
+
+    std::atomic<bool> stopFlag { false };
+    std::atomic<bool> threadError { false };
+    std::string errorMessage;
+    std::mutex errorMutex;
+
+    auto recordError = [&](const std::string& msg) {
+        std::lock_guard<std::mutex> lk(errorMutex);
+        if (!threadError.load()) {
+            threadError.store(true);
+            errorMessage = msg;
+        }
+    };
+
+    auto isConfigA = [](const Dimension5AudioProcessor::PluginConfig& c) {
+        return c.dspParams.mode == DIMENSION_MODE_I &&
+               std::abs(c.dspParams.inputGain - 0.50f) < 1e-3f &&
+               std::abs(c.dspParams.outputGain - 1.50f) < 1e-3f &&
+               std::abs(c.dspParams.width - 0.60f) < 1e-3f &&
+               std::abs(c.mix - 0.40f) < 1e-3f;
+    };
+
+    auto isConfigB = [](const Dimension5AudioProcessor::PluginConfig& c) {
+        return c.dspParams.mode == DIMENSION_MODE_IV &&
+               std::abs(c.dspParams.inputGain - 1.60f) < 1e-3f &&
+               std::abs(c.dspParams.outputGain - 0.60f) < 1e-3f &&
+               std::abs(c.dspParams.width - 1.80f) < 1e-3f &&
+               std::abs(c.mix - 0.90f) < 1e-3f;
+    };
+
+    std::atomic<int> blocksChecked { 0 };
+    std::atomic<int> inspectionReadsChecked { 0 };
+
+    // Thread 1: Audio callback thread
+    std::thread audioThread([&] {
+        juce::AudioBuffer<float> buffer(2, 32);
+        juce::MidiBuffer midi;
+        while (!stopFlag.load(std::memory_order_relaxed)) {
+            for (int i = 0; i < 32; ++i) {
+                buffer.setSample(0, i, 0.2f);
+                buffer.setSample(1, i, 0.2f);
+            }
+            proc.processBlock(buffer, midi);
+
+            Dimension5AudioProcessor::PluginConfig applied;
+            proc.getLastAppliedConfig(applied);
+            if (!isConfigA(applied) && !isConfigB(applied)) {
+                recordError("Torn configuration observed on audio thread!");
+                break;
+            }
+            blocksChecked.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    // Thread 2: Inspection reader thread (simulating UI/parameter observer)
+    std::thread inspectionThread([&] {
+        while (!stopFlag.load(std::memory_order_relaxed)) {
+            Dimension5AudioProcessor::PluginConfig cfg;
+            proc.getLastAppliedConfig(cfg);
+            if (!isConfigA(cfg) && !isConfigB(cfg)) {
+                recordError("Torn configuration observed on inspection thread!");
+                break;
+            }
+            inspectionReadsChecked.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
+        }
+    });
+
+    // Thread 3: Producer thread publishing correlated configurations A and B
+    std::thread producerThread([&] {
+        for (int iter = 0; iter < 100 && !threadError.load(); ++iter) {
+            if (iter % 2 == 0) {
+                proc.setStateInformation(memA.getData(), (int)memA.getSize());
+            } else {
+                proc.setStateInformation(memB.getData(), (int)memB.getSize());
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    producerThread.join();
+    stopFlag.store(true, std::memory_order_release);
+    inspectionThread.join();
+    audioThread.join();
+
+    if (threadError.load()) {
+        check(false, errorMessage.c_str());
+    }
+    check(blocksChecked.load() > 20, "audio thread processed blocks safely during concurrency");
+    check(inspectionReadsChecked.load() > 20, "inspection thread observed consistent states");
+}
+
+// 20. Queue saturation and publication unavailability policy
+void test_saturation_policy_and_unavailability() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Audio thread is NOT running.
+    // Rapidly push 128 configurations to exceed queue capacity (64)
+    for (int i = 0; i < 128; ++i) {
+        setParamHostValue(proc, "inputGain", 1.0f + (float)i * 0.01f);
+    }
+
+    // Saturation counter must be > 0
+    check(proc.getSaturationCount() > 0, "queue saturation occurred and was recorded");
+
+    // The 129th edit sets depthMs to exactly 3.14f
+    setParamHostValue(proc, "depthMs", 3.14f);
+
+    // Now run audio thread for 1 block
+    processStereoTestSignal(proc);
+
+    // Verify the latest edit (3.14f) was applied and was NOT silently discarded!
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.depthMs - 3.14f) < 1e-4f, "latest edit preserved and applied after queue saturation");
+}
+
+// 21. Persistence immediately after auto-transition to Custom without async dispatch
+void test_immediate_persistence_after_auto_custom_without_async_dispatch() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    processStereoTestSignal(proc);
+
+    // Edit Depth to 2.2 ms (triggers auto-transition to Custom)
+    setParamHostValue(proc, "depthMs", 2.2f);
+
+    // DO NOT dispatch messages to message thread!
+    // Immediately serialize to memory block
+    juce::MemoryBlock mem;
+    proc.getStateInformation(mem);
+
+    // Restore into a fresh processor instance
+    Dimension5AudioProcessor proc2;
+    proc2.prepareToPlay(48000.0, 32);
+    proc2.setStateInformation(mem.getData(), (int)mem.getSize());
+    processStereoTestSignal(proc2);
+
+    Dimension5AudioProcessor::PluginConfig cfgProc2;
+    proc2.getLastAppliedConfig(cfgProc2);
+    check(cfgProc2.dspParams.mode == DIMENSION_MODE_CUSTOM, "Proc2 restored Custom mode");
+    check(std::abs(cfgProc2.dspParams.depthMs - 2.2f) < 1e-4f, "Proc2 restored depth 2.2 ms");
+    check(std::abs(cfgProc2.dspParams.baseDelayMs - 8.5f) < 1e-4f, "Proc2 restored Mode II baseline baseDelay (8.5 ms)");
+    check(std::abs(cfgProc2.dspParams.rateHz - 0.25f) < 1e-4f, "Proc2 restored Mode II baseline rate (0.25 Hz)");
+    check(std::abs(cfgProc2.dspParams.hpfHz - 120.0f) < 1e-4f, "Proc2 restored Mode II baseline hpf (120 Hz)");
+    check(std::abs(cfgProc2.dspParams.lpfHz - 7500.0f) < 1e-4f, "Proc2 restored Mode II baseline lpf (7500 Hz)");
+    check(std::abs(cfgProc2.dspParams.analogAmount - 0.45f) < 1e-4f, "Proc2 restored Mode II baseline analog (0.45)");
+    check(std::abs(cfgProc2.dspParams.companderAmount - 0.45f) < 1e-4f, "Proc2 restored Mode II baseline compander (0.45)");
+}
 } // namespace
 
 int main() {
@@ -587,6 +933,30 @@ int main() {
 
         std::cout << "[JUCE Tests] 13. test_partial_blocks_and_large_buffers...\n";
         test_partial_blocks_and_large_buffers();
+
+        std::cout << "[JUCE Tests] 14. test_deferred_mode_II_depth_then_mode_IV...\n";
+        test_deferred_mode_II_depth_then_mode_IV();
+
+        std::cout << "[JUCE Tests] 15. test_deferred_mode_II_depth_then_preset...\n";
+        test_deferred_mode_II_depth_then_preset();
+
+        std::cout << "[JUCE Tests] 16. test_deferred_edit_then_restore_session...\n";
+        test_deferred_edit_then_restore_session();
+
+        std::cout << "[JUCE Tests] 17. test_deferred_edit_then_switch_ab...\n";
+        test_deferred_edit_then_switch_ab();
+
+        std::cout << "[JUCE Tests] 18. test_deferred_multiple_edits_latest_prevails...\n";
+        test_deferred_multiple_edits_latest_prevails();
+
+        std::cout << "[JUCE Tests] 19. test_cross_thread_configuration_consistency_no_tearing...\n";
+        test_cross_thread_configuration_consistency_no_tearing();
+
+        std::cout << "[JUCE Tests] 20. test_saturation_policy_and_unavailability...\n";
+        test_saturation_policy_and_unavailability();
+
+        std::cout << "[JUCE Tests] 21. test_immediate_persistence_after_auto_custom_without_async_dispatch...\n";
+        test_immediate_persistence_after_auto_custom_without_async_dispatch();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;
