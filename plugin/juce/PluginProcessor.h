@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <mutex>
 
 #include <JuceHeader.h>
 
@@ -13,6 +14,12 @@ class Dimension5AudioProcessor final : public juce::AudioProcessor,
                                        private juce::AudioProcessorValueTreeState::Listener {
 public:
     using ValueTreeState = juce::AudioProcessorValueTreeState;
+
+    struct PluginConfig {
+        DimensionParams dspParams {};
+        float mix = 1.0f;
+        float bypassTarget = 1.0f;
+    };
 
     Dimension5AudioProcessor();
     ~Dimension5AudioProcessor() override;
@@ -52,18 +59,23 @@ public:
     void copyCompareToOtherSlot();
     int getActiveCompareSlot() const;
 
+    void applyModePresetToAdvancedParameters(DimensionMode mode);
+    bool isUpdatingModePreset() const { return isUpdatingFromModePreset.load(std::memory_order_relaxed); }
+    void getEffectiveConfig(PluginConfig& outConfig) const;
+    float getFloatParam(const char* id) const;
+
 private:
     void parameterChanged(const juce::String& parameterID, float newValue) override;
-    void applyModePresetToParameters(DimensionMode mode);
 
     void captureCompareSlot(int slot);
     void recallCompareSlot(int slot);
-    void syncParametersToDsp();
-    float getFloatParam(const char* id) const;
+    void captureCurrentConfig(PluginConfig& outConfig) const;
     float getMix() const;
     float getBypassTarget() const;
     void applyFactoryPreset(int index);
     void setFloatParam(const char* id, float value);
+
+    mutable std::mutex controlMutex;
 
     DimensionDSP dsp;
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> inL {};
@@ -76,10 +88,14 @@ private:
     float bypassSmoothCoeff = 1.0f;
     float smoothMix = 1.0f;
     float mixSmoothCoeff = 1.0f;
+
     std::array<juce::ValueTree, 2> compareStates;
-    int currentMode = DIMENSION_MODE_I;
     std::atomic<int> currentProgram { 0 };
     std::atomic<int> activeCompareSlot { 0 };
+
+    PluginConfig activeConfig {};
+    bool hasActiveConfig = false;
+    std::atomic<float> currentSampleRate { DIMENSION_SAMPLE_RATE_DEFAULT };
 
     std::atomic<uint32_t> presetUpdateSeq { 0 };
     std::atomic<bool> isUpdatingFromModePreset { false };

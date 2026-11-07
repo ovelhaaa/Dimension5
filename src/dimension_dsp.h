@@ -94,6 +94,7 @@ void Dimension_Reset(DimensionDSP* d);
 void Dimension_SetMode(DimensionDSP* d, DimensionMode mode);
 void Dimension_SetParams(DimensionDSP* d, const DimensionParams* p);
 void Dimension_GetParams(const DimensionDSP* d, DimensionParams* p);
+void Dimension_GetModeParams(DimensionMode mode, DimensionParams* p);
 void Dimension_ProcessBlock(
     DimensionDSP* d,
     const float* inL,

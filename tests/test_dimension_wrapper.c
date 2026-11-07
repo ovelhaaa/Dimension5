@@ -33,22 +33,24 @@ typedef struct MockPluginState {
 } MockPluginState;
 
 static void mock_init_defaults(MockPluginState* s) {
-    s->mode = (float)DIMENSION_MODE_I;
+    DimensionParams p;
+    Dimension_GetModeParams(DIMENSION_MODE_I, &p);
+    s->mode = (float)p.mode;
     s->mix = 1.0f;
     s->bypass = 0.0f;
-    s->inputGain = 1.0f;
-    s->outputGain = 1.0f;
-    s->dryGain = 0.83f;
-    s->wetDirectGain = 0.40f;
-    s->wetCrossGain = 0.28f;
-    s->baseDelayMs = 7.0f;
-    s->depthMs = 0.9f;
-    s->rateHz = 0.25f;
-    s->hpfHz = 120.0f;
-    s->lpfHz = 8000.0f;
-    s->analogAmount = 0.35f;
-    s->companderAmount = 0.35f;
-    s->width = 1.0f;
+    s->inputGain = p.inputGain;
+    s->outputGain = p.outputGain;
+    s->dryGain = p.dryGain;
+    s->wetDirectGain = p.wetDirectGain;
+    s->wetCrossGain = p.wetCrossGain;
+    s->baseDelayMs = p.baseDelayMs;
+    s->depthMs = p.depthMs;
+    s->rateHz = p.rateHz;
+    s->hpfHz = p.hpfHz;
+    s->lpfHz = p.lpfHz;
+    s->analogAmount = p.analogAmount;
+    s->companderAmount = p.companderAmount;
+    s->width = p.width;
 }
 
 static void mock_apply_mode(MockPluginState* s, DimensionMode mode) {
@@ -56,11 +58,8 @@ static void mock_apply_mode(MockPluginState* s, DimensionMode mode) {
     if (mode == DIMENSION_MODE_CUSTOM) {
         return;
     }
-    DimensionDSP d;
-    Dimension_Init(&d, TEST_SR);
-    Dimension_SetMode(&d, mode);
     DimensionParams p;
-    Dimension_GetParams(&d, &p);
+    Dimension_GetModeParams(mode, &p);
 
     s->dryGain = p.dryGain;
     s->wetDirectGain = p.wetDirectGain;
@@ -83,12 +82,9 @@ static void mock_edit_advanced_param(MockPluginState* s, float* targetField, flo
 }
 
 static int test_mode_preset_values_exact(void) {
-    DimensionDSP d;
-    Dimension_Init(&d, TEST_SR);
     DimensionParams p;
 
-    Dimension_SetMode(&d, DIMENSION_MODE_I);
-    Dimension_GetParams(&d, &p);
+    Dimension_GetModeParams(DIMENSION_MODE_I, &p);
     CHECK(fabsf(p.baseDelayMs - 7.0f) < 1e-5f);
     CHECK(fabsf(p.depthMs - 0.9f) < 1e-5f);
     CHECK(fabsf(p.rateHz - 0.25f) < 1e-5f);
@@ -98,9 +94,9 @@ static int test_mode_preset_values_exact(void) {
     CHECK(fabsf(p.wetCrossGain - 0.28f) < 1e-5f);
     CHECK(fabsf(p.analogAmount - 0.35f) < 1e-5f);
     CHECK(fabsf(p.companderAmount - 0.35f) < 1e-5f);
+    CHECK(fabsf(p.dryGain - 0.83f) < 1e-5f);
 
-    Dimension_SetMode(&d, DIMENSION_MODE_II);
-    Dimension_GetParams(&d, &p);
+    Dimension_GetModeParams(DIMENSION_MODE_II, &p);
     CHECK(fabsf(p.baseDelayMs - 8.5f) < 1e-5f);
     CHECK(fabsf(p.depthMs - 1.4f) < 1e-5f);
     CHECK(fabsf(p.rateHz - 0.25f) < 1e-5f);
@@ -110,9 +106,9 @@ static int test_mode_preset_values_exact(void) {
     CHECK(fabsf(p.wetCrossGain - 0.3325f) < 1e-5f);
     CHECK(fabsf(p.analogAmount - 0.45f) < 1e-5f);
     CHECK(fabsf(p.companderAmount - 0.45f) < 1e-5f);
+    CHECK(fabsf(p.dryGain - 0.83f) < 1e-5f);
 
-    Dimension_SetMode(&d, DIMENSION_MODE_III);
-    Dimension_GetParams(&d, &p);
+    Dimension_GetModeParams(DIMENSION_MODE_III, &p);
     CHECK(fabsf(p.baseDelayMs - 10.0f) < 1e-5f);
     CHECK(fabsf(p.depthMs - 1.8f) < 1e-5f);
     CHECK(fabsf(p.rateHz - 0.50f) < 1e-5f);
@@ -122,9 +118,9 @@ static int test_mode_preset_values_exact(void) {
     CHECK(fabsf(p.wetCrossGain - 0.35f) < 1e-5f);
     CHECK(fabsf(p.analogAmount - 0.50f) < 1e-5f);
     CHECK(fabsf(p.companderAmount - 0.50f) < 1e-5f);
+    CHECK(fabsf(p.dryGain - 0.83f) < 1e-5f);
 
-    Dimension_SetMode(&d, DIMENSION_MODE_IV);
-    Dimension_GetParams(&d, &p);
+    Dimension_GetModeParams(DIMENSION_MODE_IV, &p);
     CHECK(fabsf(p.baseDelayMs - 11.5f) < 1e-5f);
     CHECK(fabsf(p.depthMs - 2.4f) < 1e-5f);
     CHECK(fabsf(p.rateHz - 0.50f) < 1e-5f);
@@ -134,6 +130,7 @@ static int test_mode_preset_values_exact(void) {
     CHECK(fabsf(p.wetCrossGain - 0.385f) < 1e-5f);
     CHECK(fabsf(p.analogAmount - 0.60f) < 1e-5f);
     CHECK(fabsf(p.companderAmount - 0.60f) < 1e-5f);
+    CHECK(fabsf(p.dryGain - 0.83f) < 1e-5f);
     return 0;
 }
 

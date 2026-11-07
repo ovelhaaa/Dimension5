@@ -418,40 +418,18 @@ static int test_block_size_smoothing_invariance(void) {
     return 0;
 }
 
-static int test_smoothed_controls_transitions(void) {
-    DimensionDSP d;
-    Dimension_Init(&d, TEST_SR);
-
-    /* Verify smoothers start at exact target with zero initial ramp */
-    CHECK(fabsf(d.smoothInputGain - 1.0f) < 1e-6f);
-    CHECK(fabsf(d.smoothOutputGain - 1.0f) < 1e-6f);
-    CHECK(fabsf(d.smoothDryGain - 0.83f) < 1e-6f);
-    CHECK(fabsf(d.smoothWidth - 1.0f) < 1e-6f);
-
-    /* Change parameters abruptly to stress test smoothing */
-    DimensionParams p;
-    Dimension_GetParams(&d, &p);
-    p.mode = DIMENSION_MODE_CUSTOM;
-    p.inputGain = 2.5f;
-    p.outputGain = 0.5f;
-    p.dryGain = 0.3f;
-    p.width = 1.8f;
-    p.wetDirectGain = 0.7f;
-    p.wetCrossGain = 0.5f;
-    Dimension_SetParams(&d, &p);
-
+static float measure_max_sample_delta(DimensionDSP* d, uint32_t numSamples, uint32_t startSampleIdx) {
     float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
     float prevL = 0.0f, prevR = 0.0f;
     float maxDelta = 0.0f;
     bool first = true;
 
-    /* Process audio while parameters smooth */
-    for (uint32_t n = 0; n < (uint32_t)TEST_SR / 2U; n += BLOCK) {
+    for (uint32_t n = 0; n < numSamples; n += BLOCK) {
         for (uint32_t i = 0; i < BLOCK; ++i) {
-            const float s = 0.2f * sinf(2.0f * PI_F * 1000.0f * (float)(n + i) / TEST_SR);
+            const float s = 0.2f * sinf(2.0f * PI_F * 1000.0f * (float)(startSampleIdx + n + i) / TEST_SR);
             inL[i] = inR[i] = s;
         }
-        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        Dimension_ProcessBlock(d, inL, inR, outL, outR, BLOCK);
         for (uint32_t i = 0; i < BLOCK; ++i) {
             if (!first) {
                 const float dL = fabsf(outL[i] - prevL);
@@ -464,37 +442,125 @@ static int test_smoothed_controls_transitions(void) {
             first = false;
         }
     }
+    return maxDelta;
+}
 
-    /* Measure baseline natural delta with fixed target parameters */
-    DimensionDSP dBase;
-    Dimension_Init(&dBase, TEST_SR);
-    Dimension_SetParams(&dBase, &p);
-    float basePrev = 0.0f;
-    float baseMaxDelta = 0.0f;
-    bool baseFirst = true;
-    for (uint32_t n = 0; n < (uint32_t)TEST_SR / 2U; n += BLOCK) {
-        for (uint32_t i = 0; i < BLOCK; ++i) {
-            const float s = 0.2f * sinf(2.0f * PI_F * 1000.0f * (float)(n + i) / TEST_SR);
-            inL[i] = inR[i] = s;
-        }
-        Dimension_ProcessBlock(&dBase, inL, inR, outL, outR, BLOCK);
-        for (uint32_t i = 0; i < BLOCK; ++i) {
-            if (!baseFirst) {
-                const float dL = fabsf(outL[i] - basePrev);
-                if (dL > baseMaxDelta) baseMaxDelta = dL;
-            }
-            basePrev = outL[i];
-            baseFirst = false;
-        }
+static int test_smoothed_controls_transitions(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+
+    /* Verify smoothers start at exact target with zero initial ramp */
+    CHECK(fabsf(d.smoothInputGain - 1.0f) < 1e-6f);
+    CHECK(fabsf(d.smoothOutputGain - 1.0f) < 1e-6f);
+    CHECK(fabsf(d.smoothDryGain - 0.83f) < 1e-6f);
+    CHECK(fabsf(d.smoothWidth - 1.0f) < 1e-6f);
+
+    /* Test 1: inputGain transition (1.0 -> 2.5) */
+    {
+        DimensionParams pBase;
+        Dimension_GetParams(&d, &pBase);
+        pBase.mode = DIMENSION_MODE_CUSTOM;
+        pBase.inputGain = 2.5f;
+
+        /* Static baseline: parameters and smoothers already aligned at target */
+        DimensionDSP dBase;
+        Dimension_Init(&dBase, TEST_SR);
+        Dimension_SetParams(&dBase, &pBase);
+        Dimension_Reset(&dBase);
+        measure_max_sample_delta(&dBase, 9600, 0); /* Stabilize steady state */
+        const float baseMaxDelta = measure_max_sample_delta(&dBase, 9600, 9600);
+
+        /* Transition run: first stabilize at initial configuration, then transition */
+        DimensionDSP dTrans;
+        Dimension_Init(&dTrans, TEST_SR);
+        const float initialMaxDelta = measure_max_sample_delta(&dTrans, 9600, 0); /* Stabilize initial state */
+        Dimension_SetParams(&dTrans, &pBase); /* Apply change */
+        const float transMaxDelta = measure_max_sample_delta(&dTrans, 9600, 9600);
+        const float naturalDelta = (initialMaxDelta > baseMaxDelta) ? initialMaxDelta : baseMaxDelta;
+        CHECK((transMaxDelta - naturalDelta) < 0.005f);
+        CHECK(fabsf(dTrans.smoothInputGain - 2.5f) < 0.01f);
     }
-    /* Discontinuity added by parameter smoothing above natural signal variation must be negligible (< 0.005) */
-    CHECK((maxDelta - baseMaxDelta) < 0.005f);
 
-    /* Confirm parameters converged close to targets */
-    CHECK(fabsf(d.smoothInputGain - 2.5f) < 0.01f);
-    CHECK(fabsf(d.smoothOutputGain - 0.5f) < 0.01f);
-    CHECK(fabsf(d.smoothDryGain - 0.3f) < 0.01f);
-    CHECK(fabsf(d.smoothWidth - 1.8f) < 0.01f);
+    /* Test 2: dryGain transition (0.83 -> 0.20) */
+    {
+        DimensionParams pBase;
+        Dimension_GetParams(&d, &pBase);
+        pBase.mode = DIMENSION_MODE_CUSTOM;
+        pBase.dryGain = 0.20f;
+
+        DimensionDSP dBase;
+        Dimension_Init(&dBase, TEST_SR);
+        Dimension_SetParams(&dBase, &pBase);
+        Dimension_Reset(&dBase);
+        measure_max_sample_delta(&dBase, 9600, 0);
+        const float baseMaxDelta = measure_max_sample_delta(&dBase, 9600, 9600);
+
+        DimensionDSP dTrans;
+        Dimension_Init(&dTrans, TEST_SR);
+        const float initialMaxDelta = measure_max_sample_delta(&dTrans, 9600, 0);
+        Dimension_SetParams(&dTrans, &pBase);
+        const float transMaxDelta = measure_max_sample_delta(&dTrans, 9600, 9600);
+        const float naturalDelta = (initialMaxDelta > baseMaxDelta) ? initialMaxDelta : baseMaxDelta;
+        CHECK((transMaxDelta - naturalDelta) < 0.005f);
+        CHECK(fabsf(dTrans.smoothDryGain - 0.20f) < 0.01f);
+    }
+
+    /* Test 3: width transition (1.0 -> 1.8) */
+    {
+        DimensionParams pBase;
+        Dimension_GetParams(&d, &pBase);
+        pBase.mode = DIMENSION_MODE_CUSTOM;
+        pBase.width = 1.8f;
+
+        DimensionDSP dBase;
+        Dimension_Init(&dBase, TEST_SR);
+        Dimension_SetParams(&dBase, &pBase);
+        Dimension_Reset(&dBase);
+        measure_max_sample_delta(&dBase, 9600, 0);
+        const float baseMaxDelta = measure_max_sample_delta(&dBase, 9600, 9600);
+
+        DimensionDSP dTrans;
+        Dimension_Init(&dTrans, TEST_SR);
+        const float initialMaxDelta = measure_max_sample_delta(&dTrans, 9600, 0);
+        Dimension_SetParams(&dTrans, &pBase);
+        const float transMaxDelta = measure_max_sample_delta(&dTrans, 9600, 9600);
+        const float naturalDelta = (initialMaxDelta > baseMaxDelta) ? initialMaxDelta : baseMaxDelta;
+        CHECK((transMaxDelta - naturalDelta) < 0.005f);
+        CHECK(fabsf(dTrans.smoothWidth - 1.8f) < 0.01f);
+    }
+
+    /* Test 4: multi-parameter transition */
+    {
+        DimensionParams pTarget;
+        Dimension_GetParams(&d, &pTarget);
+        pTarget.mode = DIMENSION_MODE_CUSTOM;
+        pTarget.inputGain = 2.5f;
+        pTarget.outputGain = 0.5f;
+        pTarget.dryGain = 0.3f;
+        pTarget.width = 1.8f;
+        pTarget.wetDirectGain = 0.7f;
+        pTarget.wetCrossGain = 0.5f;
+
+        DimensionDSP dBase;
+        Dimension_Init(&dBase, TEST_SR);
+        Dimension_SetParams(&dBase, &pTarget);
+        Dimension_Reset(&dBase);
+        measure_max_sample_delta(&dBase, 9600, 0);
+        const float baseMaxDelta = measure_max_sample_delta(&dBase, 9600, 9600);
+
+        DimensionDSP dTrans;
+        Dimension_Init(&dTrans, TEST_SR);
+        const float initialMaxDelta = measure_max_sample_delta(&dTrans, 9600, 0);
+        Dimension_SetParams(&dTrans, &pTarget);
+        const float transMaxDelta = measure_max_sample_delta(&dTrans, 9600, 9600);
+        const float naturalDelta = (initialMaxDelta > baseMaxDelta) ? initialMaxDelta : baseMaxDelta;
+        CHECK((transMaxDelta - naturalDelta) < 0.005f);
+        CHECK(fabsf(dTrans.smoothInputGain - 2.5f) < 0.01f);
+        CHECK(fabsf(dTrans.smoothOutputGain - 0.5f) < 0.01f);
+        CHECK(fabsf(dTrans.smoothDryGain - 0.3f) < 0.01f);
+        CHECK(fabsf(dTrans.smoothWidth - 1.8f) < 0.01f);
+    }
+
     return 0;
 }
 

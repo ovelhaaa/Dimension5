@@ -54,6 +54,9 @@ Dimension5AudioProcessor::Dimension5AudioProcessor()
           .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       parameters(*this, nullptr, "PARAMETERS", createParameterLayout()) {
     Dimension_Init(&dsp, DIMENSION_SAMPLE_RATE_DEFAULT);
+    captureCurrentConfig(activeConfig);
+    hasActiveConfig = true;
+
     compareStates[0] = parameters.copyState();
     compareStates[1] = parameters.copyState();
 
@@ -73,15 +76,28 @@ Dimension5AudioProcessor::~Dimension5AudioProcessor() {
 void Dimension5AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
     juce::ignoreUnused(samplesPerBlock);
     const float safeSampleRate = (float)(sampleRate > 1000.0 ? sampleRate : (double)DIMENSION_SAMPLE_RATE_DEFAULT);
+    currentSampleRate.store(safeSampleRate, std::memory_order_release);
     Dimension_Init(&dsp, safeSampleRate);
 
     bypassSmoothCoeff = (float)(1.0 - std::exp(-1.0 / (0.020 * (double)safeSampleRate)));
-    bypassEffectLevel = getBypassTarget();
-
     mixSmoothCoeff = (float)(1.0 - std::exp(-1.0 / (0.020 * (double)safeSampleRate)));
-    smoothMix = getMix();
 
-    syncParametersToDsp();
+    /* 1. Capture the loaded effective configuration */
+    captureCurrentConfig(activeConfig);
+    activeConfig.dspParams.sampleRate = safeSampleRate;
+    hasActiveConfig = true;
+
+    /* 2. Apply effective mode and parameters to the DSP instance */
+    if (activeConfig.dspParams.mode != dsp.params.mode) {
+        Dimension_SetMode(&dsp, activeConfig.dspParams.mode);
+    }
+    Dimension_SetParams(&dsp, &activeConfig.dspParams);
+
+    /* 3. Reset internal audio states and align smoothers to the exact targets */
+    Dimension_Reset(&dsp);
+
+    bypassEffectLevel = activeConfig.bypassTarget;
+    smoothMix = activeConfig.mix;
 }
 
 void Dimension5AudioProcessor::releaseResources() {
@@ -116,13 +132,27 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         return;
     }
 
-    /* Only sync parameters if no control-thread batch update is in flight. */
-    if ((presetUpdateSeq.load(std::memory_order_acquire) & 1U) == 0U) {
-        syncParametersToDsp();
+    /* Consistent configuration capture without locks, retries or busy wait:
+     * Check sequence counter before and after capture.
+     * If an update is in progress (seq odd) or coincided with capture (seqBefore != seqAfter),
+     * retain the last valid configuration without touching DSP. */
+    const uint32_t seqBefore = presetUpdateSeq.load(std::memory_order_acquire);
+    if ((seqBefore & 1U) == 0U) {
+        PluginConfig candidate;
+        captureCurrentConfig(candidate);
+        const uint32_t seqAfter = presetUpdateSeq.load(std::memory_order_acquire);
+        if (seqBefore == seqAfter) {
+            activeConfig = candidate;
+            hasActiveConfig = true;
+            if (activeConfig.dspParams.mode != dsp.params.mode) {
+                Dimension_SetMode(&dsp, activeConfig.dspParams.mode);
+            }
+            Dimension_SetParams(&dsp, &activeConfig.dspParams);
+        }
     }
 
-    const float targetMix = getMix();
-    const float bypassTarget = getBypassTarget();
+    const float targetMix = activeConfig.mix;
+    const float bypassTarget = activeConfig.bypassTarget;
     float blockPeakL = 0.0f;
     float blockPeakR = 0.0f;
     int pos = 0;
@@ -184,41 +214,21 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
 }
 
 void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID, float newValue) {
-    if (isBatchRestoring.load(std::memory_order_acquire)) {
-        return;
-    }
-
-    if (parameterID == kModeParamId) {
-        if (!isUpdatingFromModePreset.load(std::memory_order_acquire)) {
-            const int newMode = juce::roundToInt(newValue);
-            if (newMode >= (int)DIMENSION_MODE_I && newMode < (int)DIMENSION_MODE_CUSTOM) {
-                applyModePresetToParameters((DimensionMode)newMode);
-            }
-        }
-        return;
-    }
-
-    if (isUpdatingFromModePreset.load(std::memory_order_acquire)) {
-        return;
-    }
-
-    for (const char* id : kAdvancedParamIds) {
-        if (parameterID == id) {
-            const auto* modeParam = parameters.getRawParameterValue(kModeParamId);
-            const int curMode = modeParam != nullptr ? juce::roundToInt(modeParam->load()) : (int)DIMENSION_MODE_I;
-            if (curMode != (int)DIMENSION_MODE_CUSTOM) {
-                setFloatParam(kModeParamId, (float)DIMENSION_MODE_CUSTOM);
-            }
-            break;
-        }
-    }
+    juce::ignoreUnused(parameterID, newValue);
+    /* Safe design: No gestures, no host notification callbacks, and no ValueTree/XML
+     * operations inside parameterChanged. Parameter values are consumed by processBlock
+     * using lock-free atomic sequence snapshots. */
 }
 
-void Dimension5AudioProcessor::applyModePresetToParameters(DimensionMode mode) {
+void Dimension5AudioProcessor::applyModePresetToAdvancedParameters(DimensionMode mode) {
+    if (mode < DIMENSION_MODE_I || mode >= DIMENSION_MODE_CUSTOM) {
+        return;
+    }
+
     isUpdatingFromModePreset.store(true, std::memory_order_release);
 
-    DimensionParams p {};
-    dimension_apply_mode_preset(&p, mode);
+    DimensionParams p;
+    Dimension_GetModeParams(mode, &p);
 
     setFloatParam("dryGain", p.dryGain);
     setFloatParam("wetDirectGain", p.wetDirectGain);
@@ -286,6 +296,7 @@ void Dimension5AudioProcessor::changeProgramName(int index, const juce::String& 
 }
 
 void Dimension5AudioProcessor::getStateInformation(juce::MemoryBlock& destData) {
+    std::lock_guard<std::mutex> lock(controlMutex);
     if (auto state = parameters.copyState(); state.isValid()) {
         std::unique_ptr<juce::XmlElement> xml(state.createXml());
         xml->setAttribute("program", currentProgram.load(std::memory_order_relaxed));
@@ -309,6 +320,10 @@ void Dimension5AudioProcessor::getStateInformation(juce::MemoryBlock& destData) 
 void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInBytes) {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName(parameters.state.getType())) {
+        std::lock_guard<std::mutex> lock(controlMutex);
+        isBatchRestoring.store(true, std::memory_order_release);
+        presetUpdateSeq.fetch_add(1, std::memory_order_release);
+
         currentProgram.store(juce::jlimit(0, getNumPrograms() - 1, xml->getIntAttribute("program", currentProgram.load())), std::memory_order_relaxed);
         activeCompareSlot.store(juce::jlimit(0, 1, xml->getIntAttribute("activeCompareSlot", activeCompareSlot.load())), std::memory_order_relaxed);
         if (auto* slotXml = xml->getChildByName("CompareA")) {
@@ -329,13 +344,15 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             stateXml->removeChildElement(slotXml, true);
         }
 
-        isBatchRestoring.store(true, std::memory_order_release);
-        presetUpdateSeq.fetch_add(1, std::memory_order_release);
-
         parameters.replaceState(juce::ValueTree::fromXml(*stateXml));
 
-        presetUpdateSeq.fetch_add(1, std::memory_order_release);
-        isBatchRestoring.store(false, std::memory_order_release);
+        /* If restored mode is I..IV, ensure advanced parameters hold that mode's preset
+         * as a consistent baseline for any future edit into Custom, even if the session XML
+         * had old/stale advanced parameter values. */
+        const int restoredMode = juce::roundToInt(getFloatParam(kModeParamId));
+        if (restoredMode >= (int)DIMENSION_MODE_I && restoredMode < (int)DIMENSION_MODE_CUSTOM) {
+            applyModePresetToAdvancedParameters((DimensionMode)restoredMode);
+        }
 
         if (!compareStates[0].isValid()) {
             compareStates[0] = parameters.copyState();
@@ -343,6 +360,9 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
         if (!compareStates[1].isValid()) {
             compareStates[1] = parameters.copyState();
         }
+
+        presetUpdateSeq.fetch_add(1, std::memory_order_release);
+        isBatchRestoring.store(false, std::memory_order_release);
     }
 }
 
@@ -392,10 +412,16 @@ float Dimension5AudioProcessor::getOutputMeterRight() const {
 }
 
 void Dimension5AudioProcessor::switchToCustomMode() {
+    std::lock_guard<std::mutex> lock(controlMutex);
+    const int curMode = juce::roundToInt(getFloatParam(kModeParamId));
+    if (curMode >= (int)DIMENSION_MODE_I && curMode < (int)DIMENSION_MODE_CUSTOM) {
+        applyModePresetToAdvancedParameters((DimensionMode)curMode);
+    }
     setFloatParam(kModeParamId, (float)DIMENSION_MODE_CUSTOM);
 }
 
 void Dimension5AudioProcessor::selectCompareSlot(int slot) {
+    std::lock_guard<std::mutex> lock(controlMutex);
     const int nextSlot = juce::jlimit(0, 1, slot);
     if (nextSlot == activeCompareSlot.load(std::memory_order_relaxed)) {
         return;
@@ -407,8 +433,10 @@ void Dimension5AudioProcessor::selectCompareSlot(int slot) {
 }
 
 void Dimension5AudioProcessor::copyCompareToOtherSlot() {
-    captureCompareSlot(activeCompareSlot.load(std::memory_order_relaxed));
-    compareStates[1 - activeCompareSlot.load(std::memory_order_relaxed)] = compareStates[activeCompareSlot.load(std::memory_order_relaxed)].createCopy();
+    std::lock_guard<std::mutex> lock(controlMutex);
+    const int active = activeCompareSlot.load(std::memory_order_relaxed);
+    captureCompareSlot(active);
+    compareStates[(size_t)(1 - active)] = compareStates[(size_t)active].createCopy();
 }
 
 int Dimension5AudioProcessor::getActiveCompareSlot() const {
@@ -416,58 +444,63 @@ int Dimension5AudioProcessor::getActiveCompareSlot() const {
 }
 
 void Dimension5AudioProcessor::captureCompareSlot(int slot) {
-    compareStates[(size_t)juce::jlimit(0, 1, slot)] = parameters.copyState();
+    const size_t s = (size_t)juce::jlimit(0, 1, slot);
+    compareStates[s] = parameters.copyState();
 }
 
 void Dimension5AudioProcessor::recallCompareSlot(int slot) {
-    const int safeSlot = juce::jlimit(0, 1, slot);
-    if (!compareStates[(size_t)safeSlot].isValid()) {
-        compareStates[(size_t)safeSlot] = parameters.copyState();
+    const size_t safeSlot = (size_t)juce::jlimit(0, 1, slot);
+    if (!compareStates[safeSlot].isValid()) {
+        compareStates[safeSlot] = parameters.copyState();
     }
 
     isBatchRestoring.store(true, std::memory_order_release);
     presetUpdateSeq.fetch_add(1, std::memory_order_release);
 
-    parameters.replaceState(compareStates[(size_t)safeSlot].createCopy());
+    parameters.replaceState(compareStates[safeSlot].createCopy());
 
     presetUpdateSeq.fetch_add(1, std::memory_order_release);
     isBatchRestoring.store(false, std::memory_order_release);
 }
 
-void Dimension5AudioProcessor::syncParametersToDsp() {
-    const auto modeValue = parameters.getRawParameterValue(kModeParamId);
-    const int nextMode = modeValue != nullptr ? juce::roundToInt(modeValue->load()) : DIMENSION_MODE_I;
+void Dimension5AudioProcessor::captureCurrentConfig(PluginConfig& outConfig) const {
+    const float modeVal = getFloatParam(kModeParamId);
+    const int modeInt = juce::jlimit((int)DIMENSION_MODE_I, (int)DIMENSION_MODE_CUSTOM, juce::roundToInt(modeVal));
+    const auto mode = (DimensionMode)modeInt;
+    const float sr = currentSampleRate.load(std::memory_order_acquire);
 
-    if (nextMode != currentMode) {
-        currentMode = juce::jlimit((int)DIMENSION_MODE_I, (int)DIMENSION_MODE_CUSTOM, nextMode);
-        Dimension_SetMode(&dsp, (DimensionMode)currentMode);
-    }
-
-    DimensionParams p;
-    Dimension_GetParams(&dsp, &p);
-
-    if (currentMode == DIMENSION_MODE_CUSTOM) {
-        p.mode = DIMENSION_MODE_CUSTOM;
-        p.inputGain = getFloatParam("inputGain");
-        p.outputGain = getFloatParam("outputGain");
-        p.dryGain = getFloatParam("dryGain");
-        p.wetDirectGain = getFloatParam("wetDirectGain");
-        p.wetCrossGain = getFloatParam("wetCrossGain");
-        p.baseDelayMs = getFloatParam("baseDelayMs");
-        p.depthMs = getFloatParam("depthMs");
-        p.rateHz = getFloatParam("rateHz");
-        p.hpfHz = getFloatParam("hpfHz");
-        p.lpfHz = getFloatParam("lpfHz");
-        p.analogAmount = getFloatParam("analogAmount");
-        p.companderAmount = getFloatParam("companderAmount");
-        p.width = getFloatParam("width");
-        Dimension_SetParams(&dsp, &p);
+    if (mode == DIMENSION_MODE_CUSTOM) {
+        outConfig.dspParams.sampleRate = sr;
+        outConfig.dspParams.mode = DIMENSION_MODE_CUSTOM;
+        outConfig.dspParams.quality = DIMENSION_QUALITY_BBD_LITE;
+        outConfig.dspParams.inputGain = getFloatParam("inputGain");
+        outConfig.dspParams.outputGain = getFloatParam("outputGain");
+        outConfig.dspParams.dryGain = getFloatParam("dryGain");
+        outConfig.dspParams.wetDirectGain = getFloatParam("wetDirectGain");
+        outConfig.dspParams.wetCrossGain = getFloatParam("wetCrossGain");
+        outConfig.dspParams.baseDelayMs = getFloatParam("baseDelayMs");
+        outConfig.dspParams.depthMs = getFloatParam("depthMs");
+        outConfig.dspParams.rateHz = getFloatParam("rateHz");
+        outConfig.dspParams.hpfHz = getFloatParam("hpfHz");
+        outConfig.dspParams.lpfHz = getFloatParam("lpfHz");
+        outConfig.dspParams.analogAmount = getFloatParam("analogAmount");
+        outConfig.dspParams.companderAmount = getFloatParam("companderAmount");
+        outConfig.dspParams.noiseAmount = 0.0f;
+        outConfig.dspParams.width = getFloatParam("width");
     } else {
-        p.inputGain = getFloatParam("inputGain");
-        p.outputGain = getFloatParam("outputGain");
-        p.width = getFloatParam("width");
-        Dimension_SetParams(&dsp, &p);
+        Dimension_GetModeParams(mode, &outConfig.dspParams);
+        outConfig.dspParams.sampleRate = sr;
+        outConfig.dspParams.inputGain = getFloatParam("inputGain");
+        outConfig.dspParams.outputGain = getFloatParam("outputGain");
+        outConfig.dspParams.width = getFloatParam("width");
     }
+
+    outConfig.mix = getMix();
+    outConfig.bypassTarget = getBypassTarget();
+}
+
+void Dimension5AudioProcessor::getEffectiveConfig(PluginConfig& outConfig) const {
+    captureCurrentConfig(outConfig);
 }
 
 float Dimension5AudioProcessor::getFloatParam(const char* id) const {
@@ -484,6 +517,7 @@ float Dimension5AudioProcessor::getBypassTarget() const {
 }
 
 void Dimension5AudioProcessor::applyFactoryPreset(int index) {
+    std::lock_guard<std::mutex> lock(controlMutex);
     currentProgram.store(juce::jlimit(0, getNumPrograms() - 1, index), std::memory_order_relaxed);
     const auto& preset = kFactoryPresets[currentProgram.load()];
 
@@ -491,7 +525,7 @@ void Dimension5AudioProcessor::applyFactoryPreset(int index) {
     presetUpdateSeq.fetch_add(1, std::memory_order_release);
 
     setFloatParam(kModeParamId, (float)preset.mode);
-    applyModePresetToParameters((DimensionMode)preset.mode);
+    applyModePresetToAdvancedParameters((DimensionMode)preset.mode);
     setFloatParam("inputGain", preset.inputGain);
     setFloatParam("outputGain", preset.outputGain);
     setFloatParam("width", preset.width);

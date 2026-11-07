@@ -38,3 +38,30 @@ target_compile_definitions(Dimension5Plugin
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0)
+
+add_executable(dimension5_juce_tests
+  ${CMAKE_SOURCE_DIR}/tests/test_dimension_juce.cpp)
+
+target_include_directories(dimension5_juce_tests
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_BINARY_DIR}/Dimension5Plugin_artefacts/JuceLibraryCode)
+
+target_link_libraries(dimension5_juce_tests
+  PRIVATE
+    Dimension5Plugin
+    dimension5_core
+    juce::juce_audio_utils
+    juce::juce_dsp
+  PUBLIC
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags)
+
+target_compile_definitions(dimension5_juce_tests
+  PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0)
+
+add_test(NAME dimension5_juce_tests COMMAND dimension5_juce_tests)
+

@@ -60,6 +60,12 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
     modeBox.addItemList({ "I", "II", "III", "IV", "Custom" }, 1);
     addAndMakeVisible(modeBox);
     modeAttachment = std::make_unique<ComboAttachment>(audioProcessor.parameters, "mode", modeBox);
+    modeBox.onChange = [this] {
+        const int selected = modeBox.getSelectedItemIndex();
+        if (selected >= (int)DIMENSION_MODE_I && selected < (int)DIMENSION_MODE_CUSTOM) {
+            audioProcessor.applyModePresetToAdvancedParameters((DimensionMode)selected);
+        }
+    };
 
     compareAButton.setButtonText("A");
     compareAButton.setClickingTogglesState(false);
@@ -126,6 +132,11 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
         configureAdvancedSlider(advancedSliders[i]);
         advancedSliders[i].onDragStart = [this] {
             switchAdvancedToCustom();
+        };
+        advancedSliders[i].onValueChange = [this] {
+            if (!audioProcessor.isUpdatingModePreset()) {
+                switchAdvancedToCustom();
+            }
         };
         advancedLabels[i].setText(kAdvancedControls[i].label, juce::dontSendNotification);
         advancedLabels[i].setJustificationType(juce::Justification::centredLeft);

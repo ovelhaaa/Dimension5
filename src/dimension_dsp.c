@@ -169,6 +169,7 @@ static inline void dimension_apply_mode_preset(DimensionParams* p, DimensionMode
         p->lpfHz = lpfHz;
         p->wetDirectGain = 0.50f * wetScale;
         p->wetCrossGain = 0.35f * wetScale;
+        p->dryGain = 0.83f;
         p->analogAmount = analogAmount;
         p->companderAmount = companderAmount;
     }
@@ -259,6 +260,14 @@ void Dimension_GetParams(const DimensionDSP* d, DimensionParams* p) {
         return;
     }
     *p = d->params;
+}
+
+void Dimension_GetModeParams(DimensionMode mode, DimensionParams* p) {
+    if (p == NULL) {
+        return;
+    }
+    *p = dimension_default_params(DIMENSION_SAMPLE_RATE_DEFAULT);
+    dimension_apply_mode_preset(p, mode);
 }
 
 void Dimension_ProcessBlock(

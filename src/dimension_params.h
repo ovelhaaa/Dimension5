@@ -60,7 +60,7 @@ static const DimensionParamDescriptor DimensionParamDescriptors[DIMENSION_PARAM_
 
 static inline const DimensionParamDescriptor* Dimension_GetParamDescriptor(DimensionParamId id) {
     if ((uint32_t)id >= (uint32_t)DIMENSION_PARAM_COUNT) {
-        return 0;
+        return (const DimensionParamDescriptor*)0;
     }
     return &DimensionParamDescriptors[(uint32_t)id];
 }
