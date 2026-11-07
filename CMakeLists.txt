@@ -51,6 +51,11 @@ target_link_libraries(dimension5_tests PRIVATE dimension5_core)
 dimension5_apply_host_options(dimension5_tests)
 add_test(NAME dimension5_tests COMMAND dimension5_tests)
 
+add_executable(dimension5_wrapper_tests tests/test_dimension_wrapper.c)
+target_link_libraries(dimension5_wrapper_tests PRIVATE dimension5_core)
+dimension5_apply_host_options(dimension5_wrapper_tests)
+add_test(NAME dimension5_wrapper_tests COMMAND dimension5_wrapper_tests)
+
 add_executable(dimension5_offline_render tools/dimension5_offline_render.c)
 target_link_libraries(dimension5_offline_render PRIVATE dimension5_core)
 dimension5_apply_host_options(dimension5_offline_render)

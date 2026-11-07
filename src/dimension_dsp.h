@@ -78,6 +78,10 @@ typedef struct DimensionDSP {
     float smoothBaseDelayMs;
     float smoothWetDirectGain;
     float smoothWetCrossGain;
+    float smoothDryGain;
+    float smoothInputGain;
+    float smoothOutputGain;
+    float smoothWidth;
     float smoothHpfHz;
     float smoothLpfHz;
     float smoothAnalogAmount;

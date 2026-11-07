@@ -8,6 +8,19 @@ constexpr const char* kModeParamId = "mode";
 constexpr const char* kMixParamId = "mix";
 constexpr const char* kBypassParamId = "bypass";
 
+constexpr const char* const kAdvancedParamIds[] = {
+    "dryGain",
+    "wetDirectGain",
+    "wetCrossGain",
+    "baseDelayMs",
+    "depthMs",
+    "rateHz",
+    "hpfHz",
+    "lpfHz",
+    "analogAmount",
+    "companderAmount"
+};
+
 struct FactoryPreset {
     const char* name;
     int mode;
@@ -43,14 +56,31 @@ Dimension5AudioProcessor::Dimension5AudioProcessor()
     Dimension_Init(&dsp, DIMENSION_SAMPLE_RATE_DEFAULT);
     compareStates[0] = parameters.copyState();
     compareStates[1] = parameters.copyState();
+
+    parameters.addParameterListener(kModeParamId, this);
+    for (const char* id : kAdvancedParamIds) {
+        parameters.addParameterListener(id, this);
+    }
+}
+
+Dimension5AudioProcessor::~Dimension5AudioProcessor() {
+    parameters.removeParameterListener(kModeParamId, this);
+    for (const char* id : kAdvancedParamIds) {
+        parameters.removeParameterListener(id, this);
+    }
 }
 
 void Dimension5AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
     juce::ignoreUnused(samplesPerBlock);
-    Dimension_Init(&dsp, (float)sampleRate);
-    const double safeSampleRate = sampleRate > 1000.0 ? sampleRate : (double)DIMENSION_SAMPLE_RATE_DEFAULT;
-    bypassSmoothCoeff = (float)(1.0 - std::exp(-1.0 / (0.020 * safeSampleRate)));
+    const float safeSampleRate = (float)(sampleRate > 1000.0 ? sampleRate : (double)DIMENSION_SAMPLE_RATE_DEFAULT);
+    Dimension_Init(&dsp, safeSampleRate);
+
+    bypassSmoothCoeff = (float)(1.0 - std::exp(-1.0 / (0.020 * (double)safeSampleRate)));
     bypassEffectLevel = getBypassTarget();
+
+    mixSmoothCoeff = (float)(1.0 - std::exp(-1.0 / (0.020 * (double)safeSampleRate)));
+    smoothMix = getMix();
+
     syncParametersToDsp();
 }
 
@@ -60,19 +90,38 @@ void Dimension5AudioProcessor::releaseResources() {
 bool Dimension5AudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
     const auto& mainIn = layouts.getMainInputChannelSet();
     const auto& mainOut = layouts.getMainOutputChannelSet();
-    return mainIn == mainOut
-        && (mainOut == juce::AudioChannelSet::mono() || mainOut == juce::AudioChannelSet::stereo());
+
+    if (mainIn == juce::AudioChannelSet::mono()) {
+        return mainOut == juce::AudioChannelSet::mono()
+            || mainOut == juce::AudioChannelSet::stereo();
+    }
+    if (mainIn == juce::AudioChannelSet::stereo()) {
+        return mainOut == juce::AudioChannelSet::stereo();
+    }
+    return false;
 }
 
 void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) {
     juce::ignoreUnused(midiMessages);
     juce::ScopedNoDenormals noDenormals;
 
-    syncParametersToDsp();
-
     const int totalFrames = buffer.getNumSamples();
-    const int channels = buffer.getNumChannels();
-    const float mix = getMix();
+    if (totalFrames <= 0) {
+        return;
+    }
+
+    const int numInChannels = getTotalNumInputChannels();
+    const int numOutChannels = getTotalNumOutputChannels();
+    if (numInChannels <= 0 || numOutChannels <= 0) {
+        return;
+    }
+
+    /* Only sync parameters if no control-thread batch update is in flight. */
+    if ((presetUpdateSeq.load(std::memory_order_acquire) & 1U) == 0U) {
+        syncParametersToDsp();
+    }
+
+    const float targetMix = getMix();
     const float bypassTarget = getBypassTarget();
     float blockPeakL = 0.0f;
     float blockPeakR = 0.0f;
@@ -80,8 +129,11 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
 
     while (pos < totalFrames) {
         const int n = juce::jmin<int>(DIMENSION_MAX_BLOCK_SIZE, totalFrames - pos);
+
+        /* Read input source safely: mono inputs feed both L and R paths;
+         * channel 1 is never read when only mono input is provided. */
         const float* srcL = buffer.getReadPointer(0, pos);
-        const float* srcR = (channels > 1) ? buffer.getReadPointer(1, pos) : srcL;
+        const float* srcR = (numInChannels > 1) ? buffer.getReadPointer(1, pos) : srcL;
 
         for (int i = 0; i < n; ++i) {
             inL[(size_t)i] = srcL[i];
@@ -91,27 +143,95 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         Dimension_ProcessBlock(&dsp, inL.data(), inR.data(), outL.data(), outR.data(), (uint32_t)n);
 
         float* dstL = buffer.getWritePointer(0, pos);
-        float* dstR = (channels > 1) ? buffer.getWritePointer(1, pos) : nullptr;
+        float* dstR = (numOutChannels > 1) ? buffer.getWritePointer(1, pos) : nullptr;
+
         for (int i = 0; i < n; ++i) {
             const float dryL = inL[(size_t)i];
             const float dryR = inR[(size_t)i];
+
+            smoothMix += mixSmoothCoeff * (targetMix - smoothMix);
             bypassEffectLevel += bypassSmoothCoeff * (bypassTarget - bypassEffectLevel);
-            const float effectiveMix = mix * bypassEffectLevel;
+
+            const float effectiveMix = smoothMix * bypassEffectLevel;
             const float mixedL = dryL + effectiveMix * (outL[(size_t)i] - dryL);
             const float mixedR = dryR + effectiveMix * (outR[(size_t)i] - dryR);
-            dstL[i] = mixedL;
+
             if (dstR != nullptr) {
+                /* Stereo output: deliver distinct modulated channels */
+                dstL[i] = mixedL;
                 dstR[i] = mixedR;
+                blockPeakL = juce::jmax(blockPeakL, std::abs(mixedL));
+                blockPeakR = juce::jmax(blockPeakR, std::abs(mixedR));
+            } else {
+                /* Mono output: balanced symmetrical downmix of both Dimension channels */
+                const float monoOut = 0.5f * (mixedL + mixedR);
+                dstL[i] = monoOut;
+                blockPeakL = juce::jmax(blockPeakL, std::abs(monoOut));
+                blockPeakR = blockPeakL;
             }
-            blockPeakL = juce::jmax(blockPeakL, std::abs(mixedL));
-            blockPeakR = juce::jmax(blockPeakR, std::abs(mixedR));
         }
 
         pos += n;
     }
 
+    /* Clear any remaining output channels beyond numOutChannels to prevent trailing data */
+    for (int ch = numOutChannels; ch < buffer.getNumChannels(); ++ch) {
+        buffer.clear(ch, 0, totalFrames);
+    }
+
     outputMeterLeft.store(juce::jlimit(0.0f, 1.0f, blockPeakL), std::memory_order_relaxed);
     outputMeterRight.store(juce::jlimit(0.0f, 1.0f, blockPeakR), std::memory_order_relaxed);
+}
+
+void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID, float newValue) {
+    if (isBatchRestoring.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    if (parameterID == kModeParamId) {
+        if (!isUpdatingFromModePreset.load(std::memory_order_acquire)) {
+            const int newMode = juce::roundToInt(newValue);
+            if (newMode >= (int)DIMENSION_MODE_I && newMode < (int)DIMENSION_MODE_CUSTOM) {
+                applyModePresetToParameters((DimensionMode)newMode);
+            }
+        }
+        return;
+    }
+
+    if (isUpdatingFromModePreset.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    for (const char* id : kAdvancedParamIds) {
+        if (parameterID == id) {
+            const auto* modeParam = parameters.getRawParameterValue(kModeParamId);
+            const int curMode = modeParam != nullptr ? juce::roundToInt(modeParam->load()) : (int)DIMENSION_MODE_I;
+            if (curMode != (int)DIMENSION_MODE_CUSTOM) {
+                setFloatParam(kModeParamId, (float)DIMENSION_MODE_CUSTOM);
+            }
+            break;
+        }
+    }
+}
+
+void Dimension5AudioProcessor::applyModePresetToParameters(DimensionMode mode) {
+    isUpdatingFromModePreset.store(true, std::memory_order_release);
+
+    DimensionParams p {};
+    dimension_apply_mode_preset(&p, mode);
+
+    setFloatParam("dryGain", p.dryGain);
+    setFloatParam("wetDirectGain", p.wetDirectGain);
+    setFloatParam("wetCrossGain", p.wetCrossGain);
+    setFloatParam("baseDelayMs", p.baseDelayMs);
+    setFloatParam("depthMs", p.depthMs);
+    setFloatParam("rateHz", p.rateHz);
+    setFloatParam("hpfHz", p.hpfHz);
+    setFloatParam("lpfHz", p.lpfHz);
+    setFloatParam("analogAmount", p.analogAmount);
+    setFloatParam("companderAmount", p.companderAmount);
+
+    isUpdatingFromModePreset.store(false, std::memory_order_release);
 }
 
 juce::AudioProcessorEditor* Dimension5AudioProcessor::createEditor() {
@@ -147,7 +267,7 @@ int Dimension5AudioProcessor::getNumPrograms() {
 }
 
 int Dimension5AudioProcessor::getCurrentProgram() {
-    return currentProgram;
+    return currentProgram.load(std::memory_order_relaxed);
 }
 
 void Dimension5AudioProcessor::setCurrentProgram(int index) {
@@ -168,8 +288,8 @@ void Dimension5AudioProcessor::changeProgramName(int index, const juce::String& 
 void Dimension5AudioProcessor::getStateInformation(juce::MemoryBlock& destData) {
     if (auto state = parameters.copyState(); state.isValid()) {
         std::unique_ptr<juce::XmlElement> xml(state.createXml());
-        xml->setAttribute("program", currentProgram);
-        xml->setAttribute("activeCompareSlot", activeCompareSlot);
+        xml->setAttribute("program", currentProgram.load(std::memory_order_relaxed));
+        xml->setAttribute("activeCompareSlot", activeCompareSlot.load(std::memory_order_relaxed));
         if (compareStates[0].isValid()) {
             if (auto slotXml = compareStates[0].createXml()) {
                 slotXml->setTagName("CompareA");
@@ -189,8 +309,8 @@ void Dimension5AudioProcessor::getStateInformation(juce::MemoryBlock& destData) 
 void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInBytes) {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName(parameters.state.getType())) {
-        currentProgram = juce::jlimit(0, getNumPrograms() - 1, xml->getIntAttribute("program", currentProgram));
-        activeCompareSlot = juce::jlimit(0, 1, xml->getIntAttribute("activeCompareSlot", activeCompareSlot));
+        currentProgram.store(juce::jlimit(0, getNumPrograms() - 1, xml->getIntAttribute("program", currentProgram.load())), std::memory_order_relaxed);
+        activeCompareSlot.store(juce::jlimit(0, 1, xml->getIntAttribute("activeCompareSlot", activeCompareSlot.load())), std::memory_order_relaxed);
         if (auto* slotXml = xml->getChildByName("CompareA")) {
             slotXml->setTagName(parameters.state.getType());
             compareStates[0] = juce::ValueTree::fromXml(*slotXml);
@@ -208,14 +328,21 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
         if (auto* slotXml = stateXml->getChildByName("CompareB")) {
             stateXml->removeChildElement(slotXml, true);
         }
+
+        isBatchRestoring.store(true, std::memory_order_release);
+        presetUpdateSeq.fetch_add(1, std::memory_order_release);
+
         parameters.replaceState(juce::ValueTree::fromXml(*stateXml));
+
+        presetUpdateSeq.fetch_add(1, std::memory_order_release);
+        isBatchRestoring.store(false, std::memory_order_release);
+
         if (!compareStates[0].isValid()) {
             compareStates[0] = parameters.copyState();
         }
         if (!compareStates[1].isValid()) {
             compareStates[1] = parameters.copyState();
         }
-        syncParametersToDsp();
     }
 }
 
@@ -266,27 +393,26 @@ float Dimension5AudioProcessor::getOutputMeterRight() const {
 
 void Dimension5AudioProcessor::switchToCustomMode() {
     setFloatParam(kModeParamId, (float)DIMENSION_MODE_CUSTOM);
-    syncParametersToDsp();
 }
 
 void Dimension5AudioProcessor::selectCompareSlot(int slot) {
     const int nextSlot = juce::jlimit(0, 1, slot);
-    if (nextSlot == activeCompareSlot) {
+    if (nextSlot == activeCompareSlot.load(std::memory_order_relaxed)) {
         return;
     }
 
-    captureCompareSlot(activeCompareSlot);
-    activeCompareSlot = nextSlot;
-    recallCompareSlot(activeCompareSlot);
+    captureCompareSlot(activeCompareSlot.load(std::memory_order_relaxed));
+    activeCompareSlot.store(nextSlot, std::memory_order_relaxed);
+    recallCompareSlot(activeCompareSlot.load(std::memory_order_relaxed));
 }
 
 void Dimension5AudioProcessor::copyCompareToOtherSlot() {
-    captureCompareSlot(activeCompareSlot);
-    compareStates[1 - activeCompareSlot] = compareStates[activeCompareSlot].createCopy();
+    captureCompareSlot(activeCompareSlot.load(std::memory_order_relaxed));
+    compareStates[1 - activeCompareSlot.load(std::memory_order_relaxed)] = compareStates[activeCompareSlot.load(std::memory_order_relaxed)].createCopy();
 }
 
 int Dimension5AudioProcessor::getActiveCompareSlot() const {
-    return activeCompareSlot;
+    return activeCompareSlot.load(std::memory_order_relaxed);
 }
 
 void Dimension5AudioProcessor::captureCompareSlot(int slot) {
@@ -298,8 +424,14 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
     if (!compareStates[(size_t)safeSlot].isValid()) {
         compareStates[(size_t)safeSlot] = parameters.copyState();
     }
+
+    isBatchRestoring.store(true, std::memory_order_release);
+    presetUpdateSeq.fetch_add(1, std::memory_order_release);
+
     parameters.replaceState(compareStates[(size_t)safeSlot].createCopy());
-    syncParametersToDsp();
+
+    presetUpdateSeq.fetch_add(1, std::memory_order_release);
+    isBatchRestoring.store(false, std::memory_order_release);
 }
 
 void Dimension5AudioProcessor::syncParametersToDsp() {
@@ -311,9 +443,10 @@ void Dimension5AudioProcessor::syncParametersToDsp() {
         Dimension_SetMode(&dsp, (DimensionMode)currentMode);
     }
 
+    DimensionParams p;
+    Dimension_GetParams(&dsp, &p);
+
     if (currentMode == DIMENSION_MODE_CUSTOM) {
-        DimensionParams p;
-        Dimension_GetParams(&dsp, &p);
         p.mode = DIMENSION_MODE_CUSTOM;
         p.inputGain = getFloatParam("inputGain");
         p.outputGain = getFloatParam("outputGain");
@@ -330,8 +463,6 @@ void Dimension5AudioProcessor::syncParametersToDsp() {
         p.width = getFloatParam("width");
         Dimension_SetParams(&dsp, &p);
     } else {
-        DimensionParams p;
-        Dimension_GetParams(&dsp, &p);
         p.inputGain = getFloatParam("inputGain");
         p.outputGain = getFloatParam("outputGain");
         p.width = getFloatParam("width");
@@ -353,16 +484,22 @@ float Dimension5AudioProcessor::getBypassTarget() const {
 }
 
 void Dimension5AudioProcessor::applyFactoryPreset(int index) {
-    currentProgram = juce::jlimit(0, getNumPrograms() - 1, index);
-    const auto& preset = kFactoryPresets[currentProgram];
+    currentProgram.store(juce::jlimit(0, getNumPrograms() - 1, index), std::memory_order_relaxed);
+    const auto& preset = kFactoryPresets[currentProgram.load()];
+
+    isBatchRestoring.store(true, std::memory_order_release);
+    presetUpdateSeq.fetch_add(1, std::memory_order_release);
 
     setFloatParam(kModeParamId, (float)preset.mode);
+    applyModePresetToParameters((DimensionMode)preset.mode);
     setFloatParam("inputGain", preset.inputGain);
     setFloatParam("outputGain", preset.outputGain);
     setFloatParam("width", preset.width);
     setFloatParam(kMixParamId, preset.mix);
     setFloatParam(kBypassParamId, 0.0f);
-    syncParametersToDsp();
+
+    presetUpdateSeq.fetch_add(1, std::memory_order_release);
+    isBatchRestoring.store(false, std::memory_order_release);
 }
 
 void Dimension5AudioProcessor::setFloatParam(const char* id, float value) {

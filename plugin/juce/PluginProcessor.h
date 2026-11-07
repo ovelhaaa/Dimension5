@@ -9,12 +9,13 @@ extern "C" {
 #include "dimension_dsp.h"
 }
 
-class Dimension5AudioProcessor final : public juce::AudioProcessor {
+class Dimension5AudioProcessor final : public juce::AudioProcessor,
+                                       private juce::AudioProcessorValueTreeState::Listener {
 public:
     using ValueTreeState = juce::AudioProcessorValueTreeState;
 
     Dimension5AudioProcessor();
-    ~Dimension5AudioProcessor() override = default;
+    ~Dimension5AudioProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -52,6 +53,9 @@ public:
     int getActiveCompareSlot() const;
 
 private:
+    void parameterChanged(const juce::String& parameterID, float newValue) override;
+    void applyModePresetToParameters(DimensionMode mode);
+
     void captureCompareSlot(int slot);
     void recallCompareSlot(int slot);
     void syncParametersToDsp();
@@ -70,10 +74,16 @@ private:
     std::atomic<float> outputMeterRight { 0.0f };
     float bypassEffectLevel = 1.0f;
     float bypassSmoothCoeff = 1.0f;
+    float smoothMix = 1.0f;
+    float mixSmoothCoeff = 1.0f;
     std::array<juce::ValueTree, 2> compareStates;
     int currentMode = DIMENSION_MODE_I;
-    int currentProgram = 0;
-    int activeCompareSlot = 0;
+    std::atomic<int> currentProgram { 0 };
+    std::atomic<int> activeCompareSlot { 0 };
+
+    std::atomic<uint32_t> presetUpdateSeq { 0 };
+    std::atomic<bool> isUpdatingFromModePreset { false };
+    std::atomic<bool> isBatchRestoring { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Dimension5AudioProcessor)
 };

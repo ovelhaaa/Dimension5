@@ -221,7 +221,6 @@ static int test_noise_stability(void) {
     return 0;
 }
 
-
 static int test_sample_rates_and_block_limits(void) {
     const float rates[] = {44100.0f, 48000.0f, 96000.0f};
     float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
@@ -348,6 +347,252 @@ static int test_parameter_schema_is_stable(void) {
     return 0;
 }
 
+static int test_block_size_smoothing_invariance(void) {
+    DimensionDSP d16, d64, dirreg;
+    Dimension_Init(&d16, TEST_SR);
+    Dimension_Init(&d64, TEST_SR);
+    Dimension_Init(&dirreg, TEST_SR);
+
+    DimensionParams p;
+    Dimension_GetParams(&d16, &p);
+    p.mode = DIMENSION_MODE_CUSTOM;
+    p.hpfHz = 350.0f;
+    p.lpfHz = 3000.0f;
+    p.analogAmount = 0.90f;
+
+    Dimension_SetParams(&d16, &p);
+    Dimension_SetParams(&d64, &p);
+    Dimension_SetParams(&dirreg, &p);
+
+    float inL[64] = {0}, inR[64] = {0}, outL[64], outR[64];
+    for (uint32_t i = 0; i < 64; ++i) {
+        inL[i] = inR[i] = 0.1f;
+    }
+
+    /* Process 1440 samples (30 ms = tau) */
+    /* d16: 90 blocks of 16 */
+    for (int b = 0; b < 90; ++b) {
+        Dimension_ProcessBlock(&d16, inL, inR, outL, outR, 16);
+    }
+    /* d64: 22 blocks of 64 + 1 block of 32 = 1440 */
+    for (int b = 0; b < 22; ++b) {
+        Dimension_ProcessBlock(&d64, inL, inR, outL, outR, 64);
+    }
+    Dimension_ProcessBlock(&d64, inL, inR, outL, outR, 32);
+
+    /* dirreg: irregular block sizes summing to 1440 */
+    uint32_t irrSum = 0;
+    while (irrSum < 1440U) {
+        const uint32_t rem = 1440U - irrSum;
+        const uint32_t chunk = (rem > 64U) ? ((rem % 3U == 0U) ? 27U : ((rem % 2U == 0U) ? 32U : 19U)) : rem;
+        Dimension_ProcessBlock(&dirreg, inL, inR, outL, outR, chunk);
+        irrSum += chunk;
+    }
+    CHECK(irrSum == 1440U);
+
+    /* At t = 30 ms (tau = 30 ms), expected progress is 1 - 1/e ~ 0.63212.
+     * hpf: 120 -> 350. Target diff = 230. Expected = 120 + 230 * 0.63212 = 265.4 Hz. */
+    const float expectedHpfAtTau = 120.0f + 230.0f * (1.0f - 1.0f / 2.718281828f);
+    CHECK(fabsf(d16.smoothHpfHz - expectedHpfAtTau) < 3.0f);
+    CHECK(fabsf(d64.smoothHpfHz - expectedHpfAtTau) < 3.0f);
+    CHECK(fabsf(dirreg.smoothHpfHz - expectedHpfAtTau) < 3.0f);
+
+    /* Across blocks of 16 vs 64 vs irregular at 30 ms, difference must be minimal (< 1 Hz) */
+    CHECK(fabsf(d16.smoothHpfHz - d64.smoothHpfHz) < 1.0f);
+    CHECK(fabsf(d16.smoothHpfHz - dirreg.smoothHpfHz) < 1.0f);
+    CHECK(fabsf(d16.smoothLpfHz - d64.smoothLpfHz) < 15.0f);
+    CHECK(fabsf(d16.smoothAnalogAmount - d64.smoothAnalogAmount) < 0.005f);
+
+    /* Process further to 100 ms (total 4800 frames) */
+    for (int b = 0; b < 210; ++b) {
+        Dimension_ProcessBlock(&d16, inL, inR, outL, outR, 16);
+    }
+    for (int b = 0; b < 52; ++b) {
+        Dimension_ProcessBlock(&d64, inL, inR, outL, outR, 64);
+    }
+    Dimension_ProcessBlock(&d64, inL, inR, outL, outR, 32);
+
+    CHECK(fabsf(d16.smoothHpfHz - d64.smoothHpfHz) < 0.5f);
+    CHECK(fabsf(d16.smoothLpfHz - d64.smoothLpfHz) < 5.0f);
+    CHECK(fabsf(d16.smoothAnalogAmount - d64.smoothAnalogAmount) < 0.002f);
+    return 0;
+}
+
+static int test_smoothed_controls_transitions(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+
+    /* Verify smoothers start at exact target with zero initial ramp */
+    CHECK(fabsf(d.smoothInputGain - 1.0f) < 1e-6f);
+    CHECK(fabsf(d.smoothOutputGain - 1.0f) < 1e-6f);
+    CHECK(fabsf(d.smoothDryGain - 0.83f) < 1e-6f);
+    CHECK(fabsf(d.smoothWidth - 1.0f) < 1e-6f);
+
+    /* Change parameters abruptly to stress test smoothing */
+    DimensionParams p;
+    Dimension_GetParams(&d, &p);
+    p.mode = DIMENSION_MODE_CUSTOM;
+    p.inputGain = 2.5f;
+    p.outputGain = 0.5f;
+    p.dryGain = 0.3f;
+    p.width = 1.8f;
+    p.wetDirectGain = 0.7f;
+    p.wetCrossGain = 0.5f;
+    Dimension_SetParams(&d, &p);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    float prevL = 0.0f, prevR = 0.0f;
+    float maxDelta = 0.0f;
+    bool first = true;
+
+    /* Process audio while parameters smooth */
+    for (uint32_t n = 0; n < (uint32_t)TEST_SR / 2U; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float s = 0.2f * sinf(2.0f * PI_F * 1000.0f * (float)(n + i) / TEST_SR);
+            inL[i] = inR[i] = s;
+        }
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            if (!first) {
+                const float dL = fabsf(outL[i] - prevL);
+                const float dR = fabsf(outR[i] - prevR);
+                if (dL > maxDelta) maxDelta = dL;
+                if (dR > maxDelta) maxDelta = dR;
+            }
+            prevL = outL[i];
+            prevR = outR[i];
+            first = false;
+        }
+    }
+
+    /* Measure baseline natural delta with fixed target parameters */
+    DimensionDSP dBase;
+    Dimension_Init(&dBase, TEST_SR);
+    Dimension_SetParams(&dBase, &p);
+    float basePrev = 0.0f;
+    float baseMaxDelta = 0.0f;
+    bool baseFirst = true;
+    for (uint32_t n = 0; n < (uint32_t)TEST_SR / 2U; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float s = 0.2f * sinf(2.0f * PI_F * 1000.0f * (float)(n + i) / TEST_SR);
+            inL[i] = inR[i] = s;
+        }
+        Dimension_ProcessBlock(&dBase, inL, inR, outL, outR, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            if (!baseFirst) {
+                const float dL = fabsf(outL[i] - basePrev);
+                if (dL > baseMaxDelta) baseMaxDelta = dL;
+            }
+            basePrev = outL[i];
+            baseFirst = false;
+        }
+    }
+    /* Discontinuity added by parameter smoothing above natural signal variation must be negligible (< 0.005) */
+    CHECK((maxDelta - baseMaxDelta) < 0.005f);
+
+    /* Confirm parameters converged close to targets */
+    CHECK(fabsf(d.smoothInputGain - 2.5f) < 0.01f);
+    CHECK(fabsf(d.smoothOutputGain - 0.5f) < 0.01f);
+    CHECK(fabsf(d.smoothDryGain - 0.3f) < 0.01f);
+    CHECK(fabsf(d.smoothWidth - 1.8f) < 0.01f);
+    return 0;
+}
+
+static int test_mode_to_custom_preserves_audio_and_params(void) {
+    /* Test Mode II transition to Custom */
+    DimensionDSP dMode, dCustom;
+    Dimension_Init(&dMode, TEST_SR);
+    Dimension_SetMode(&dMode, DIMENSION_MODE_II);
+
+    /* Run Mode II for 500 ms */
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    for (uint32_t n = 0; n < (uint32_t)TEST_SR / 2U; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            inL[i] = inR[i] = 0.15f * sinf(2.0f * PI_F * 220.0f * (float)(n + i) / TEST_SR);
+        }
+        Dimension_ProcessBlock(&dMode, inL, inR, outL, outR, BLOCK);
+    }
+
+    /* Clone state to dCustom, then switch to Custom with Mode II's exact parameters */
+    dCustom = dMode;
+    DimensionParams p;
+    Dimension_GetParams(&dCustom, &p);
+    CHECK(p.mode == DIMENSION_MODE_II);
+    CHECK(fabsf(p.baseDelayMs - 8.5f) < 1e-4f);
+    CHECK(fabsf(p.depthMs - 1.4f) < 1e-4f);
+    CHECK(fabsf(p.lpfHz - 7500.0f) < 1e-4f);
+
+    p.mode = DIMENSION_MODE_CUSTOM;
+    Dimension_SetParams(&dCustom, &p);
+
+    /* Process the next block through both and compare outputs */
+    float outLMode[BLOCK], outRMode[BLOCK];
+    float outLCustom[BLOCK], outRCustom[BLOCK];
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        inL[i] = inR[i] = 0.15f * sinf(2.0f * PI_F * 220.0f * (float)(TEST_SR / 2U + i) / TEST_SR);
+    }
+    Dimension_ProcessBlock(&dMode, inL, inR, outLMode, outRMode, BLOCK);
+    Dimension_ProcessBlock(&dCustom, inL, inR, outLCustom, outRCustom, BLOCK);
+
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        CHECK(fabsf(outLMode[i] - outLCustom[i]) < 1e-5f);
+        CHECK(fabsf(outRMode[i] - outRCustom[i]) < 1e-5f);
+    }
+
+    /* Repeat verification for Mode IV */
+    DimensionDSP dMode4, dCustom4;
+    Dimension_Init(&dMode4, TEST_SR);
+    Dimension_SetMode(&dMode4, DIMENSION_MODE_IV);
+    for (uint32_t n = 0; n < (uint32_t)TEST_SR / 2U; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            inL[i] = inR[i] = 0.15f * sinf(2.0f * PI_F * 220.0f * (float)(n + i) / TEST_SR);
+        }
+        Dimension_ProcessBlock(&dMode4, inL, inR, outL, outR, BLOCK);
+    }
+    dCustom4 = dMode4;
+    Dimension_GetParams(&dCustom4, &p);
+    CHECK(p.mode == DIMENSION_MODE_IV);
+    CHECK(fabsf(p.baseDelayMs - 11.5f) < 1e-4f);
+    CHECK(fabsf(p.depthMs - 2.4f) < 1e-4f);
+    CHECK(fabsf(p.lpfHz - 6500.0f) < 1e-4f);
+    p.mode = DIMENSION_MODE_CUSTOM;
+    Dimension_SetParams(&dCustom4, &p);
+    Dimension_ProcessBlock(&dMode4, inL, inR, outLMode, outRMode, BLOCK);
+    Dimension_ProcessBlock(&dCustom4, inL, inR, outLCustom, outRCustom, BLOCK);
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        CHECK(fabsf(outLMode[i] - outLCustom[i]) < 1e-5f);
+        CHECK(fabsf(outRMode[i] - outRCustom[i]) < 1e-5f);
+    }
+    return 0;
+}
+
+static int test_mono_in_stereo_out_decorrelation(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    Dimension_SetMode(&d, DIMENSION_MODE_I);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    double diffEnergy = 0.0;
+    const uint32_t total = (uint32_t)TEST_SR * 2U;
+
+    /* Feed identical mono signal into both channels */
+    for (uint32_t n = 0; n < total; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float s = 0.2f * sinf(2.0f * PI_F * 440.0f * (float)(n + i) / TEST_SR);
+            inL[i] = inR[i] = s;
+        }
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float diff = outL[i] - outR[i];
+            diffEnergy += (double)diff * (double)diff;
+        }
+    }
+
+    /* Verify that left and right outputs are distinct (stereo widening active) */
+    CHECK(diffEnergy > 0.01);
+    return 0;
+}
+
 int main(void) {
 #define RUN_TEST(fn) do { if ((fn)() != 0) return 1; } while (0)
     RUN_TEST(test_zero_input_long_no_nan_low_dc);
@@ -362,6 +607,10 @@ int main(void) {
     RUN_TEST(test_extreme_and_nonfinite_params_are_clamped);
     RUN_TEST(test_regression_signal_metrics);
     RUN_TEST(test_parameter_schema_is_stable);
+    RUN_TEST(test_block_size_smoothing_invariance);
+    RUN_TEST(test_smoothed_controls_transitions);
+    RUN_TEST(test_mode_to_custom_preserves_audio_and_params);
+    RUN_TEST(test_mono_in_stereo_out_decorrelation);
     puts("test_dimension_core: OK");
     return 0;
 }
