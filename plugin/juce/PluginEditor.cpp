@@ -1,21 +1,14 @@
 #include "PluginEditor.h"
 
 namespace {
-juce::Colour bgColour()         { return juce::Colour(0x10, 0x17, 0x1C); }
-juce::Colour surfaceColour()    { return juce::Colour(0x1B, 0x27, 0x2D); }
-juce::Colour dividerColour()    { return juce::Colour(0x34, 0x44, 0x4B); }
-juce::Colour primaryText()      { return juce::Colour(0xE8, 0xEF, 0xEC); }
-juce::Colour secondaryText()    { return juce::Colour(0x89, 0x9D, 0xA3); }
-juce::Colour spatialAccent()    { return juce::Colour(0x65, 0xDF, 0xC8); }
-juce::Colour analogAccent()     { return juce::Colour(0xE2, 0xA6, 0x5A); }
-juce::Colour warningAccent()    { return juce::Colour(0xE2, 0x78, 0x65); }
+using namespace Dimension5UI;
 
-constexpr int kMargin = 16;
-constexpr int kHeaderHeight = 64;
-constexpr int kBottomBarHeight = 56;
-constexpr int kBaseWidth = 850;
-constexpr int kBaseHeight = 540;
-constexpr int kExpandedHeight = 700;
+constexpr int kMargin = 14;
+constexpr int kHeaderHeight = 52;
+constexpr int kBottomBarHeight = 50;
+constexpr int kBaseWidth = 1000;
+constexpr int kBaseHeight = 620;
+constexpr int kExpandedHeight = 780;
 
 struct AdvancedSpec {
     const char* id;
@@ -34,200 +27,29 @@ constexpr AdvancedSpec kAdvancedSpecs[7] = {
 };
 } // namespace
 
-// ==============================================================================
-// Dimension5LookAndFeel Implementation
-// ==============================================================================
-Dimension5LookAndFeel::Dimension5LookAndFeel() {
-    setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-    setColour(juce::Slider::textBoxTextColourId, primaryText());
-    setColour(juce::ComboBox::backgroundColourId, surfaceColour());
-    setColour(juce::ComboBox::outlineColourId, dividerColour());
-    setColour(juce::ComboBox::textColourId, primaryText());
-    setColour(juce::ComboBox::arrowColourId, secondaryText());
-    setColour(juce::PopupMenu::backgroundColourId, bgColour());
-    setColour(juce::PopupMenu::textColourId, primaryText());
-    setColour(juce::PopupMenu::highlightedBackgroundColourId, surfaceColour());
-    setColour(juce::PopupMenu::highlightedTextColourId, spatialAccent());
-}
-
-void Dimension5LookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
-                                             float sliderPosProportional, float rotaryStartAngle,
-                                             float rotaryEndAngle, juce::Slider& slider) {
-    const auto bounds = juce::Rectangle<int>(x, y, width, height).toFloat();
-    const float radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.48f;
-    const auto center = bounds.getCentre();
-
-    const auto arcColour = slider.findColour(juce::Slider::rotarySliderFillColourId);
-
-    // Outer background circular body
-    g.setColour(surfaceColour());
-    g.fillEllipse(center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f);
-    g.setColour(dividerColour());
-    g.drawEllipse(center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f, 1.2f);
-
-    // Track background arc
-    const float trackRadius = radius - 4.5f;
-    juce::Path backgroundArc;
-    backgroundArc.addCentredArc(center.x, center.y, trackRadius, trackRadius, 0.0f,
-                                rotaryStartAngle, rotaryEndAngle, true);
-    g.setColour(dividerColour().withAlpha(0.6f));
-    g.strokePath(backgroundArc, juce::PathStrokeType(3.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-    // Value Arc
-    const float currentAngle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
-    if (currentAngle > rotaryStartAngle + 0.01f) {
-        juce::Path valueArc;
-        valueArc.addCentredArc(center.x, center.y, trackRadius, trackRadius, 0.0f,
-                               rotaryStartAngle, currentAngle, true);
-        g.setColour(arcColour);
-        g.strokePath(valueArc, juce::PathStrokeType(3.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    }
-
-    // Pointer needle
-    const float pointerLength = radius * 0.65f;
-    const float pointerAngle = currentAngle - juce::MathConstants<float>::halfPi;
-    const float px = center.x + std::cos(pointerAngle) * pointerLength;
-    const float py = center.y + std::sin(pointerAngle) * pointerLength;
-
-    g.setColour(arcColour);
-    g.drawLine(center.x, center.y, px, py, 2.0f);
-
-    // Center pivot dot
-    g.setColour(primaryText());
-    g.fillEllipse(center.x - 2.5f, center.y - 2.5f, 5.0f, 5.0f);
-}
-
-void Dimension5LookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int width, int height,
-                                             float sliderPos, float minSliderPos, float maxSliderPos,
-                                             const juce::Slider::SliderStyle style, juce::Slider& slider) {
-    juce::ignoreUnused(minSliderPos, maxSliderPos, style);
-    const auto bounds = juce::Rectangle<int>(x, y, width, height).toFloat();
-    const float trackY = bounds.getCentreY();
-    const float trackHeight = 4.0f;
-    const auto trackBounds = juce::Rectangle<float>(bounds.getX(), trackY - trackHeight * 0.5f, bounds.getWidth(), trackHeight);
-
-    // Background track
-    g.setColour(surfaceColour());
-    g.fillRoundedRectangle(trackBounds, 2.0f);
-    g.setColour(dividerColour());
-    g.drawRoundedRectangle(trackBounds, 2.0f, 0.75f);
-
-    // Active track fill
-    const auto fillColour = slider.findColour(juce::Slider::trackColourId);
-    auto fillBounds = trackBounds.withWidth(juce::jmax(0.0f, sliderPos - bounds.getX()));
-    g.setColour(fillColour);
-    g.fillRoundedRectangle(fillBounds, 2.0f);
-
-    // Thumb
-    const float thumbRadius = 6.5f;
-    g.setColour(primaryText());
-    g.fillEllipse(sliderPos - thumbRadius, trackY - thumbRadius, thumbRadius * 2.0f, thumbRadius * 2.0f);
-    g.setColour(dividerColour());
-    g.drawEllipse(sliderPos - thumbRadius, trackY - thumbRadius, thumbRadius * 2.0f, thumbRadius * 2.0f, 1.0f);
-}
-
-void Dimension5LookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& button,
-                                                 const juce::Colour& backgroundColour,
-                                                 bool shouldDrawButtonAsHighlighted,
-                                                 bool shouldDrawButtonAsDown) {
-    juce::ignoreUnused(backgroundColour);
-    auto bounds = button.getLocalBounds().toFloat();
-    const bool isToggled = button.getToggleState();
-
-    juce::Colour fill = isToggled ? bgColour() : (shouldDrawButtonAsHighlighted ? surfaceColour().brighter(0.08f) : surfaceColour());
-    if (shouldDrawButtonAsDown) fill = bgColour();
-
-    g.setColour(fill);
-    g.fillRoundedRectangle(bounds, 4.0f);
-
-    juce::Colour border = dividerColour();
-    if (isToggled) {
-        border = (button.getButtonText() == "BYPASS") ? warningAccent() : spatialAccent();
-    } else if (shouldDrawButtonAsHighlighted) {
-        border = secondaryText();
-    }
-
-    g.setColour(border);
-    g.drawRoundedRectangle(bounds, 4.0f, isToggled ? 1.5f : 1.0f);
-}
-
-void Dimension5LookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& button,
-                                           bool shouldDrawButtonAsHighlighted,
-                                           bool shouldDrawButtonAsDown) {
-    juce::ignoreUnused(shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
-    const bool isToggled = button.getToggleState();
-
-    juce::Colour textCol = isToggled ? ((button.getButtonText() == "BYPASS") ? warningAccent() : spatialAccent())
-                                     : secondaryText();
-
-    g.setFont(juce::Font(11.5f, juce::Font::bold));
-    g.setColour(textCol);
-    g.drawText(button.getButtonText(), button.getLocalBounds(), juce::Justification::centred);
-}
-
-void Dimension5LookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, bool isButtonDown,
-                                         int buttonX, int buttonY, int buttonW, int buttonH,
-                                         juce::ComboBox& box) {
-    juce::ignoreUnused(isButtonDown, buttonX, buttonY, buttonW, buttonH);
-    auto bounds = juce::Rectangle<int>(0, 0, width, height).toFloat();
-
-    g.setColour(surfaceColour());
-    g.fillRoundedRectangle(bounds, 4.0f);
-    g.setColour(dividerColour());
-    g.drawRoundedRectangle(bounds, 4.0f, 1.0f);
-
-    // Arrow icon
-    const float arrowX = (float)width - 16.0f;
-    const float arrowY = (float)height * 0.5f - 2.0f;
-    juce::Path arrow;
-    arrow.startNewSubPath(arrowX - 4.0f, arrowY);
-    arrow.lineTo(arrowX + 4.0f, arrowY);
-    arrow.lineTo(arrowX, arrowY + 4.5f);
-    arrow.closeSubPath();
-
-    g.setColour(box.findColour(juce::ComboBox::arrowColourId));
-    g.fillPath(arrow);
-}
-
-void Dimension5LookAndFeel::drawPopupMenuBackground(juce::Graphics& g, int width, int height) {
-    auto bounds = juce::Rectangle<int>(0, 0, width, height).toFloat();
-    g.setColour(bgColour());
-    g.fillRoundedRectangle(bounds, 4.0f);
-    g.setColour(dividerColour());
-    g.drawRoundedRectangle(bounds, 4.0f, 1.0f);
-}
-
-// ==============================================================================
-// Dimension5AudioProcessorEditor Implementation
-// ==============================================================================
 Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioProcessor& ownerProcessor)
     : AudioProcessorEditor(&ownerProcessor), audioProcessor(ownerProcessor) {
     setLookAndFeel(&lnf);
     setSize(kBaseWidth, kBaseHeight);
     setResizable(true, true);
-    setResizeLimits(780, 500, 1400, 950);
+    setResizeLimits(840, 540, 1600, 1000);
 
-    // --------------------------------------------------------------------------
-    // Header setup
-    // --------------------------------------------------------------------------
+    // =========================================================================
+    // 1. Header Section Setup
+    // =========================================================================
     titleLabel.setText("DIMENSION5", juce::dontSendNotification);
     titleLabel.setJustificationType(juce::Justification::centredLeft);
     titleLabel.setColour(juce::Label::textColourId, primaryText());
-    titleLabel.setFont(juce::Font(22.0f, juce::Font::bold));
+    titleLabel.setFont(juce::Font(20.0f, juce::Font::bold));
     addAndMakeVisible(titleLabel);
 
     subtitleLabel.setText("BBD STEREO ENHANCER", juce::dontSendNotification);
     subtitleLabel.setJustificationType(juce::Justification::centredLeft);
     subtitleLabel.setColour(juce::Label::textColourId, spatialAccent());
-    subtitleLabel.setFont(juce::Font(10.5f, juce::Font::bold));
+    subtitleLabel.setFont(juce::Font(10.0f, juce::Font::bold));
     addAndMakeVisible(subtitleLabel);
 
-    taglineLabel.setText("Analog-inspired spatial processing", juce::dontSendNotification);
-    taglineLabel.setJustificationType(juce::Justification::centredLeft);
-    taglineLabel.setColour(juce::Label::textColourId, secondaryText());
-    taglineLabel.setFont(juce::Font(10.5f));
-    addAndMakeVisible(taglineLabel);
-
+    // Wide preset dropdown to avoid truncation
     presetBox.addItemList(Dimension5AudioProcessor::factoryPresetNames(), 1);
     presetBox.setSelectedItemIndex(audioProcessor.getCurrentProgram(), juce::dontSendNotification);
     presetBox.onChange = [this] {
@@ -248,7 +70,7 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
         audioProcessor.selectCompareSlot(0);
         updateCompareButtons();
     };
-    configureSmallButton(compareAButton);
+    configureHeaderButton(compareAButton);
     addAndMakeVisible(compareAButton);
 
     compareBButton.setButtonText("B");
@@ -257,14 +79,14 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
         audioProcessor.selectCompareSlot(1);
         updateCompareButtons();
     };
-    configureSmallButton(compareBButton);
+    configureHeaderButton(compareBButton);
     addAndMakeVisible(compareBButton);
 
     compareCopyButton.setButtonText("COPY");
     compareCopyButton.onClick = [this] {
         audioProcessor.copyCompareToOtherSlot();
     };
-    configureSmallButton(compareCopyButton);
+    configureHeaderButton(compareCopyButton);
     addAndMakeVisible(compareCopyButton);
     updateCompareButtons();
 
@@ -273,33 +95,31 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
     addAndMakeVisible(bypassButton);
     bypassAttachment = std::make_unique<ButtonAttachment>(audioProcessor.parameters, "bypass", bypassButton);
 
-    // --------------------------------------------------------------------------
-    // Stereo Field Monitor
-    // --------------------------------------------------------------------------
+    // =========================================================================
+    // 2. Central Section Setup
+    // =========================================================================
     addAndMakeVisible(stereoFieldComponent);
 
-    // --------------------------------------------------------------------------
-    // Main Controls Setup
-    // --------------------------------------------------------------------------
-    configureRotaryKnob(spreadSlider, spreadLabel, "SPREAD", "", true);
-    configureRotaryKnob(mixSlider, mixLabel, "MIX", "%", true);
-    configureRotaryKnob(depthSlider, depthLabel, "DEPTH", " ms", false);
-    configureRotaryKnob(motionSlider, motionLabel, "MOTION", " Hz", false);
-    configureRotaryKnob(colorSlider, colorLabel, "COLOR", " Hz", false);
+    spatialControlsComponent.attachParameters(audioProcessor.parameters);
+    addAndMakeVisible(spatialControlsComponent);
 
-    spreadAttachment = std::make_unique<SliderAttachment>(audioProcessor.parameters, "width", spreadSlider);
-    mixAttachment = std::make_unique<SliderAttachment>(audioProcessor.parameters, "mix", mixSlider);
-    depthAttachment = std::make_unique<SliderAttachment>(audioProcessor.parameters, "depthMs", depthSlider);
-    motionAttachment = std::make_unique<SliderAttachment>(audioProcessor.parameters, "rateHz", motionSlider);
-    colorAttachment = std::make_unique<SliderAttachment>(audioProcessor.parameters, "lpfHz", colorSlider);
-
-    // --------------------------------------------------------------------------
-    // Bottom Bar Controls Setup
-    // --------------------------------------------------------------------------
+    // =========================================================================
+    // 3. Bottom Bar Setup
+    // =========================================================================
     configureBottomSlider(inputSlider, inputLabel, "INPUT", "x");
     configureBottomSlider(outputSlider, outputLabel, "OUTPUT", "x");
     inputAttachment = std::make_unique<SliderAttachment>(audioProcessor.parameters, "inputGain", inputSlider);
     outputAttachment = std::make_unique<SliderAttachment>(audioProcessor.parameters, "outputGain", outputSlider);
+
+    inputSlider.setTextValueSuffix("");
+    inputSlider.setNumDecimalPlacesToDisplay(2);
+    inputSlider.textFromValueFunction = [](double val) { return juce::String(val, 2) + "x"; };
+    inputSlider.updateText();
+
+    outputSlider.setTextValueSuffix("");
+    outputSlider.setNumDecimalPlacesToDisplay(2);
+    outputSlider.textFromValueFunction = [](double val) { return juce::String(val, 2) + "x"; };
+    outputSlider.updateText();
 
     advancedButton.setButtonText("ADVANCED DSP");
     advancedButton.setClickingTogglesState(true);
@@ -308,25 +128,33 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
     };
     addAndMakeVisible(advancedButton);
 
-    // --------------------------------------------------------------------------
-    // Advanced Panel Controls Setup
-    // --------------------------------------------------------------------------
+    // =========================================================================
+    // 4. Advanced Drawer Setup
+    // =========================================================================
     advancedTitleLabel.setText("ADVANCED DSP PARAMETERS", juce::dontSendNotification);
     advancedTitleLabel.setJustificationType(juce::Justification::centredLeft);
     advancedTitleLabel.setColour(juce::Label::textColourId, primaryText());
-    advancedTitleLabel.setFont(juce::Font(12.0f, juce::Font::bold));
+    advancedTitleLabel.setFont(juce::Font(11.5f, juce::Font::bold));
     addAndMakeVisible(advancedTitleLabel);
 
     advancedHintLabel.setText("Edits switch mode to Custom automatically", juce::dontSendNotification);
     advancedHintLabel.setJustificationType(juce::Justification::centredRight);
     advancedHintLabel.setColour(juce::Label::textColourId, secondaryText());
-    advancedHintLabel.setFont(juce::Font(11.0f));
+    advancedHintLabel.setFont(juce::Font(10.5f));
     addAndMakeVisible(advancedHintLabel);
 
     for (size_t i = 0; i < advancedSliders.size(); ++i) {
         configureAdvancedSlider(advancedSliders[i], advancedLabels[i], kAdvancedSpecs[i].label);
         advancedAttachments[i] = std::make_unique<SliderAttachment>(
             audioProcessor.parameters, kAdvancedSpecs[i].id, advancedSliders[i]);
+
+        const juce::String sfx = kAdvancedSpecs[i].suffix;
+        advancedSliders[i].setTextValueSuffix("");
+        advancedSliders[i].setNumDecimalPlacesToDisplay(2);
+        advancedSliders[i].textFromValueFunction = [sfx](double val) {
+            return juce::String(val, 2) + sfx;
+        };
+        advancedSliders[i].updateText();
     }
 
     setAdvancedVisible(false);
@@ -339,26 +167,14 @@ Dimension5AudioProcessorEditor::~Dimension5AudioProcessorEditor() {
     setLookAndFeel(nullptr);
 }
 
-void Dimension5AudioProcessorEditor::configureRotaryKnob(juce::Slider& slider, juce::Label& label,
-                                                         const juce::String& labelText, const juce::String& suffix,
-                                                         bool isSpatial) {
-    slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 68, 16);
-    slider.setTextValueSuffix(suffix);
-    slider.setColour(juce::Slider::rotarySliderFillColourId, isSpatial ? spatialAccent() : analogAccent());
-    addAndMakeVisible(slider);
-
-    label.setText(labelText, juce::dontSendNotification);
-    label.setJustificationType(juce::Justification::centred);
-    label.setColour(juce::Label::textColourId, isSpatial ? spatialAccent() : analogAccent());
-    label.setFont(juce::Font(11.0f, juce::Font::bold));
-    addAndMakeVisible(label);
+void Dimension5AudioProcessorEditor::configureHeaderButton(juce::TextButton& button) {
+    button.setColour(juce::TextButton::buttonColourId, surfaceColour());
 }
 
 void Dimension5AudioProcessorEditor::configureBottomSlider(juce::Slider& slider, juce::Label& label,
                                                            const juce::String& labelText, const juce::String& suffix) {
     slider.setSliderStyle(juce::Slider::LinearHorizontal);
-    slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 54, 16);
+    slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 16);
     slider.setTextValueSuffix(suffix);
     slider.setColour(juce::Slider::trackColourId, analogAccent());
     addAndMakeVisible(slider);
@@ -366,26 +182,22 @@ void Dimension5AudioProcessorEditor::configureBottomSlider(juce::Slider& slider,
     label.setText(labelText, juce::dontSendNotification);
     label.setJustificationType(juce::Justification::centredLeft);
     label.setColour(juce::Label::textColourId, primaryText());
-    label.setFont(juce::Font(11.0f, juce::Font::bold));
+    label.setFont(juce::Font(10.5f, juce::Font::bold));
     addAndMakeVisible(label);
 }
 
 void Dimension5AudioProcessorEditor::configureAdvancedSlider(juce::Slider& slider, juce::Label& label,
                                                              const juce::String& labelText) {
     slider.setSliderStyle(juce::Slider::LinearHorizontal);
-    slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 64, 16);
+    slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 16);
     slider.setColour(juce::Slider::trackColourId, analogAccent());
     addAndMakeVisible(slider);
 
     label.setText(labelText, juce::dontSendNotification);
     label.setJustificationType(juce::Justification::centredLeft);
     label.setColour(juce::Label::textColourId, secondaryText());
-    label.setFont(juce::Font(10.5f, juce::Font::bold));
+    label.setFont(juce::Font(10.0f, juce::Font::bold));
     addAndMakeVisible(label);
-}
-
-void Dimension5AudioProcessorEditor::configureSmallButton(juce::TextButton& button) {
-    button.setColour(juce::TextButton::buttonColourId, surfaceColour());
 }
 
 void Dimension5AudioProcessorEditor::setAdvancedVisible(bool shouldBeVisible) {
@@ -410,29 +222,28 @@ void Dimension5AudioProcessorEditor::updateCompareButtons() {
 void Dimension5AudioProcessorEditor::paint(juce::Graphics& g) {
     g.fillAll(bgColour());
 
-    // Main header frame divider
+    // Top Header separator
     g.setColour(dividerColour());
     g.drawLine((float)kMargin, (float)kHeaderHeight, (float)getWidth() - (float)kMargin, (float)kHeaderHeight, 1.0f);
 
-    // Bottom bar frame divider
+    // Bottom Bar separator
     const int bottomY = getHeight() - (advancedVisible ? (kExpandedHeight - kBaseHeight + kBottomBarHeight) : kBottomBarHeight);
     g.setColour(dividerColour());
     g.drawLine((float)kMargin, (float)bottomY, (float)getWidth() - (float)kMargin, (float)bottomY, 1.0f);
 
-    // Draw Input and Output Peak Meters
-    auto bottomArea = juce::Rectangle<int>(kMargin, bottomY, getWidth() - 2 * kMargin, kBottomBarHeight);
-    const int meterWidth = 90;
-    const int meterHeight = 14;
+    // Draw Input and Output Stereo Peak Meters
+    if (!inMeterBounds.isEmpty()) {
+        drawStereoMeter(g, inMeterBounds, inMeterLeft, inMeterRight, "IN");
+    }
+    if (!outMeterBounds.isEmpty()) {
+        drawStereoMeter(g, outMeterBounds, outMeterLeft, outMeterRight, "OUT");
+    }
 
-    auto inMeterRect = juce::Rectangle<int>(inputSlider.getRight() + 8, bottomY + 21, meterWidth, meterHeight);
-    drawStereoMeter(g, inMeterRect, inMeterLeft, inMeterRight, "IN");
-
-    auto outMeterRect = juce::Rectangle<int>(outputSlider.getRight() + 8, bottomY + 21, meterWidth, meterHeight);
-    drawStereoMeter(g, outMeterRect, outMeterLeft, outMeterRight, "OUT");
-
-    // Advanced Section Background
+    // Advanced Drawer Card Background
     if (advancedVisible) {
-        auto advArea = juce::Rectangle<int>(kMargin, bottomY + kBottomBarHeight + 6, getWidth() - 2 * kMargin, kExpandedHeight - kBaseHeight - 12).toFloat();
+        auto advArea = juce::Rectangle<int>(kMargin, bottomY + kBottomBarHeight + 6,
+                                           getWidth() - 2 * kMargin,
+                                           kExpandedHeight - kBaseHeight - 12).toFloat();
         g.setColour(surfaceColour());
         g.fillRoundedRectangle(advArea, 6.0f);
         g.setColour(dividerColour());
@@ -443,7 +254,7 @@ void Dimension5AudioProcessorEditor::paint(juce::Graphics& g) {
 void Dimension5AudioProcessorEditor::drawStereoMeter(juce::Graphics& g, juce::Rectangle<int> bounds,
                                                      float leftVal, float rightVal, const juce::String& label) {
     auto labelArea = bounds.removeFromLeft(22);
-    g.setFont(juce::Font(9.5f, juce::Font::bold));
+    g.setFont(juce::Font(9.0f, juce::Font::bold));
     g.setColour(secondaryText());
     g.drawText(label, labelArea, juce::Justification::centredLeft);
 
@@ -453,12 +264,12 @@ void Dimension5AudioProcessorEditor::drawStereoMeter(juce::Graphics& g, juce::Re
     auto rRect = bounds.removeFromTop(barH);
 
     auto drawSingleBar = [&](juce::Rectangle<int> barBounds, float val) {
-        g.setColour(bgColour());
+        g.setColour(surfaceColour());
         g.fillRect(barBounds);
         const int fillW = juce::roundToInt((float)barBounds.getWidth() * juce::jlimit(0.0f, 1.0f, val));
         if (fillW > 0) {
             auto fillBounds = barBounds.withWidth(fillW);
-            g.setColour(val > 0.95f ? warningAccent() : analogAccent());
+            g.setColour(val > 0.95f ? warningAccent() : (val > 0.75f ? analogAccent() : spatialAccent()));
             g.fillRect(fillBounds);
         }
         g.setColour(dividerColour());
@@ -473,61 +284,67 @@ void Dimension5AudioProcessorEditor::resized() {
     auto area = getLocalBounds().reduced(kMargin);
 
     // =========================================================================
-    // Header Layout
+    // 1. Header Layout
     // =========================================================================
     auto headerArea = area.removeFromTop(kHeaderHeight - 8);
 
-    auto brandArea = headerArea.removeFromLeft(250);
+    // Left Branding
+    auto brandArea = headerArea.removeFromLeft(220);
     titleLabel.setBounds(brandArea.removeFromTop(24));
     subtitleLabel.setBounds(brandArea.removeFromTop(16));
-    taglineLabel.setBounds(brandArea.removeFromTop(15));
 
-    auto rightHeaderArea = headerArea.removeFromRight(330);
-    bypassButton.setBounds(rightHeaderArea.removeFromRight(82).withHeight(28));
-    rightHeaderArea.removeFromRight(10);
-    compareCopyButton.setBounds(rightHeaderArea.removeFromRight(48).withHeight(28));
-    rightHeaderArea.removeFromRight(6);
-    compareBButton.setBounds(rightHeaderArea.removeFromRight(28).withHeight(28));
+    // Right Action Buttons
+    auto rightHeaderArea = headerArea.removeFromRight(190);
+    bypassButton.setBounds(rightHeaderArea.removeFromRight(74).withHeight(28));
+    rightHeaderArea.removeFromRight(8);
+    compareCopyButton.setBounds(rightHeaderArea.removeFromRight(44).withHeight(28));
     rightHeaderArea.removeFromRight(4);
-    compareAButton.setBounds(rightHeaderArea.removeFromRight(28).withHeight(28));
+    compareBButton.setBounds(rightHeaderArea.removeFromRight(26).withHeight(28));
+    rightHeaderArea.removeFromRight(3);
+    compareAButton.setBounds(rightHeaderArea.removeFromRight(26).withHeight(28));
 
-    // Preset & Mode selector in remaining header space
-    headerArea.removeFromLeft(12);
-    headerArea.removeFromRight(12);
-    const int comboHeight = 28;
-    auto comboCol1 = headerArea.removeFromLeft(headerArea.getWidth() / 2 - 4);
+    // Center Selectors: Preset (wide ~200px) and Mode (~115px)
+    headerArea.removeFromLeft(14);
+    headerArea.removeFromRight(14);
+    const int comboH = 28;
+    const int modeW = 115;
+    const int presetW = juce::jmin(220, headerArea.getWidth() - modeW - 8);
+
+    presetBox.setBounds(headerArea.removeFromLeft(presetW).withHeight(comboH));
     headerArea.removeFromLeft(8);
-    auto comboCol2 = headerArea;
-    presetBox.setBounds(comboCol1.withHeight(comboHeight));
-    modeBox.setBounds(comboCol2.withHeight(comboHeight));
+    modeBox.setBounds(headerArea.removeFromLeft(modeW).withHeight(comboH));
 
-    area.removeFromTop(12);
+    area.removeFromTop(10);
 
     // =========================================================================
-    // Bottom Bar Layout
+    // 2. Bottom Bar Layout
     // =========================================================================
     const int advHeight = advancedVisible ? (kExpandedHeight - kBaseHeight) : 0;
     auto bottomArea = area.removeFromBottom(kBottomBarHeight + advHeight);
     auto barOnly = bottomArea.removeFromTop(kBottomBarHeight);
 
-    // Advanced toggle button on the right
-    advancedButton.setBounds(barOnly.removeFromRight(120).reduced(0, 14));
+    // Advanced toggle button on right
+    advancedButton.setBounds(barOnly.removeFromRight(120).reduced(0, 12));
     barOnly.removeFromRight(20);
 
-    // Output section
-    auto outSection = barOnly.removeFromRight(220);
-    outputLabel.setBounds(outSection.removeFromLeft(54).reduced(0, 16));
-    outputSlider.setBounds(outSection.removeFromLeft(80).reduced(0, 12));
+    // Output section (Label + Slider + Meter)
+    auto outSection = barOnly.removeFromRight(260);
+    outputLabel.setBounds(outSection.removeFromLeft(48).reduced(0, 14));
+    outputSlider.setBounds(outSection.removeFromLeft(82).reduced(0, 10));
+    outSection.removeFromLeft(8);
+    outMeterBounds = outSection.removeFromLeft(115).reduced(0, 15);
 
     barOnly.removeFromRight(20);
 
-    // Input section
-    auto inSection = barOnly.removeFromRight(220);
-    inputLabel.setBounds(inSection.removeFromLeft(46).reduced(0, 16));
-    inputSlider.setBounds(inSection.removeFromLeft(80).reduced(0, 12));
+    // Input section (Label + Slider + Meter)
+    auto inSection = barOnly.removeFromRight(260);
+    inputLabel.setBounds(inSection.removeFromLeft(44).reduced(0, 14));
+    inputSlider.setBounds(inSection.removeFromLeft(82).reduced(0, 10));
+    inSection.removeFromLeft(8);
+    inMeterBounds = inSection.removeFromLeft(115).reduced(0, 15);
 
     // =========================================================================
-    // Advanced Panel Layout
+    // 3. Advanced Drawer Layout
     // =========================================================================
     if (advancedVisible) {
         auto advArea = bottomArea.reduced(10, 8);
@@ -554,56 +371,29 @@ void Dimension5AudioProcessorEditor::resized() {
     }
 
     // =========================================================================
-    // Center Area: Stereo Field Monitor (Left) & Main Controls (Right)
+    // 4. Central Area: Stereo Field Monitor (64%) & Spatial Controls (36%)
     // =========================================================================
-    const int controlsWidth = juce::jlimit(260, 310, (int)((float)area.getWidth() * 0.36f));
-    auto controlsArea = area.removeFromRight(controlsWidth);
-    area.removeFromRight(14); // Gap between monitor and knobs
-    stereoFieldComponent.setBounds(area);
+    area.removeFromBottom(8);
+    const int totalW = area.getWidth();
+    const int controlsW = juce::jlimit(280, 360, (int)((float)totalW * 0.35f));
+    const int gap = 12;
 
-    // Arrange 5 knobs inside controlsArea:
-    // Top row: SPREAD (prominent wide) & MIX
-    // Bottom row: DEPTH, MOTION, COLOR
-    const int topRowHeight = controlsArea.getHeight() * 0.52f;
-    auto topRow = controlsArea.removeFromTop(topRowHeight);
-    controlsArea.removeFromTop(8);
-    auto bottomRow = controlsArea;
+    auto controlsArea = area.removeFromRight(controlsW);
+    area.removeFromRight(gap);
+    auto monitorArea = area;
 
-    // Top Row: SPREAD and MIX
-    const int topKnobW = topRow.getWidth() / 2;
-    auto spreadBox = topRow.removeFromLeft(topKnobW).reduced(6, 4);
-    auto mixBox = topRow.reduced(6, 4);
-
-    spreadLabel.setBounds(spreadBox.removeFromTop(18));
-    spreadSlider.setBounds(spreadBox);
-
-    mixLabel.setBounds(mixBox.removeFromTop(18));
-    mixSlider.setBounds(mixBox);
-
-    // Bottom Row: DEPTH, MOTION, COLOR
-    const int botKnobW = bottomRow.getWidth() / 3;
-    auto depthBox = bottomRow.removeFromLeft(botKnobW).reduced(4, 2);
-    auto motionBox = bottomRow.removeFromLeft(botKnobW).reduced(4, 2);
-    auto colorBox = bottomRow.reduced(4, 2);
-
-    depthLabel.setBounds(depthBox.removeFromTop(16));
-    depthSlider.setBounds(depthBox);
-
-    motionLabel.setBounds(motionBox.removeFromTop(16));
-    motionSlider.setBounds(motionBox);
-
-    colorLabel.setBounds(colorBox.removeFromTop(16));
-    colorSlider.setBounds(colorBox);
+    stereoFieldComponent.setBounds(monitorArea);
+    spatialControlsComponent.setBounds(controlsArea);
 }
 
 void Dimension5AudioProcessorEditor::timerCallback() {
-    // Consume stereo field telemetry safely
+    // 1. Consume stereo telemetry
     StereoTelemetrySnapshot teleSnapshot;
     if (audioProcessor.getStereoTelemetry(teleSnapshot)) {
         stereoFieldComponent.updateTelemetry(teleSnapshot);
     }
 
-    // Synchronize auxiliary parameter geometry
+    // 2. Synchronize auxiliary parameter geometry
     stereoFieldComponent.updateParameterGeometry(
         audioProcessor.getFloatParam("width"),
         audioProcessor.getFloatParam("depthMs"),
@@ -611,14 +401,18 @@ void Dimension5AudioProcessorEditor::timerCallback() {
         audioProcessor.parameters.getRawParameterValue("mix")->load()
     );
 
-    // Smooth peak meters for UI presentation
+    // 3. Synchronize bypass visual state
+    const bool isBypassed = (audioProcessor.parameters.getRawParameterValue("bypass")->load() > 0.5f);
+    stereoFieldComponent.setBypassState(isBypassed);
+
+    // 4. Smooth peak meters for presentation
     const float decay = 0.82f;
-    inMeterLeft = juce::jmax(audioProcessor.getInputMeterLeft(), inMeterLeft * decay);
+    inMeterLeft  = juce::jmax(audioProcessor.getInputMeterLeft(), inMeterLeft * decay);
     inMeterRight = juce::jmax(audioProcessor.getInputMeterRight(), inMeterRight * decay);
     outMeterLeft = juce::jmax(audioProcessor.getOutputMeterLeft(), outMeterLeft * decay);
     outMeterRight = juce::jmax(audioProcessor.getOutputMeterRight(), outMeterRight * decay);
 
-    // Preset selector sync with host program state
+    // 5. Preset selector sync with host program state
     const int curProg = audioProcessor.getCurrentProgram();
     if (presetBox.getSelectedItemIndex() != curProg) {
         presetBox.setSelectedItemIndex(curProg, juce::dontSendNotification);

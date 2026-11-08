@@ -11,6 +11,14 @@ struct GoniometerPoint {
     float mid { 0.0f };
 };
 
+enum class CorrelationStatus : uint8_t {
+    Valid = 0,
+    Silence,
+    LeftOnly,
+    RightOnly,
+    Undefined
+};
+
 struct StereoAnalysisFrame {
     float correlation { 1.0f };
     float midRms { 0.0f };
@@ -26,7 +34,13 @@ struct StereoAnalysisFrame {
     float sideMidRatioDb { -60.0f };
     float inputSideMidRatioDb { -60.0f };
     float monoAttenuationDb { 0.0f };
+    float stereoDeltaDb { 0.0f };
     bool hasSignal { false };
+    bool isCorrelationValid { false };
+    bool isSideMidValid { false };
+    bool isInputSideMidValid { false };
+    bool isStereoDeltaValid { false };
+    CorrelationStatus correlationStatus { CorrelationStatus::Silence };
 };
 
 struct StereoTelemetrySnapshot {
@@ -41,6 +55,7 @@ struct StereoTelemetrySnapshot {
  * Calculates running Mid/Side RMS, cross-correlation, input/output comparison,
  * mono compatibility, and collects decimated goniometer points.
  * Operates strictly wait-free: zero dynamic allocations, zero locks, zero NaN/Inf.
+ * Block-size independent continuous-time peak decay and RMS averaging.
  */
 class StereoAnalyzer {
 public:
@@ -48,6 +63,7 @@ public:
 
     void prepare(double sampleRate) {
         const double sr = (sampleRate > 1000.0) ? sampleRate : 48000.0;
+        currentSampleRate = static_cast<float>(sr);
         // ~150 ms continuous-time equivalent leaky integrator
         alpha = (float)(1.0 - std::exp(-1.0 / (0.150 * sr)));
         reset();
@@ -130,8 +146,11 @@ public:
         // Flush subnormal values to prevent denormal penalties
         sanitizeAccumulators();
 
-        // Smooth peak values (fast attack, 100ms release)
-        const float peakDecay = 0.85f;
+        // Continuous-time exponential peak decay (tau ~ 100 ms), completely independent of block size
+        const float peakReleaseTimeSec = 0.100f;
+        const float blockDurationSec = static_cast<float>(numSamples) / currentSampleRate;
+        const float peakDecay = std::exp(-blockDurationSec / peakReleaseTimeSec);
+
         inPeakL = std::max(blockInPeakL, inPeakL * peakDecay);
         inPeakR = std::max(blockInPeakR, inPeakR * peakDecay);
         outPeakL = std::max(blockOutPeakL, outPeakL * peakDecay);
@@ -150,13 +169,20 @@ public:
 
         // Signal detection threshold (~ -80 dBFS)
         constexpr float kSilenceThreshold = 1e-8f;
-        const bool outHasSignal = (accumOutLL > kSilenceThreshold || accumOutRR > kSilenceThreshold || outPeakL > 1e-4f || outPeakR > 1e-4f);
-        const bool inHasSignal = (accumInLL > kSilenceThreshold || accumInRR > kSilenceThreshold || inPeakL > 1e-4f || inPeakR > 1e-4f);
+        const bool outLeftActive = (accumOutLL > kSilenceThreshold || outPeakL > 1e-4f);
+        const bool outRightActive = (accumOutRR > kSilenceThreshold || outPeakR > 1e-4f);
+        const bool inLeftActive = (accumInLL > kSilenceThreshold || inPeakL > 1e-4f);
+        const bool inRightActive = (accumInRR > kSilenceThreshold || inPeakR > 1e-4f);
+
+        const bool outHasSignal = (outLeftActive || outRightActive);
+        const bool inHasSignal = (inLeftActive || inRightActive);
 
         f.hasSignal = outHasSignal || inHasSignal;
 
         if (!f.hasSignal) {
             f.correlation = 1.0f;
+            f.correlationStatus = CorrelationStatus::Silence;
+            f.isCorrelationValid = false;
             f.midRms = 0.0f;
             f.sideRms = 0.0f;
             f.inputMidRms = 0.0f;
@@ -166,6 +192,10 @@ public:
             f.sideMidRatioDb = -60.0f;
             f.inputSideMidRatioDb = -60.0f;
             f.monoAttenuationDb = 0.0f;
+            f.stereoDeltaDb = 0.0f;
+            f.isSideMidValid = false;
+            f.isInputSideMidValid = false;
+            f.isStereoDeltaValid = false;
             return f;
         }
 
@@ -176,36 +206,71 @@ public:
         f.inputSideRms = std::sqrt(std::max(0.0f, accumInSS));
 
         // Normalized Correlation: sumLR / sqrt(sumL2 * sumR2)
-        const float denom = std::sqrt(std::max(0.0f, accumOutLL * accumOutRR));
-        if (denom > 1e-7f) {
-            f.correlation = std::clamp(accumOutLR / denom, -1.0f, 1.0f);
-        } else {
-            // Signal present in only one channel -> correlation is undefined/zero
+        if (outLeftActive && outRightActive) {
+            const float denom = std::sqrt(std::max(0.0f, accumOutLL * accumOutRR));
+            if (denom > 1e-7f) {
+                f.correlation = std::clamp(accumOutLR / denom, -1.0f, 1.0f);
+                f.correlationStatus = CorrelationStatus::Valid;
+                f.isCorrelationValid = true;
+            } else {
+                f.correlation = 0.0f;
+                f.correlationStatus = CorrelationStatus::Undefined;
+                f.isCorrelationValid = false;
+            }
+        } else if (outLeftActive && !outRightActive) {
             f.correlation = 0.0f;
+            f.correlationStatus = CorrelationStatus::LeftOnly;
+            f.isCorrelationValid = false;
+        } else if (!outLeftActive && outRightActive) {
+            f.correlation = 0.0f;
+            f.correlationStatus = CorrelationStatus::RightOnly;
+            f.isCorrelationValid = false;
+        } else {
+            f.correlation = 0.0f;
+            f.correlationStatus = CorrelationStatus::Undefined;
+            f.isCorrelationValid = false;
         }
 
         // Output Side/Mid Ratio in dB
-        if (f.midRms > 1e-5f && f.sideRms > 1e-5f) {
+        constexpr float kRmsFloor = 1e-5f;
+        if (f.midRms > kRmsFloor && f.sideRms > kRmsFloor) {
             const float ratio = f.sideRms / f.midRms;
             f.sideMidRatioDb = std::clamp(20.0f * std::log10(ratio), -60.0f, 30.0f);
-        } else if (f.midRms > 1e-5f && f.sideRms <= 1e-5f) {
+            f.isSideMidValid = true;
+        } else if (f.midRms > kRmsFloor && f.sideRms <= kRmsFloor) {
             f.sideMidRatioDb = -60.0f; // Pure mono
-        } else if (f.sideRms > 1e-5f && f.midRms <= 1e-5f) {
+            f.isSideMidValid = false;
+        } else if (f.sideRms > kRmsFloor && f.midRms <= kRmsFloor) {
             f.sideMidRatioDb = 30.0f; // Pure side / antiphase
+            f.isSideMidValid = false;
         } else {
             f.sideMidRatioDb = -60.0f;
+            f.isSideMidValid = false;
         }
 
         // Input Side/Mid Ratio in dB
-        if (f.inputMidRms > 1e-5f && f.inputSideRms > 1e-5f) {
+        if (f.inputMidRms > kRmsFloor && f.inputSideRms > kRmsFloor) {
             const float ratio = f.inputSideRms / f.inputMidRms;
             f.inputSideMidRatioDb = std::clamp(20.0f * std::log10(ratio), -60.0f, 30.0f);
-        } else if (f.inputMidRms > 1e-5f && f.inputSideRms <= 1e-5f) {
+            f.isInputSideMidValid = true;
+        } else if (f.inputMidRms > kRmsFloor && f.inputSideRms <= kRmsFloor) {
             f.inputSideMidRatioDb = -60.0f;
-        } else if (f.inputSideRms > 1e-5f && f.inputMidRms <= 1e-5f) {
+            f.isInputSideMidValid = false;
+        } else if (f.inputSideRms > kRmsFloor && f.inputMidRms <= kRmsFloor) {
             f.inputSideMidRatioDb = 30.0f;
+            f.isInputSideMidValid = false;
         } else {
             f.inputSideMidRatioDb = -60.0f;
+            f.isInputSideMidValid = false;
+        }
+
+        // Stereo Delta: valid only when both input and output have measurable Side & Mid
+        if (f.isSideMidValid && f.isInputSideMidValid) {
+            f.stereoDeltaDb = std::clamp(f.sideMidRatioDb - f.inputSideMidRatioDb, -30.0f, 30.0f);
+            f.isStereoDeltaValid = true;
+        } else {
+            f.stereoDeltaDb = 0.0f;
+            f.isStereoDeltaValid = false;
         }
 
         // Mono Compatibility: compare mono RMS to stereo reference RMS
@@ -213,7 +278,7 @@ public:
         const float stereoRefEnergy = 0.5f * (accumOutLL + accumOutRR);
         f.stereoReferenceRms = std::sqrt(std::max(0.0f, stereoRefEnergy));
 
-        if (f.stereoReferenceRms > 1e-5f) {
+        if (f.stereoReferenceRms > kRmsFloor) {
             const float monoRatio = f.monoRms / f.stereoReferenceRms;
             f.monoAttenuationDb = 20.0f * std::log10(std::max(1e-4f, monoRatio));
         } else {
@@ -241,6 +306,7 @@ private:
         clean(accumOutSS);
     }
 
+    float currentSampleRate { 48000.0f };
     float alpha { 0.005f };
 
     float accumInLL { 0.0f };

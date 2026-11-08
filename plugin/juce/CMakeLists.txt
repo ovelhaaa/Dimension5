@@ -15,9 +15,12 @@ juce_generate_juce_header(Dimension5Plugin)
 
 target_sources(Dimension5Plugin
   PRIVATE
+    Dimension5LookAndFeel.cpp
     PluginEditor.cpp
     PluginProcessor.cpp
-    StereoFieldComponent.cpp)
+    SpatialControlsComponent.cpp
+    StereoFieldComponent.cpp
+    StereoMetricsComponent.cpp)
 
 target_include_directories(Dimension5Plugin
   PRIVATE

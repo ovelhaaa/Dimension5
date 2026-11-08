@@ -1477,6 +1477,326 @@ void test_main_controls_auto_custom_depth_motion_color() {
     check(std::abs(cfg.dspParams.lpfHz - 5500.0f) < 1e-4f, "applied lpf is 5500 Hz");
     check(std::abs(cfg.dspParams.baseDelayMs - 10.0f) < 1e-4f, "preserved Mode III base delay (10.0 ms)");
 }
+
+// 41. Stereo Field View Modes switching (FIELD -> VECTOR -> DELTA -> FIELD) with audio invariance
+void test_stereo_field_modes_switching_and_audio_invariance() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    auto* editor = dynamic_cast<Dimension5AudioProcessorEditor*>(proc.createEditor());
+    check(editor != nullptr, "editor created successfully");
+
+    auto& fieldComp = editor->getStereoFieldComponent();
+    check(fieldComp.getViewMode() == StereoFieldComponent::ViewMode::Field, "default mode is FIELD");
+
+    // Process audio before mode switch
+    juce::AudioBuffer<float> bufferBefore(2, 64);
+    for (int i = 0; i < 64; ++i) {
+        bufferBefore.setSample(0, i, 0.3f);
+        bufferBefore.setSample(1, i, 0.3f);
+    }
+    processTestBlock(proc, bufferBefore);
+
+    // Switch to VECTOR
+    fieldComp.setViewMode(StereoFieldComponent::ViewMode::Vector);
+    check(fieldComp.getViewMode() == StereoFieldComponent::ViewMode::Vector, "switched to VECTOR");
+
+    juce::AudioBuffer<float> bufferVector(2, 64);
+    for (int i = 0; i < 64; ++i) {
+        bufferVector.setSample(0, i, 0.3f);
+        bufferVector.setSample(1, i, 0.3f);
+    }
+    processTestBlock(proc, bufferVector);
+
+    // Switch to DELTA
+    fieldComp.setViewMode(StereoFieldComponent::ViewMode::Delta);
+    check(fieldComp.getViewMode() == StereoFieldComponent::ViewMode::Delta, "switched to DELTA");
+
+    juce::AudioBuffer<float> bufferDelta(2, 64);
+    for (int i = 0; i < 64; ++i) {
+        bufferDelta.setSample(0, i, 0.3f);
+        bufferDelta.setSample(1, i, 0.3f);
+    }
+    processTestBlock(proc, bufferDelta);
+
+    // Verify audio stability across UI mode switches
+    for (int i = 0; i < 64; ++i) {
+        check(std::abs(bufferVector.getSample(0, i) - bufferDelta.getSample(0, i)) < 1e-4f, "vector and delta produce identical audio");
+    }
+
+    // Switch back to FIELD
+    fieldComp.setViewMode(StereoFieldComponent::ViewMode::Field);
+    check(fieldComp.getViewMode() == StereoFieldComponent::ViewMode::Field, "switched back to FIELD");
+
+    delete editor;
+}
+
+// 42. Undefined correlation and single channel handling
+void test_undefined_correlation_and_mono_handling() {
+    StereoAnalyzer analyzer;
+    analyzer.prepare(48000.0);
+
+    // 1. Silence: correlation is invalid, status is Silence
+    {
+        StereoTelemetrySnapshot snap {};
+        std::vector<float> zeros(64, 0.0f);
+        analyzer.processBlock(zeros.data(), zeros.data(), zeros.data(), zeros.data(), 64, snap);
+        check(!snap.frame.hasSignal, "silence hasSignal is false");
+        check(!snap.frame.isCorrelationValid, "silence correlation is marked invalid");
+        check(snap.frame.correlationStatus == CorrelationStatus::Silence, "silence correlation status");
+        check(!snap.frame.isStereoDeltaValid, "silence stereo delta is invalid");
+    }
+
+    // 2. Left channel only: correlation is invalid, status is LeftOnly
+    {
+        StereoTelemetrySnapshot snap {};
+        std::vector<float> leftOnly(64, 0.5f);
+        std::vector<float> zeros(64, 0.0f);
+        for (int b = 0; b < 10; ++b) {
+            analyzer.processBlock(leftOnly.data(), zeros.data(), leftOnly.data(), zeros.data(), 64, snap);
+        }
+        check(snap.frame.hasSignal, "left-only hasSignal is true");
+        check(!snap.frame.isCorrelationValid, "left-only correlation is marked invalid");
+        check(snap.frame.correlationStatus == CorrelationStatus::LeftOnly, "left-only correlation status");
+        check(std::abs(snap.frame.correlation) < 1e-4f, "left-only reports numerical 0.0f");
+    }
+
+    // 3. Right channel only: correlation is invalid, status is RightOnly
+    {
+        analyzer.reset();
+        StereoTelemetrySnapshot snap {};
+        std::vector<float> rightOnly(64, 0.5f);
+        std::vector<float> zeros(64, 0.0f);
+        for (int b = 0; b < 10; ++b) {
+            analyzer.processBlock(zeros.data(), rightOnly.data(), zeros.data(), rightOnly.data(), 64, snap);
+        }
+        check(snap.frame.hasSignal, "right-only hasSignal is true");
+        check(!snap.frame.isCorrelationValid, "right-only correlation is marked invalid");
+        check(snap.frame.correlationStatus == CorrelationStatus::RightOnly, "right-only correlation status");
+        check(std::abs(snap.frame.correlation) < 1e-4f, "right-only reports numerical 0.0f");
+    }
+
+    // 4. Stereo correlated signal: correlation is valid, status is Valid
+    {
+        analyzer.reset();
+        StereoTelemetrySnapshot snap {};
+        std::vector<float> stereo(64, 0.4f);
+        for (int b = 0; b < 15; ++b) {
+            analyzer.processBlock(stereo.data(), stereo.data(), stereo.data(), stereo.data(), 64, snap);
+        }
+        check(snap.frame.hasSignal, "stereo hasSignal is true");
+        check(snap.frame.isCorrelationValid, "stereo correlation is valid");
+        check(snap.frame.correlationStatus == CorrelationStatus::Valid, "stereo correlation status is Valid");
+        check(std::abs(snap.frame.correlation - 1.0f) < 1e-3f, "identical channels correlation ~1.0");
+    }
+}
+
+// 43. Block size independent continuous-time peak decay
+void test_block_size_independent_peak_decay() {
+    // Compare peak envelope decay over 100ms between block size 16 and block size 256
+    StereoAnalyzer analyzerSmall;
+    analyzerSmall.prepare(48000.0);
+
+    StereoAnalyzer analyzerLarge;
+    analyzerLarge.prepare(48000.0);
+
+    // Feed initial peak of 1.0
+    StereoTelemetrySnapshot snapSmall {};
+    StereoTelemetrySnapshot snapLarge {};
+    std::vector<float> pulse(256, 1.0f);
+    analyzerSmall.processBlock(pulse.data(), pulse.data(), pulse.data(), pulse.data(), 256, snapSmall);
+    analyzerLarge.processBlock(pulse.data(), pulse.data(), pulse.data(), pulse.data(), 256, snapLarge);
+
+    check(std::abs(snapSmall.frame.outputPeakL - 1.0f) < 1e-3f, "initial peak L small is 1.0");
+    check(std::abs(snapLarge.frame.outputPeakL - 1.0f) < 1e-3f, "initial peak L large is 1.0");
+
+    // Feed 4800 samples of silence (100 ms) in chunks of 16 vs chunks of 256
+    std::vector<float> zero16(16, 0.0f);
+    for (int i = 0; i < 4800 / 16; ++i) {
+        analyzerSmall.processBlock(zero16.data(), zero16.data(), zero16.data(), zero16.data(), 16, snapSmall);
+    }
+
+    std::vector<float> zero256(256, 0.0f);
+    for (int i = 0; i < 4800 / 256; ++i) {
+        analyzerLarge.processBlock(zero256.data(), zero256.data(), zero256.data(), zero256.data(), 256, snapLarge);
+    }
+
+    // Both should decay to approximately 1/e ~ 0.368, within close margin
+    check(std::abs(snapSmall.frame.outputPeakL - snapLarge.frame.outputPeakL) < 0.05f,
+          "decay across 16-sample blocks matches decay across 256-sample blocks");
+}
+
+// 44. Editor resizing bounds and Advanced drawer expansion
+void test_editor_resize_bounds_and_advanced_drawer() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    auto* editor = dynamic_cast<Dimension5AudioProcessorEditor*>(proc.createEditor());
+    check(editor != nullptr, "editor instantiated");
+
+    // Default base dimensions
+    check(editor->getWidth() == 1000, "base width is 1000");
+    check(editor->getHeight() == 620, "base height is 620");
+
+    // Minimum size
+    editor->setSize(840, 540);
+    check(editor->getWidth() == 840, "resized to min width 840");
+    check(editor->getHeight() == 540, "resized to min height 540");
+
+    // Maximum size
+    editor->setSize(1400, 870);
+    check(editor->getWidth() == 1400, "resized to large width 1400");
+    check(editor->getHeight() == 870, "resized to large height 870");
+
+    // Restore standard size
+    editor->setSize(1000, 620);
+    check(!editor->isAdvancedVisible(), "advanced drawer initially closed");
+
+    // Open Advanced Drawer
+    editor->setAdvancedVisible(true);
+    check(editor->isAdvancedVisible(), "advanced drawer marked visible");
+    check(editor->getHeight() == 780, "editor expanded to 780 height for advanced drawer");
+
+    // Close Advanced Drawer
+    editor->setAdvancedVisible(false);
+    check(!editor->isAdvancedVisible(), "advanced drawer marked closed");
+    check(editor->getHeight() == 620, "editor restored to 620 height");
+
+    delete editor;
+}
+
+// Helper: Save Component Snapshot to PNG file
+static bool saveSnapshotToPng(juce::Component& comp, const juce::File& outputFile) {
+    outputFile.getParentDirectory().createDirectory();
+    juce::Image snapshot = comp.createComponentSnapshot(comp.getLocalBounds(), true, 1.0f);
+    if (!snapshot.isValid() || snapshot.getWidth() <= 0 || snapshot.getHeight() <= 0) {
+        return false;
+    }
+    if (outputFile.existsAsFile()) {
+        outputFile.deleteFile();
+    }
+    juce::FileOutputStream stream(outputFile);
+    if (!stream.openedOk()) {
+        return false;
+    }
+    juce::PNGImageFormat png;
+    return png.writeImageToStream(snapshot, stream);
+}
+
+// 45. Visual Validation: Capture 10 Real UI Screenshots
+void test_generate_visual_validation_snapshots() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    const juce::File outDir = juce::File::getCurrentWorkingDirectory().getChildFile("build/snapshots");
+    outDir.createDirectory();
+
+    auto* editor = dynamic_cast<Dimension5AudioProcessorEditor*>(proc.createEditor());
+    check(editor != nullptr, "editor instantiated for snapshot generation");
+
+    auto feedAudioAndTelemetry = [&](int numFrames = 32, float widthVal = 1.0f, bool bypass = false) {
+        setParamHostValue(proc, "width", widthVal);
+        setParamHostValue(proc, "bypass", bypass ? 1.0f : 0.0f);
+
+        juce::AudioBuffer<float> buffer(2, numFrames);
+        for (int i = 0; i < numFrames; ++i) {
+            const float t = (float)i * 0.08f;
+            buffer.setSample(0, i, 0.40f * std::sin(t) + 0.15f * std::cos(t * 2.3f));
+            buffer.setSample(1, i, 0.35f * std::sin(t + 0.9f) - 0.20f * std::cos(t * 1.7f));
+        }
+        processTestBlock(proc, buffer);
+
+        StereoTelemetrySnapshot snap {};
+        if (proc.getStereoTelemetry(snap)) {
+            editor->getStereoFieldComponent().updateTelemetry(snap);
+        }
+        editor->getStereoFieldComponent().updateParameterGeometry(
+            widthVal,
+            proc.getFloatParam("depthMs"),
+            proc.getFloatParam("rateHz"),
+            proc.parameters.getRawParameterValue("mix")->load()
+        );
+        editor->getStereoFieldComponent().setBypassState(bypass);
+    };
+
+    // 1. Minimum Size (840 x 540)
+    editor->setSize(840, 540);
+    feedAudioAndTelemetry(64, 1.0f, false);
+    check(saveSnapshotToPng(*editor, outDir.getChildFile("01_minimum_size.png")), "saved 01_minimum_size.png");
+
+    // 2. Standard Size (1000 x 620)
+    editor->setSize(1000, 620);
+    feedAudioAndTelemetry(64, 1.2f, false);
+    check(saveSnapshotToPng(*editor, outDir.getChildFile("02_standard_size.png")), "saved 02_standard_size.png");
+
+    // 3. Maximum Size (1400 x 870)
+    editor->setSize(1400, 870);
+    feedAudioAndTelemetry(64, 1.4f, false);
+    check(saveSnapshotToPng(*editor, outDir.getChildFile("03_maximum_size.png")), "saved 03_maximum_size.png");
+
+    // Restore Standard Size for remaining tests
+    editor->setSize(1000, 620);
+
+    // 4. Advanced Drawer Open
+    editor->setAdvancedVisible(true);
+    feedAudioAndTelemetry(64, 1.0f, false);
+    check(saveSnapshotToPng(*editor, outDir.getChildFile("04_advanced_open.png")), "saved 04_advanced_open.png");
+    editor->setAdvancedVisible(false);
+
+    // 5. FIELD Mode Active
+    editor->getStereoFieldComponent().setViewMode(StereoFieldComponent::ViewMode::Field);
+    feedAudioAndTelemetry(64, 1.25f, false);
+    check(saveSnapshotToPng(*editor, outDir.getChildFile("05_field_mode.png")), "saved 05_field_mode.png");
+
+    // 6. VECTOR Mode Active
+    editor->getStereoFieldComponent().setViewMode(StereoFieldComponent::ViewMode::Vector);
+    feedAudioAndTelemetry(64, 1.35f, false);
+    check(saveSnapshotToPng(*editor, outDir.getChildFile("06_vector_mode.png")), "saved 06_vector_mode.png");
+
+    // 7. DELTA Mode Active
+    editor->getStereoFieldComponent().setViewMode(StereoFieldComponent::ViewMode::Delta);
+    feedAudioAndTelemetry(64, 1.50f, false);
+    check(saveSnapshotToPng(*editor, outDir.getChildFile("07_delta_mode.png")), "saved 07_delta_mode.png");
+
+    // 8. Bypass Active
+    editor->getStereoFieldComponent().setViewMode(StereoFieldComponent::ViewMode::Field);
+    feedAudioAndTelemetry(64, 1.0f, true);
+    check(saveSnapshotToPng(*editor, outDir.getChildFile("08_bypass_active.png")), "saved 08_bypass_active.png");
+
+    // 9. Silence State
+    {
+        setParamHostValue(proc, "bypass", 0.0f);
+        StereoTelemetrySnapshot silenceSnap {};
+        silenceSnap.frame.hasSignal = false;
+        silenceSnap.frame.isCorrelationValid = false;
+        silenceSnap.frame.correlationStatus = CorrelationStatus::Silence;
+        silenceSnap.frame.correlation = 1.0f;
+        silenceSnap.frame.midRms = 0.0f;
+        silenceSnap.frame.sideRms = 0.0f;
+        silenceSnap.frame.monoAttenuationDb = 0.0f;
+        silenceSnap.frame.sideMidRatioDb = -60.0f;
+        silenceSnap.frame.stereoDeltaDb = 0.0f;
+        silenceSnap.gonioCount = 0;
+
+        editor->getStereoFieldComponent().updateTelemetry(silenceSnap);
+        editor->getStereoFieldComponent().resetDisplayState();
+        editor->getStereoFieldComponent().setBypassState(false);
+        check(saveSnapshotToPng(*editor, outDir.getChildFile("09_silence.png")), "saved 09_silence.png");
+    }
+
+    // 10. Test Stereo Audio with Wide Spatial Expansion
+    {
+        setParamHostValue(proc, "mode", (float)DIMENSION_MODE_IV);
+        setParamHostValue(proc, "width", 1.8f);
+        setParamHostValue(proc, "mix", 1.0f);
+        feedAudioAndTelemetry(128, 1.8f, false);
+        check(saveSnapshotToPng(*editor, outDir.getChildFile("10_stereo_test_audio.png")), "saved 10_stereo_test_audio.png");
+    }
+
+    std::cout << "[JUCE Tests] Successfully generated all 10 real visual snapshots in build/snapshots/!\n";
+
+    delete editor;
+}
 } // namespace
 
 int main() {
@@ -1602,6 +1922,21 @@ int main() {
 
         std::cout << "[JUCE Tests] 40. test_main_controls_auto_custom_depth_motion_color...\n";
         test_main_controls_auto_custom_depth_motion_color();
+
+        std::cout << "[JUCE Tests] 41. test_stereo_field_modes_switching_and_audio_invariance...\n";
+        test_stereo_field_modes_switching_and_audio_invariance();
+
+        std::cout << "[JUCE Tests] 42. test_undefined_correlation_and_mono_handling...\n";
+        test_undefined_correlation_and_mono_handling();
+
+        std::cout << "[JUCE Tests] 43. test_block_size_independent_peak_decay...\n";
+        test_block_size_independent_peak_decay();
+
+        std::cout << "[JUCE Tests] 44. test_editor_resize_bounds_and_advanced_drawer...\n";
+        test_editor_resize_bounds_and_advanced_drawer();
+
+        std::cout << "[JUCE Tests] 45. test_generate_visual_validation_snapshots...\n";
+        test_generate_visual_validation_snapshots();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;
