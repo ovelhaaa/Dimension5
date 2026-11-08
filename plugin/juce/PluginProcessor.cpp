@@ -156,6 +156,9 @@ void Dimension5AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBl
 
     bypassSmoothCoeff = (float)(1.0 - std::exp(-1.0 / (0.020 * (double)safeSampleRate)));
     mixSmoothCoeff = (float)(1.0 - std::exp(-1.0 / (0.020 * (double)safeSampleRate)));
+    stereoAnalyzer.prepare(safeSampleRate);
+    StereoTelemetrySnapshot initTele {};
+    telemetryBuffer.publish(initTele);
 
     PluginConfig cfg;
     getEffectiveConfig(cfg);
@@ -267,6 +270,7 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     const float bypassTarget = activeConfig.bypassTarget;
     float blockPeakL = 0.0f;
     float blockPeakR = 0.0f;
+    StereoTelemetrySnapshot teleSnapshot {};
     int pos = 0;
 
     while (pos < totalFrames) {
@@ -309,6 +313,8 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
             }
         }
 
+        stereoAnalyzer.processBlock(inL.data(), inR.data(), dstL, (dstR != nullptr) ? dstR : dstL, n, teleSnapshot);
+
         pos += n;
     }
 
@@ -316,6 +322,9 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         buffer.clear(ch, 0, totalFrames);
     }
 
+    telemetryBuffer.publish(teleSnapshot);
+    inputMeterLeft.store(juce::jlimit(0.0f, 1.0f, teleSnapshot.frame.inputPeakL), std::memory_order_relaxed);
+    inputMeterRight.store(juce::jlimit(0.0f, 1.0f, teleSnapshot.frame.inputPeakR), std::memory_order_relaxed);
     outputMeterLeft.store(juce::jlimit(0.0f, 1.0f, blockPeakL), std::memory_order_relaxed);
     outputMeterRight.store(juce::jlimit(0.0f, 1.0f, blockPeakR), std::memory_order_relaxed);
 }
@@ -767,6 +776,18 @@ float Dimension5AudioProcessor::getOutputMeterLeft() const {
 
 float Dimension5AudioProcessor::getOutputMeterRight() const {
     return outputMeterRight.load(std::memory_order_relaxed);
+}
+
+float Dimension5AudioProcessor::getInputMeterLeft() const {
+    return inputMeterLeft.load(std::memory_order_relaxed);
+}
+
+float Dimension5AudioProcessor::getInputMeterRight() const {
+    return inputMeterRight.load(std::memory_order_relaxed);
+}
+
+bool Dimension5AudioProcessor::getStereoTelemetry(StereoTelemetrySnapshot& out) const {
+    return telemetryBuffer.read(out);
 }
 
 void Dimension5AudioProcessor::switchToCustomMode() {

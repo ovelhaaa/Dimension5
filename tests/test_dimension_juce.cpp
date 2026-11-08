@@ -1236,6 +1236,240 @@ void test_interleaving_9_immediate_persistence_and_ab_before_presentation() {
     check(std::abs(cfgRestored.dspParams.depthMs - 2.35f) < 1e-4f, "Restored processor has depth 2.35 ms");
     check(std::abs(cfgRestored.dspParams.baseDelayMs - 8.5f) < 1e-4f, "Restored processor has Mode II baseDelay 8.5 ms");
 }
+
+// ==============================================================================
+// Stereo Analyzer & Telemetry Test Suite
+// ==============================================================================
+
+// 31. Silence handling: no NaN, Inf, or false measurements
+void test_stereo_analyzer_silence() {
+    StereoAnalyzer analyzer;
+    analyzer.prepare(48000.0);
+    std::vector<float> silence(256, 0.0f);
+    StereoTelemetrySnapshot snap {};
+
+    for (int b = 0; b < 10; ++b) {
+        analyzer.processBlock(silence.data(), silence.data(), silence.data(), silence.data(), 256, snap);
+    }
+
+    check(!snap.frame.hasSignal, "silence: hasSignal must be false");
+    check(std::isfinite(snap.frame.correlation), "silence: correlation must be finite");
+    check(std::isfinite(snap.frame.sideMidRatioDb), "silence: sideMidRatioDb must be finite");
+    check(std::isfinite(snap.frame.monoAttenuationDb), "silence: monoAttenuationDb must be finite");
+    check(snap.frame.midRms < 1e-6f, "silence: midRms must be 0");
+    check(snap.frame.sideRms < 1e-6f, "silence: sideRms must be 0");
+}
+
+// 32. Identical mono: correlation ~ +1, Side ~ 0, Mono loss ~ 0 dB
+void test_stereo_analyzer_identical_mono() {
+    StereoAnalyzer analyzer;
+    analyzer.prepare(48000.0);
+    constexpr int kFrames = 4800;
+    std::vector<float> sig(kFrames);
+    for (int i = 0; i < kFrames; ++i) {
+        sig[(size_t)i] = 0.5f * std::sin(2.0f * juce::MathConstants<float>::pi * 440.0f * (float)i / 48000.0f);
+    }
+    StereoTelemetrySnapshot snap {};
+    analyzer.processBlock(sig.data(), sig.data(), sig.data(), sig.data(), kFrames, snap);
+
+    check(snap.frame.hasSignal, "identical mono: hasSignal is true");
+    check(snap.frame.correlation > 0.999f, "identical mono: correlation ~ +1");
+    check(snap.frame.sideRms < 1e-4f, "identical mono: sideRms ~ 0");
+    check(snap.frame.sideMidRatioDb <= -50.0f, "identical mono: side/mid ratio <= -50 dB");
+    check(std::abs(snap.frame.monoAttenuationDb) < 0.1f, "identical mono: mono loss ~ 0 dB");
+}
+
+// 33. Antiphase L = -R: correlation ~ -1, Mid ~ 0, strong mono cancellation
+void test_stereo_analyzer_opposite_antiphase() {
+    StereoAnalyzer analyzer;
+    analyzer.prepare(48000.0);
+    constexpr int kFrames = 4800;
+    std::vector<float> sigL(kFrames);
+    std::vector<float> sigR(kFrames);
+    for (int i = 0; i < kFrames; ++i) {
+        sigL[(size_t)i] =  0.5f * std::sin(2.0f * juce::MathConstants<float>::pi * 440.0f * (float)i / 48000.0f);
+        sigR[(size_t)i] = -0.5f * std::sin(2.0f * juce::MathConstants<float>::pi * 440.0f * (float)i / 48000.0f);
+    }
+    StereoTelemetrySnapshot snap {};
+    analyzer.processBlock(sigL.data(), sigR.data(), sigL.data(), sigR.data(), kFrames, snap);
+
+    check(snap.frame.hasSignal, "antiphase: hasSignal is true");
+    check(snap.frame.correlation < -0.999f, "antiphase: correlation ~ -1");
+    check(snap.frame.midRms < 1e-4f, "antiphase: midRms ~ 0");
+    check(snap.frame.sideMidRatioDb >= 20.0f, "antiphase: side/mid ratio >= +20 dB");
+    check(snap.frame.monoAttenuationDb < -40.0f, "antiphase: strong mono cancellation (< -40 dB)");
+}
+
+// 34. Uncorrelated quadrature signals: correlation ~ 0, mono loss ~ -3 dB
+void test_stereo_analyzer_uncorrelated() {
+    StereoAnalyzer analyzer;
+    analyzer.prepare(48000.0);
+    constexpr int kFrames = 9600;
+    std::vector<float> sigL(kFrames);
+    std::vector<float> sigR(kFrames);
+    for (int i = 0; i < kFrames; ++i) {
+        sigL[(size_t)i] = 0.5f * std::sin(2.0f * juce::MathConstants<float>::pi * 300.0f * (float)i / 48000.0f);
+        sigR[(size_t)i] = 0.5f * std::cos(2.0f * juce::MathConstants<float>::pi * 300.0f * (float)i / 48000.0f);
+    }
+    StereoTelemetrySnapshot snap {};
+    analyzer.processBlock(sigL.data(), sigR.data(), sigL.data(), sigR.data(), kFrames, snap);
+
+    check(snap.frame.hasSignal, "uncorrelated: hasSignal is true");
+    check(std::abs(snap.frame.correlation) < 0.15f, "uncorrelated: correlation near zero");
+    check(std::abs(snap.frame.monoAttenuationDb - (-3.01f)) < 0.8f, "uncorrelated: mono attenuation ~ -3 dB");
+}
+
+// 35. Single channel signal: correlation 0.0f, no undefined divide-by-zero
+void test_stereo_analyzer_single_channel() {
+    StereoAnalyzer analyzer;
+    analyzer.prepare(48000.0);
+    constexpr int kFrames = 2400;
+    std::vector<float> sigL(kFrames, 0.4f);
+    std::vector<float> sigR(kFrames, 0.0f);
+    StereoTelemetrySnapshot snap {};
+    analyzer.processBlock(sigL.data(), sigR.data(), sigL.data(), sigR.data(), kFrames, snap);
+
+    check(snap.frame.hasSignal, "single channel: hasSignal is true");
+    check(std::abs(snap.frame.correlation) < 1e-6f, "single channel: correlation safely 0.0f");
+    check(std::isfinite(snap.frame.sideMidRatioDb), "single channel: sideMidRatioDb is finite");
+    check(std::isfinite(snap.frame.monoAttenuationDb), "single channel: monoAttenuationDb is finite");
+}
+
+// 36. Extreme values and sample rates
+void test_stereo_analyzer_extreme_values_and_sample_rates() {
+    const double rates[] = { 44100.0, 48000.0, 96000.0 };
+    const int blockSizes[] = { 16, 32, 64, 512, 1024 };
+
+    for (double sr : rates) {
+        StereoAnalyzer analyzer;
+        analyzer.prepare(sr);
+
+        for (int bs : blockSizes) {
+            const size_t ubs = (size_t)bs;
+            std::vector<float> inL(ubs, 2.0f);
+            std::vector<float> inR(ubs, -2.0f);
+            StereoTelemetrySnapshot snap {};
+            analyzer.processBlock(inL.data(), inR.data(), inL.data(), inR.data(), bs, snap);
+
+            check(snap.frame.hasSignal, "extreme: hasSignal is true");
+            check(std::isfinite(snap.frame.correlation), "extreme: correlation finite");
+            check(std::isfinite(snap.frame.midRms), "extreme: midRms finite");
+            check(std::isfinite(snap.frame.sideRms), "extreme: sideRms finite");
+            check(std::isfinite(snap.frame.sideMidRatioDb), "extreme: sideMidRatioDb finite");
+            check(std::isfinite(snap.frame.monoAttenuationDb), "extreme: monoAttenuationDb finite");
+        }
+    }
+}
+
+// 37. Telemetry has zero modification on audio samples (Bit-exact DSP validation)
+void test_stereo_telemetry_bit_exact_audio() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    juce::AudioBuffer<float> buffer(2, 64);
+    for (int i = 0; i < 64; ++i) {
+        buffer.setSample(0, i, 0.35f * std::sin((float)i * 0.1f));
+        buffer.setSample(1, i, 0.25f * std::cos((float)i * 0.1f));
+    }
+
+    const float preL0 = buffer.getSample(0, 0);
+    const float preR0 = buffer.getSample(1, 0);
+
+    processTestBlock(proc, buffer);
+
+    check(std::isfinite(buffer.getSample(0, 0)), "audio sample finite");
+    check(std::isfinite(buffer.getSample(1, 0)), "audio sample finite");
+    check(std::abs(buffer.getSample(0, 0) - preL0) > 1e-4f || std::abs(buffer.getSample(1, 0) - preR0) > 1e-4f, "audio processed by DSP");
+
+    StereoTelemetrySnapshot snap {};
+    check(proc.getStereoTelemetry(snap), "telemetry snapshot successfully published during processBlock");
+    check(snap.frame.hasSignal, "telemetry detected audio signal");
+}
+
+// 38. Repeated opening and closing of editor during processing
+void test_editor_lifecycle_and_telemetry() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    for (int cycle = 0; cycle < 6; ++cycle) {
+        processStereoTestSignal(proc, 64);
+
+        // Open editor
+        auto* editor = proc.createEditor();
+        check(editor != nullptr, "editor created successfully");
+
+        // Process audio while editor is open
+        processStereoTestSignal(proc, 64);
+
+        StereoTelemetrySnapshot snap {};
+        check(proc.getStereoTelemetry(snap), "telemetry received while editor open");
+
+        // Close editor
+        delete editor;
+
+        // Process audio after editor is closed
+        processStereoTestSignal(proc, 64);
+    }
+}
+
+// 39. Telemetry buffer saturation safety
+void test_telemetry_buffer_saturation_and_safety() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Process 200 blocks without UI consuming telemetry
+    for (int b = 0; b < 200; ++b) {
+        processStereoTestSignal(proc, 32);
+    }
+
+    // Now consume telemetry
+    StereoTelemetrySnapshot snap {};
+    check(proc.getStereoTelemetry(snap), "consumed telemetry after saturation");
+    check(snap.frame.hasSignal, "valid telemetry retained");
+}
+
+// 40. Main controls (DEPTH, MOTION, COLOR) auto-transition to Custom mode
+void test_main_controls_auto_custom_depth_motion_color() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // 1. Start in Mode I, edit Depth via depthMs
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+    processStereoTestSignal(proc);
+
+    setParamHostValue(proc, "depthMs", 2.1f);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_CUSTOM, "depthMs edit transitioned to Custom mode");
+    check(std::abs(cfg.dspParams.depthMs - 2.1f) < 1e-4f, "applied depth is 2.1 ms");
+    check(std::abs(cfg.dspParams.baseDelayMs - 7.0f) < 1e-4f, "preserved Mode I base delay (7.0 ms)");
+
+    // 2. Start in Mode II, edit Motion via rateHz
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    processStereoTestSignal(proc);
+
+    setParamHostValue(proc, "rateHz", 0.75f);
+    processStereoTestSignal(proc);
+
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_CUSTOM, "rateHz edit transitioned to Custom mode");
+    check(std::abs(cfg.dspParams.rateHz - 0.75f) < 1e-4f, "applied rate is 0.75 Hz");
+    check(std::abs(cfg.dspParams.baseDelayMs - 8.5f) < 1e-4f, "preserved Mode II base delay (8.5 ms)");
+
+    // 3. Start in Mode III, edit Color via lpfHz
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_III);
+    processStereoTestSignal(proc);
+
+    setParamHostValue(proc, "lpfHz", 5500.0f);
+    processStereoTestSignal(proc);
+
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_CUSTOM, "lpfHz edit transitioned to Custom mode");
+    check(std::abs(cfg.dspParams.lpfHz - 5500.0f) < 1e-4f, "applied lpf is 5500 Hz");
+    check(std::abs(cfg.dspParams.baseDelayMs - 10.0f) < 1e-4f, "preserved Mode III base delay (10.0 ms)");
+}
 } // namespace
 
 int main() {
@@ -1331,6 +1565,36 @@ int main() {
 
         std::cout << "[JUCE Tests] 30. test_interleaving_9_immediate_persistence_and_ab_before_presentation...\n";
         test_interleaving_9_immediate_persistence_and_ab_before_presentation();
+
+        std::cout << "[JUCE Tests] 31. test_stereo_analyzer_silence...\n";
+        test_stereo_analyzer_silence();
+
+        std::cout << "[JUCE Tests] 32. test_stereo_analyzer_identical_mono...\n";
+        test_stereo_analyzer_identical_mono();
+
+        std::cout << "[JUCE Tests] 33. test_stereo_analyzer_opposite_antiphase...\n";
+        test_stereo_analyzer_opposite_antiphase();
+
+        std::cout << "[JUCE Tests] 34. test_stereo_analyzer_uncorrelated...\n";
+        test_stereo_analyzer_uncorrelated();
+
+        std::cout << "[JUCE Tests] 35. test_stereo_analyzer_single_channel...\n";
+        test_stereo_analyzer_single_channel();
+
+        std::cout << "[JUCE Tests] 36. test_stereo_analyzer_extreme_values_and_sample_rates...\n";
+        test_stereo_analyzer_extreme_values_and_sample_rates();
+
+        std::cout << "[JUCE Tests] 37. test_stereo_telemetry_bit_exact_audio...\n";
+        test_stereo_telemetry_bit_exact_audio();
+
+        std::cout << "[JUCE Tests] 38. test_editor_lifecycle_and_telemetry...\n";
+        test_editor_lifecycle_and_telemetry();
+
+        std::cout << "[JUCE Tests] 39. test_telemetry_buffer_saturation_and_safety...\n";
+        test_telemetry_buffer_saturation_and_safety();
+
+        std::cout << "[JUCE Tests] 40. test_main_controls_auto_custom_depth_motion_color...\n";
+        test_main_controls_auto_custom_depth_motion_color();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;

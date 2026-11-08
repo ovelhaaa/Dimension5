@@ -16,7 +16,8 @@ juce_generate_juce_header(Dimension5Plugin)
 target_sources(Dimension5Plugin
   PRIVATE
     PluginEditor.cpp
-    PluginProcessor.cpp)
+    PluginProcessor.cpp
+    StereoFieldComponent.cpp)
 
 target_include_directories(Dimension5Plugin
   PRIVATE

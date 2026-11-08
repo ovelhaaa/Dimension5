@@ -13,6 +13,8 @@ extern "C" {
 #include "dimension_dsp.h"
 }
 
+#include "StereoAnalyzer.h"
+
 namespace dimension_ipc {
 
 /**
@@ -299,6 +301,9 @@ public:
 
     float getOutputMeterLeft() const;
     float getOutputMeterRight() const;
+    float getInputMeterLeft() const;
+    float getInputMeterRight() const;
+    bool getStereoTelemetry(StereoTelemetrySnapshot& out) const;
     void switchToCustomMode();
     void selectCompareSlot(int slot);
     void copyCompareToOtherSlot();
@@ -337,10 +342,14 @@ private:
     mutable std::recursive_mutex controlMutex;
 
     DimensionDSP dsp;
+    StereoAnalyzer stereoAnalyzer;
+    dimension_ipc::SnapshotBuffer<StereoTelemetrySnapshot, 4> telemetryBuffer;
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> inL {};
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> inR {};
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> outL {};
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> outR {};
+    std::atomic<float> inputMeterLeft { 0.0f };
+    std::atomic<float> inputMeterRight { 0.0f };
     std::atomic<float> outputMeterLeft { 0.0f };
     std::atomic<float> outputMeterRight { 0.0f };
     float bypassEffectLevel = 1.0f;
