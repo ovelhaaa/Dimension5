@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 
 #include <JuceHeader.h>
@@ -13,6 +14,16 @@ extern "C" {
 }
 
 namespace dimension_ipc {
+
+/**
+ * Envelope pairing an atomic monotonic generation with payload.
+ * Guarantees a strict total ordering across all publication channels.
+ */
+template <typename T>
+struct Envelope {
+    uint64_t generation { 0 };
+    T payload {};
+};
 
 /**
  * Bounded Multi-Producer Single-Consumer (MPSC) lock-free queue.
@@ -83,72 +94,155 @@ private:
 };
 
 /**
- * Fallback mailbox to guarantee the latest configuration is never dropped
- * even under extreme burst queue saturation.
+ * Safe multi-slot fallback mailbox.
+ * Solves the 2-slot race condition where a producer could reuse a slot while consumer is reading.
+ * Each slot has an atomic reservation state:
+ * - Bit 31: kBusyWriteBit (set while writer is populating payload).
+ * - Lower 31 bits: readerCount (incremented before reading; writer CANNOT claim slot if > 0).
  */
-template <typename T>
-struct FallbackMailbox {
-    alignas(64) T slots[2] {};
-    alignas(64) std::atomic<uint32_t> writeSlot { 0 };
-    alignas(64) std::atomic<bool> hasUpdate { false };
+template <typename T, size_t NumSlots = 4>
+class SafeMailbox {
+public:
+    static_assert(NumSlots >= 3, "NumSlots must be >= 3 for race-free buffering with active reader");
 
-    void publish(const T& val) {
-        const uint32_t target = 1U - writeSlot.load(std::memory_order_relaxed);
-        slots[target] = val;
-        writeSlot.store(target, std::memory_order_release);
-        hasUpdate.store(true, std::memory_order_release);
+    SafeMailbox() = default;
+
+    bool publish(const T& val) {
+        const uint32_t cur = publishedSlot.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < NumSlots; ++i) {
+            const uint32_t cand = (uint32_t)((cur + 1 + i) % NumSlots);
+            uint32_t expected = 0;
+            if (slots[cand].state.compare_exchange_strong(expected, kBusyWriteBit,
+                                                         std::memory_order_acquire,
+                                                         std::memory_order_relaxed)) {
+                slots[cand].data = val;
+                slots[cand].state.store(0, std::memory_order_release);
+                publishedSlot.store(cand, std::memory_order_release);
+                hasUpdate.store(true, std::memory_order_release);
+                return true;
+            }
+        }
+        return false; // All slots busy
     }
 
     bool consume(T& out) {
         if (!hasUpdate.exchange(false, std::memory_order_acq_rel)) {
             return false;
         }
-        const uint32_t current = writeSlot.load(std::memory_order_acquire);
-        out = slots[current];
-        return true;
+        for (int retry = 0; retry < 4; ++retry) {
+            const uint32_t idx = publishedSlot.load(std::memory_order_acquire);
+            uint32_t s = slots[idx].state.load(std::memory_order_acquire);
+            if (s & kBusyWriteBit) {
+                continue;
+            }
+            if (slots[idx].state.compare_exchange_weak(s, s + 1,
+                                                      std::memory_order_acquire,
+                                                      std::memory_order_relaxed)) {
+                out = slots[idx].data;
+                slots[idx].state.fetch_sub(1, std::memory_order_release);
+                return true;
+            }
+        }
+        return false;
     }
 
     void reset() {
         hasUpdate.store(false, std::memory_order_relaxed);
     }
+
+private:
+    static constexpr uint32_t kBusyWriteBit = 0x80000000U;
+
+    struct alignas(64) Slot {
+        T data {};
+        mutable std::atomic<uint32_t> state { 0 };
+    };
+
+    alignas(64) Slot slots[NumSlots];
+    alignas(64) std::atomic<uint32_t> publishedSlot { 0 };
+    alignas(64) std::atomic<bool> hasUpdate { false };
 };
 
 /**
- * Snapshot buffer for lock-free inspection reader (getLastAppliedConfig).
- * Audio thread publishes applied configs wait-free without locks or allocations.
- * Reader acquires a reference count on a published slot so audio never reuses it
- * while it is actively being copied.
+ * Robust snapshot buffer for single-writer (audio thread) multi-reader (inspection).
+ * Guarantees:
+ * 1. Writer claims a slot with compare_exchange(0, kBusyWriteBit). If any reader is reading
+ *    (state > 0) or slot is currently published, writer skips it.
+ * 2. If all candidate slots are unavailable, writer safely preserves the last published snapshot.
+ * 3. Reader atomically reserves the published slot before reading (state -> state + 1),
+ *    preventing writer reuse during read.
+ * 4. Deterministic test hooks allow unit tests to verify race window immunity.
  */
 template <typename T, size_t NumSlots = 8>
 class SnapshotBuffer {
 public:
+    static_assert(NumSlots >= 3, "NumSlots must be >= 3");
+
     SnapshotBuffer() = default;
 
-    void publish(const T& val) {
+    // Test hooks (empty in production, set by tests to force interleavings)
+    std::function<void(uint32_t slot)> testHookPreReserve { nullptr };
+    std::function<void(uint32_t slot)> testHookDuringRead { nullptr };
+
+    bool publish(const T& val) {
         const uint32_t cur = currentPublishedSlot.load(std::memory_order_relaxed);
-        uint32_t target = (cur + 1) % NumSlots;
         for (size_t i = 0; i < NumSlots; ++i) {
             const uint32_t cand = (uint32_t)((cur + 1 + i) % NumSlots);
-            if (cand != cur && slots[cand].readerCount.load(std::memory_order_acquire) == 0) {
-                target = cand;
-                break;
+            if (cand == cur) {
+                continue; // Do not overwrite currently published slot
+            }
+            uint32_t expected = 0;
+            if (slots[cand].state.compare_exchange_strong(expected, kBusyWriteBit,
+                                                         std::memory_order_acquire,
+                                                         std::memory_order_relaxed)) {
+                slots[cand].data = val;
+                slots[cand].state.store(0, std::memory_order_release);
+                currentPublishedSlot.store(cand, std::memory_order_release);
+                return true;
             }
         }
-        slots[target].data = val;
-        currentPublishedSlot.store(target, std::memory_order_release);
+        // Policy: preserve the last published snapshot if all other slots are busy
+        return false;
     }
 
-    void read(T& out) const {
-        const uint32_t idx = currentPublishedSlot.load(std::memory_order_acquire);
-        slots[idx].readerCount.fetch_add(1, std::memory_order_acquire);
-        out = slots[idx].data;
-        slots[idx].readerCount.fetch_sub(1, std::memory_order_release);
+    bool read(T& out) const {
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            const uint32_t idx = currentPublishedSlot.load(std::memory_order_acquire);
+
+            if (testHookPreReserve) {
+                testHookPreReserve(idx);
+            }
+
+            uint32_t s = slots[idx].state.load(std::memory_order_acquire);
+            if (s & kBusyWriteBit) {
+                continue;
+            }
+
+            if (slots[idx].state.compare_exchange_weak(s, s + 1,
+                                                      std::memory_order_acquire,
+                                                      std::memory_order_relaxed)) {
+                if (testHookDuringRead) {
+                    testHookDuringRead(idx);
+                }
+
+                out = slots[idx].data;
+                slots[idx].state.fetch_sub(1, std::memory_order_release);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void forceSlotBusyForTest(size_t slot, bool busy) {
+        slots[slot % NumSlots].state.store(busy ? kBusyWriteBit : 0, std::memory_order_release);
     }
 
 private:
-    struct Slot {
+    static constexpr uint32_t kBusyWriteBit = 0x80000000U;
+
+    struct alignas(64) Slot {
         T data {};
-        mutable std::atomic<uint32_t> readerCount { 0 };
+        mutable std::atomic<uint32_t> state { 0 };
     };
 
     alignas(64) Slot slots[NumSlots];
@@ -159,7 +253,7 @@ private:
 
 class Dimension5AudioProcessor final : public juce::AudioProcessor,
                                        private juce::AudioProcessorValueTreeState::Listener,
-                                       private juce::AsyncUpdater {
+                                       private juce::Timer {
 public:
     using ValueTreeState = juce::AudioProcessorValueTreeState;
 
@@ -169,6 +263,8 @@ public:
         float bypassTarget = 1.0f;
     };
 
+    using ConfigEnvelope = dimension_ipc::Envelope<PluginConfig>;
+
     Dimension5AudioProcessor();
     ~Dimension5AudioProcessor() override;
 
@@ -176,6 +272,7 @@ public:
     void releaseResources() override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) override;
+    using juce::AudioProcessor::processBlock;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override;
@@ -208,17 +305,23 @@ public:
     int getActiveCompareSlot() const;
 
     void applyModePresetToAdvancedParameters(DimensionMode mode);
-    bool isUpdatingModePreset() const { return isInternalPresentationSync.load(std::memory_order_relaxed); }
+    bool isUpdatingModePreset() const;
     void getEffectiveConfig(PluginConfig& outConfig) const;
     void getLastAppliedConfig(PluginConfig& outConfig) const;
     uint32_t getSaturationCount() const;
-    void deliverPendingUpdates() { handleUpdateNowIfNeeded(); }
-    bool hasPendingUpdates() const { return isUpdatePending(); }
+    void deliverPendingUpdates();
+    bool hasPendingUpdates() const;
     float getFloatParam(const char* id) const;
+
+    dimension_ipc::SnapshotBuffer<PluginConfig, 8>& getAppliedSnapshotBufferForTesting() { return appliedSnapshotBuffer; }
+    dimension_ipc::SnapshotBuffer<PluginConfig, 8>& getStagedConfigBufferForTesting() { return stagedConfigBuffer; }
+    dimension_ipc::BoundedMPSCQueue<ConfigEnvelope, 64>& getConfigQueueForTesting() { return configQueue; }
+    dimension_ipc::SafeMailbox<ConfigEnvelope, 4>& getFallbackMailboxForTesting() { return fallbackMailbox; }
 
 private:
     void parameterChanged(const juce::String& parameterID, float newValue) override;
-    void handleAsyncUpdate() override;
+    void timerCallback() override;
+    void handlePresentationUpdate();
 
     void captureCompareSlot(int slot);
     void recallCompareSlot(int slot);
@@ -229,7 +332,7 @@ private:
     void setFloatParamHost(const char* id, float value);
     void setInternalParamValue(const char* id, float value);
     void syncAdvancedParamsInternal(const DimensionParams& p);
-    void publishConfigToAudio(const PluginConfig& cfg);
+    void publishConfigToAudio(const PluginConfig& cfg, uint64_t gen = 0);
 
     mutable std::recursive_mutex controlMutex;
 
@@ -251,11 +354,13 @@ private:
 
     PluginConfig stagedConfig {};
     PluginConfig activeConfig {};
+    uint64_t lastAppliedGeneration { 0 };
     std::atomic<float> currentSampleRate { DIMENSION_SAMPLE_RATE_DEFAULT };
 
-    dimension_ipc::BoundedMPSCQueue<PluginConfig, 64> configQueue;
-    dimension_ipc::FallbackMailbox<PluginConfig> fallbackMailbox;
+    dimension_ipc::BoundedMPSCQueue<ConfigEnvelope, 64> configQueue;
+    dimension_ipc::SafeMailbox<ConfigEnvelope, 4> fallbackMailbox;
     dimension_ipc::SnapshotBuffer<PluginConfig, 8> appliedSnapshotBuffer;
+    dimension_ipc::SnapshotBuffer<PluginConfig, 8> stagedConfigBuffer;
     std::atomic<uint32_t> saturationCount { 0 };
 
     std::atomic<int> lastPresetMode { (int)DIMENSION_MODE_I };
@@ -265,7 +370,8 @@ private:
     std::atomic<int> pendingHostMode { -1 };
     std::atomic<uint64_t> pendingPresetSyncGeneration { 0 };
     std::atomic<int> pendingPresetSyncMode { -1 };
-    std::atomic<bool> isInternalPresentationSync { false };
+    std::atomic<bool> presentationUpdateNeeded { false };
+    std::atomic<bool> isPresentationSyncActive { false };
     std::atomic<bool> isBatchRestoring { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Dimension5AudioProcessor)

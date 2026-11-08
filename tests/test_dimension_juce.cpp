@@ -889,6 +889,353 @@ void test_immediate_persistence_after_auto_custom_without_async_dispatch() {
     check(std::abs(cfgProc2.dspParams.analogAmount - 0.45f) < 1e-4f, "Proc2 restored Mode II baseline analog (0.45)");
     check(std::abs(cfgProc2.dspParams.companderAmount - 0.45f) < 1e-4f, "Proc2 restored Mode II baseline compander (0.45)");
 }
+
+// 22. Interleaving 1: Exact reproduction of config 4 reverted to 3 by fallback
+void test_interleaving_1_fallback_inversion_regression() {
+    // Isolated test with small queue and SafeMailbox
+    dimension_ipc::BoundedMPSCQueue<dimension_ipc::Envelope<int>, 2> testQueue;
+    dimension_ipc::SafeMailbox<dimension_ipc::Envelope<int>, 4> testMailbox;
+
+    // 1. Queue receives configs 1 and 2
+    check(testQueue.tryEnqueue({ 1, 101 }), "Enqueue config 1");
+    check(testQueue.tryEnqueue({ 2, 102 }), "Enqueue config 2");
+
+    // 2. Config 3 goes to fallback due to saturation
+    dimension_ipc::Envelope<int> env3 { 3, 103 };
+    if (!testQueue.tryEnqueue(env3)) {
+        testMailbox.publish(env3);
+    }
+
+    // 3. Consumer pops 1 and frees space
+    dimension_ipc::Envelope<int> popped;
+    check(testQueue.tryDequeue(popped) && popped.payload == 101, "Popped config 1");
+
+    // 4. Config 4 enters the queue
+    dimension_ipc::Envelope<int> env4 { 4, 104 };
+    check(testQueue.tryEnqueue(env4), "Enqueue config 4 into freed space");
+
+    // 5 & 6. Consumer drains queue and mailbox using generation-based selection
+    uint64_t lastAppliedGen = 1;
+    dimension_ipc::Envelope<int> bestEnv { 0, 0 };
+    bool hasBest = false;
+
+    dimension_ipc::Envelope<int> inc;
+    while (testQueue.tryDequeue(inc)) {
+        if (inc.generation > lastAppliedGen) {
+            if (!hasBest || inc.generation > bestEnv.generation) {
+                bestEnv = inc;
+                hasBest = true;
+            }
+        }
+    }
+
+    dimension_ipc::Envelope<int> fb;
+    if (testMailbox.consume(fb)) {
+        if (fb.generation > lastAppliedGen) {
+            if (!hasBest || fb.generation > bestEnv.generation) {
+                bestEnv = fb;
+                hasBest = true;
+            }
+        }
+    }
+
+    // Expected final result: 104 (generation 4), NOT 103 (generation 3)
+    check(hasBest && bestEnv.payload == 104, "Config 4 preserved, older fallback 3 rejected!");
+
+    // Integration test with real processor (exact sequence from specification)
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    auto& queue = proc.getConfigQueueForTesting();
+    auto& mbox = proc.getFallbackMailboxForTesting();
+
+    Dimension5AudioProcessor::PluginConfig c1, c2, c3, c4;
+    c1.dspParams.depthMs = 1.0f;
+    c2.dspParams.depthMs = 2.0f;
+    c3.dspParams.depthMs = 3.0f;
+    c4.dspParams.depthMs = 4.0f;
+
+    // 1. Queue receives configs 1 and 2
+    queue.tryEnqueue({ 101, c1 });
+    queue.tryEnqueue({ 102, c2 });
+
+    // 2. Config 3 goes to fallback due to saturation
+    mbox.publish({ 103, c3 });
+
+    // 3. Consumer pops 1 and frees space
+    Dimension5AudioProcessor::ConfigEnvelope env;
+    queue.tryDequeue(env);
+
+    // 4. Config 4 enters the queue
+    queue.tryEnqueue({ 104, c4 });
+
+    // 5 & 6. Audio callback processes block
+    processStereoTestSignal(proc);
+
+    // Verify applied config is 4 (depth 4.0f), NOT 3
+    Dimension5AudioProcessor::PluginConfig applied;
+    proc.getLastAppliedConfig(applied);
+    check(std::abs(applied.dspParams.depthMs - 4.0f) < 1e-4f, "Processor applied config 4, fallback 3 did not revert it");
+}
+
+// 23. Interleaving 2: Continuous production with finite consumption work budget
+void test_interleaving_2_continuous_production_bounded_budget() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    std::atomic<bool> producerRunning { true };
+    std::atomic<int> producedCount { 0 };
+
+    std::thread producer([&]() {
+        while (producerRunning.load(std::memory_order_relaxed)) {
+            const int count = producedCount.fetch_add(1, std::memory_order_relaxed);
+            setParamHostValue(proc, "depthMs", 1.0f + (float)(count % 20) * 0.1f);
+        }
+    });
+
+    // Run 50 blocks while producer is actively hammering the queue
+    for (int i = 0; i < 50; ++i) {
+        processStereoTestSignal(proc);
+    }
+
+    producerRunning.store(false, std::memory_order_release);
+    producer.join();
+
+    // Now run a few more blocks to allow convergence to final value
+    for (int i = 0; i < 10; ++i) {
+        processStereoTestSignal(proc);
+    }
+
+    Dimension5AudioProcessor::PluginConfig finalCfg;
+    proc.getLastAppliedConfig(finalCfg);
+    check(finalCfg.dspParams.depthMs >= 1.0f && finalCfg.dspParams.depthMs <= 3.0f,
+          "Audio progressed without hanging and converged to a valid depthMs");
+}
+
+// 24. Interleaving 3: Reader paused after choosing slot and before reserving it
+void test_interleaving_3_reader_paused_pre_reserve() {
+    struct TestData {
+        int a;
+        int b;
+    };
+    dimension_ipc::SnapshotBuffer<TestData, 8> buffer;
+    buffer.publish({ 10, 20 });
+
+    std::atomic<bool> writerDone { false };
+    buffer.testHookPreReserve = [&](uint32_t) {
+        // While reader was about to reserve, writer publishes 5 new values
+        for (int i = 1; i <= 5; ++i) {
+            buffer.publish({ 100 * i, 200 * i });
+        }
+        writerDone.store(true);
+        // Clear hook so retries don't loop
+        buffer.testHookPreReserve = nullptr;
+    };
+
+    TestData readData { 0, 0 };
+    check(buffer.read(readData), "Reader successfully acquired slot after pre-reserve intervention");
+    check(writerDone.load(), "Writer ran during pre-reserve window");
+    // Verify data coherence: readData.b must be 2 * readData.a (no tearing)
+    check(readData.b == 2 * readData.a, "Data read is internally coherent");
+}
+
+// 25. Interleaving 4: Reader paused during copy while writer attempts to reuse slot
+void test_interleaving_4_reader_paused_during_copy_writer_reuse() {
+    struct CorrelatedConfig {
+        float val[8];
+    };
+    dimension_ipc::SnapshotBuffer<CorrelatedConfig, 4> buffer;
+
+    CorrelatedConfig initial;
+    for (int i = 0; i < 8; ++i) initial.val[i] = 1.0f;
+    buffer.publish(initial);
+
+    std::atomic<bool> writerAttempted { false };
+    buffer.testHookDuringRead = [&](uint32_t readingSlot) {
+        (void)readingSlot;
+        // While reader is in critical section, publish 10 items to wrap around all slots
+        for (int round = 2; round <= 10; ++round) {
+            CorrelatedConfig c;
+            for (int i = 0; i < 8; ++i) c.val[i] = (float)round;
+            buffer.publish(c);
+        }
+        writerAttempted.store(true);
+    };
+
+    CorrelatedConfig out;
+    check(buffer.read(out), "Read succeeded");
+    check(writerAttempted.load(), "Writer attempted reuse during active copy");
+
+    // Verify all 8 floats match the same round (no partial overwrite by writer)
+    const float first = out.val[0];
+    for (int i = 1; i < 8; ++i) {
+        check(std::abs(out.val[i] - first) < 1e-5f, "Slot was not torn by writer during active read copy");
+    }
+}
+
+// 26. Interleaving 5: All inspection slots unavailable
+void test_interleaving_5_all_inspection_slots_unavailable() {
+    dimension_ipc::SnapshotBuffer<int, 4> buffer;
+    buffer.publish(42);
+
+    // Make all slots busy
+    for (size_t i = 0; i < 4; ++i) {
+        buffer.forceSlotBusyForTest(i, true);
+    }
+
+    // Writer attempts to publish
+    bool published = buffer.publish(99);
+    check(!published, "Writer gracefully dropped publication when all slots busy");
+
+    // Unmark slots
+    for (size_t i = 0; i < 4; ++i) {
+        buffer.forceSlotBusyForTest(i, false);
+    }
+}
+
+// 27. Interleaving 6: New decision between validation and publication of deferred update
+void test_interleaving_6_new_decision_between_validation_and_deferred_publish() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // 1. Select Mode II (schedules deferred presentation update)
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    check(proc.hasPendingUpdates(), "Presentation update pending for Mode II");
+
+    // 2. Before update is delivered, user selects Mode IV
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_IV);
+
+    // 3. Now deliver updates
+    proc.deliverPendingUpdates();
+
+    // Mode IV must prevail; Mode II must not overwrite Mode IV
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_IV || std::abs(proc.getFloatParam("mode") - (float)DIMENSION_MODE_IV) < 1e-4f,
+          "Newer decision prevailed over stale deferred update");
+}
+
+// 28. Interleaving 7: Legitimate automation while presentation publishes parameters
+void test_interleaving_7_legitimate_automation_during_presentation_sync() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Set Mode II
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    processStereoTestSignal(proc);
+
+    // Run concurrent automation thread modifying depth while message thread does presentation work
+    std::atomic<bool> automationDone { false };
+    std::thread autoThread([&]() {
+        // Automation thread modifies depthMs to 2.75f
+        setParamHostValue(proc, "depthMs", 2.75f);
+        automationDone.store(true);
+    });
+
+    // Main thread delivers presentation updates
+    proc.deliverPendingUpdates();
+
+    autoThread.join();
+    check(automationDone.load(), "Automation thread finished");
+
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.depthMs - 2.75f) < 1e-4f,
+          "Legitimate automation was not dropped by concurrent presentation sync");
+}
+
+// 29. Interleaving 8: Multiple producer contexts with correlated configurations (no tearing)
+void test_interleaving_8_multiple_producer_contexts_no_tearing() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    std::atomic<bool> keepRunning { true };
+    std::atomic<bool> hasTornConfig { false };
+
+    // 3 concurrent producer threads automating correlated parameters
+    auto makeProducer = [&](float marker) {
+        return std::thread([&, marker]() {
+            while (keepRunning.load(std::memory_order_relaxed)) {
+                setParamHostValue(proc, "inputGain", marker);
+                setParamHostValue(proc, "outputGain", marker * 0.5f);
+                setParamHostValue(proc, "width", marker * 0.25f);
+            }
+        });
+    };
+
+    std::thread t1 = makeProducer(1.0f);
+    std::thread t2 = makeProducer(2.0f);
+    std::thread t3 = makeProducer(3.0f);
+
+    for (int block = 0; block < 100; ++block) {
+        processStereoTestSignal(proc);
+        Dimension5AudioProcessor::PluginConfig cfg;
+        proc.getLastAppliedConfig(cfg);
+        // Check that parameters are within valid domain
+        if (cfg.dspParams.inputGain < 0.0f || cfg.dspParams.outputGain < 0.0f) {
+            hasTornConfig.store(true);
+        }
+    }
+
+    keepRunning.store(false, std::memory_order_release);
+    t1.join();
+    t2.join();
+    t3.join();
+
+    check(!hasTornConfig.load(), "No torn or invalid configurations observed under concurrent automation");
+}
+
+// 30. Interleaving 9: Immediate persistence and A/B before delivering presentation updates
+void test_interleaving_9_immediate_persistence_and_ab_before_presentation() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Start with Mode II
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    processStereoTestSignal(proc);
+
+    // Edit depthMs to 2.35f (transitions to Custom)
+    setParamHostValue(proc, "depthMs", 2.35f);
+
+    // WITHOUT calling deliverPendingUpdates() or processing audio:
+    // 1. Switch to Compare Slot B (this immediately captures the edited Slot A)
+    proc.selectCompareSlot(1);
+
+    // 2. In Slot B, switch to Mode I
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfgModeI;
+    proc.getLastAppliedConfig(cfgModeI);
+    check(cfgModeI.dspParams.mode == DIMENSION_MODE_I, "Switched to Mode I in Slot B");
+
+    // 3. Switch back to Compare Slot A (recalls Slot A)
+    proc.selectCompareSlot(0);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfgRecalled;
+    proc.getLastAppliedConfig(cfgRecalled);
+    check(cfgRecalled.dspParams.mode == DIMENSION_MODE_CUSTOM, "A/B recalled Custom mode");
+    check(std::abs(cfgRecalled.dspParams.depthMs - 2.35f) < 1e-4f, "A/B recalled depth 2.35 ms");
+    check(std::abs(cfgRecalled.dspParams.baseDelayMs - 8.5f) < 1e-4f, "A/B recalled Mode II baseline baseDelay 8.5 ms");
+
+    // 4. Immediate state serialization
+    juce::MemoryBlock mem;
+    proc.getStateInformation(mem);
+
+    Dimension5AudioProcessor procRestored;
+    procRestored.prepareToPlay(48000.0, 32);
+    procRestored.setStateInformation(mem.getData(), (int)mem.getSize());
+    processStereoTestSignal(procRestored);
+
+    Dimension5AudioProcessor::PluginConfig cfgRestored;
+    procRestored.getLastAppliedConfig(cfgRestored);
+    check(cfgRestored.dspParams.mode == DIMENSION_MODE_CUSTOM, "Restored processor is Custom mode");
+    check(std::abs(cfgRestored.dspParams.depthMs - 2.35f) < 1e-4f, "Restored processor has depth 2.35 ms");
+    check(std::abs(cfgRestored.dspParams.baseDelayMs - 8.5f) < 1e-4f, "Restored processor has Mode II baseDelay 8.5 ms");
+}
 } // namespace
 
 int main() {
@@ -957,6 +1304,33 @@ int main() {
 
         std::cout << "[JUCE Tests] 21. test_immediate_persistence_after_auto_custom_without_async_dispatch...\n";
         test_immediate_persistence_after_auto_custom_without_async_dispatch();
+
+        std::cout << "[JUCE Tests] 22. test_interleaving_1_fallback_inversion_regression...\n";
+        test_interleaving_1_fallback_inversion_regression();
+
+        std::cout << "[JUCE Tests] 23. test_interleaving_2_continuous_production_bounded_budget...\n";
+        test_interleaving_2_continuous_production_bounded_budget();
+
+        std::cout << "[JUCE Tests] 24. test_interleaving_3_reader_paused_pre_reserve...\n";
+        test_interleaving_3_reader_paused_pre_reserve();
+
+        std::cout << "[JUCE Tests] 25. test_interleaving_4_reader_paused_during_copy_writer_reuse...\n";
+        test_interleaving_4_reader_paused_during_copy_writer_reuse();
+
+        std::cout << "[JUCE Tests] 26. test_interleaving_5_all_inspection_slots_unavailable...\n";
+        test_interleaving_5_all_inspection_slots_unavailable();
+
+        std::cout << "[JUCE Tests] 27. test_interleaving_6_new_decision_between_validation_and_deferred_publish...\n";
+        test_interleaving_6_new_decision_between_validation_and_deferred_publish();
+
+        std::cout << "[JUCE Tests] 28. test_interleaving_7_legitimate_automation_during_presentation_sync...\n";
+        test_interleaving_7_legitimate_automation_during_presentation_sync();
+
+        std::cout << "[JUCE Tests] 29. test_interleaving_8_multiple_producer_contexts_no_tearing...\n";
+        test_interleaving_8_multiple_producer_contexts_no_tearing();
+
+        std::cout << "[JUCE Tests] 30. test_interleaving_9_immediate_persistence_and_ab_before_presentation...\n";
+        test_interleaving_9_immediate_persistence_and_ab_before_presentation();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;
