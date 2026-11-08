@@ -270,7 +270,8 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     const float bypassTarget = activeConfig.bypassTarget;
     float blockPeakL = 0.0f;
     float blockPeakR = 0.0f;
-    StereoTelemetrySnapshot teleSnapshot {};
+    // Fixed member scratch space: no large stack buffer on the audio thread.
+    StereoTelemetrySnapshot& teleSnapshot = telemetryScratch;
     int pos = 0;
 
     while (pos < totalFrames) {

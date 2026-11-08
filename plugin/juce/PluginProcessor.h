@@ -344,6 +344,7 @@ private:
 
     DimensionDSP dsp;
     StereoAnalyzer stereoAnalyzer;
+    StereoTelemetrySnapshot telemetryScratch {};
     dimension_ipc::SnapshotBuffer<StereoTelemetrySnapshot, 4> telemetryBuffer;
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> inL {};
     std::array<float, DIMENSION_MAX_BLOCK_SIZE> inR {};

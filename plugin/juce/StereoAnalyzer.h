@@ -11,6 +11,18 @@ struct GoniometerPoint {
     float mid { 0.0f };
 };
 
+/**
+ * A pair of genuinely measured input/output samples expressed in Mid/Side,
+ * captured at the same sample index. Input and output share the exact same
+ * timestamp, which makes DELTA comparisons physically meaningful.
+ */
+struct StereoComparisonPoint {
+    float inputMid { 0.0f };
+    float inputSide { 0.0f };
+    float outputMid { 0.0f };
+    float outputSide { 0.0f };
+};
+
 enum class CorrelationStatus : uint8_t {
     Valid = 0,
     Silence,
@@ -45,15 +57,33 @@ struct StereoAnalysisFrame {
 
 struct StereoTelemetrySnapshot {
     StereoAnalysisFrame frame;
+
+    // Legacy output-only goniometer cloud (kept for backward compatibility).
     static constexpr size_t kMaxGonioPoints = 128;
     uint32_t gonioCount { 0 };
     std::array<GoniometerPoint, kMaxGonioPoints> gonioPoints {};
+
+    // Real, time-aligned input/output comparison points.
+    // Fixed capacity: no allocation is performed by the audio thread.
+    static constexpr size_t kMaxComparisonPoints = 512;
+    uint32_t comparisonCount { 0 };
+    std::array<StereoComparisonPoint, kMaxComparisonPoints> comparisonPoints {};
+
+    // Absolute number of comparison points ever produced. Consumers use it to
+    // ingest only the points that are new since their previous update, without
+    // duplicating samples or inventing continuity across dropped snapshots.
+    uint64_t comparisonEndSequence { 0 };
+
+    void clearComparison() {
+        comparisonCount = 0;
+        comparisonEndSequence = 0;
+    }
 };
 
 /**
  * Realtime stereo signal analyzer.
  * Calculates running Mid/Side RMS, cross-correlation, input/output comparison,
- * mono compatibility, and collects decimated goniometer points.
+ * mono compatibility, and collects decimated, time-aligned comparison points.
  * Operates strictly wait-free: zero dynamic allocations, zero locks, zero NaN/Inf.
  * Block-size independent continuous-time peak decay and RMS averaging.
  */
@@ -66,6 +96,12 @@ public:
         currentSampleRate = static_cast<float>(sr);
         // ~150 ms continuous-time equivalent leaky integrator
         alpha = (float)(1.0 - std::exp(-1.0 / (0.150 * sr)));
+
+        // ~8 kHz comparison point rate, independent of the host block size.
+        // This keeps enough temporal resolution for a dense, useful vector
+        // display while bounding the memory and copy cost per audio callback.
+        const int srInt = (int)(sr + 0.5);
+        comparisonDecimation = std::max(1, srInt / 8000);
         reset();
     }
 
@@ -85,6 +121,10 @@ public:
         inPeakR = 0.0f;
         outPeakL = 0.0f;
         outPeakR = 0.0f;
+
+        historyWritePos = 0;
+        historyTotal = 0;
+        decimationPhase = 0;
     }
 
     void processBlock(const float* inL, const float* inR,
@@ -94,6 +134,8 @@ public:
         if (numSamples <= 0 || inL == nullptr || outL == nullptr) {
             snapshot.frame = computeFrame();
             snapshot.gonioCount = 0;
+            snapshot.comparisonCount = 0;
+            snapshot.comparisonEndSequence = historyTotal;
             return;
         }
 
@@ -104,10 +146,6 @@ public:
         float blockInPeakR = 0.0f;
         float blockOutPeakL = 0.0f;
         float blockOutPeakR = 0.0f;
-
-        // Decimation step to collect up to kMaxGonioPoints across the block
-        const int step = std::max(1, numSamples / (int)StereoTelemetrySnapshot::kMaxGonioPoints);
-        uint32_t gonioIdx = 0;
 
         for (int i = 0; i < numSamples; ++i) {
             const float iL = inL[i];
@@ -136,10 +174,17 @@ public:
             accumOutMM += alpha * (oMid * oMid - accumOutMM);
             accumOutSS += alpha * (oSide * oSide - accumOutSS);
 
-            if ((i % step) == 0 && gonioIdx < StereoTelemetrySnapshot::kMaxGonioPoints) {
-                snapshot.gonioPoints[gonioIdx].side = oSide;
-                snapshot.gonioPoints[gonioIdx].mid = oMid;
-                ++gonioIdx;
+            if (decimationPhase == 0) {
+                auto& pt = comparisonHistory[historyWritePos];
+                pt.inputMid = iMid;
+                pt.inputSide = iSide;
+                pt.outputMid = oMid;
+                pt.outputSide = oSide;
+                historyWritePos = (historyWritePos + 1) % kHistoryCapacity;
+                ++historyTotal;
+            }
+            if (++decimationPhase >= comparisonDecimation) {
+                decimationPhase = 0;
             }
         }
 
@@ -156,7 +201,7 @@ public:
         outPeakL = std::max(blockOutPeakL, outPeakL * peakDecay);
         outPeakR = std::max(blockOutPeakR, outPeakR * peakDecay);
 
-        snapshot.gonioCount = gonioIdx;
+        fillSnapshotPoints(snapshot);
         snapshot.frame = computeFrame();
     }
 
@@ -289,6 +334,31 @@ public:
     }
 
 private:
+    static constexpr size_t kHistoryCapacity = 4096;
+
+    void fillSnapshotPoints(StereoTelemetrySnapshot& snapshot) {
+        const uint32_t available = (uint32_t)std::min<uint64_t>(historyTotal, kHistoryCapacity);
+        const uint32_t count = std::min<uint32_t>(available, (uint32_t)StereoTelemetrySnapshot::kMaxComparisonPoints);
+
+        // Oldest of the last `count` points.
+        const size_t start = (historyWritePos + kHistoryCapacity - count) % kHistoryCapacity;
+        for (uint32_t i = 0; i < count; ++i) {
+            snapshot.comparisonPoints[i] = comparisonHistory[(start + i) % kHistoryCapacity];
+        }
+        snapshot.comparisonCount = count;
+        snapshot.comparisonEndSequence = historyTotal;
+
+        // Legacy output-only goniometer array derived from the same measured data.
+        const uint32_t gonioCount = std::min<uint32_t>(count, (uint32_t)StereoTelemetrySnapshot::kMaxGonioPoints);
+        const uint32_t gonioStart = count - gonioCount;
+        for (uint32_t i = 0; i < gonioCount; ++i) {
+            const auto& cmp = snapshot.comparisonPoints[gonioStart + i];
+            snapshot.gonioPoints[i].mid = cmp.outputMid;
+            snapshot.gonioPoints[i].side = cmp.outputSide;
+        }
+        snapshot.gonioCount = gonioCount;
+    }
+
     void sanitizeAccumulators() {
         auto clean = [](float& val) {
             if (std::abs(val) < 1e-15f || !std::isfinite(val)) {
@@ -308,6 +378,8 @@ private:
 
     float currentSampleRate { 48000.0f };
     float alpha { 0.005f };
+    int comparisonDecimation { 8 };
+    int decimationPhase { 0 };
 
     float accumInLL { 0.0f };
     float accumInRR { 0.0f };
@@ -324,4 +396,8 @@ private:
     float inPeakR { 0.0f };
     float outPeakL { 0.0f };
     float outPeakR { 0.0f };
+
+    std::array<StereoComparisonPoint, kHistoryCapacity> comparisonHistory {};
+    size_t historyWritePos { 0 };
+    uint64_t historyTotal { 0 };
 };

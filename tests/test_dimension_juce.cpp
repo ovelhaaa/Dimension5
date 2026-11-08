@@ -1644,23 +1644,28 @@ void test_editor_resize_bounds_and_advanced_drawer() {
     check(editor->getHeight() == 540, "resized to min height 540");
 
     // Maximum size
-    editor->setSize(1400, 870);
-    check(editor->getWidth() == 1400, "resized to large width 1400");
-    check(editor->getHeight() == 870, "resized to large height 870");
+    editor->setSize(1600, 1000);
+    check(editor->getWidth() == 1600, "resized to large width 1600");
+    check(editor->getHeight() == 1000, "resized to large height 1000");
 
     // Restore standard size
     editor->setSize(1000, 620);
     check(!editor->isAdvancedVisible(), "advanced drawer initially closed");
 
-    // Open Advanced Drawer
+    // Open Advanced Drawer: expands by the panel height without exceeding limits
     editor->setAdvancedVisible(true);
     check(editor->isAdvancedVisible(), "advanced drawer marked visible");
-    check(editor->getHeight() == 780, "editor expanded to 780 height for advanced drawer");
+    check(editor->getHeight() == 820, "editor expanded by the advanced panel height");
+    check(editor->getHeight() <= 1000, "editor height remains within configured limit");
 
-    // Close Advanced Drawer
+    // Resizing while open is honoured and never exceeds limits
+    editor->setSize(1200, 960);
+    check(editor->getHeight() == 960, "advanced-open resize honoured");
+
+    // Close Advanced Drawer: returns to the pre-open height
     editor->setAdvancedVisible(false);
     check(!editor->isAdvancedVisible(), "advanced drawer marked closed");
-    check(editor->getHeight() == 620, "editor restored to 620 height");
+    check(editor->getHeight() == 620, "editor restored to the pre-open height");
 
     delete editor;
 }
@@ -1683,119 +1688,357 @@ static bool saveSnapshotToPng(juce::Component& comp, const juce::File& outputFil
     return png.writeImageToStream(snapshot, stream);
 }
 
-// 45. Visual Validation: Capture 10 Real UI Screenshots
+// 45. Visual Validation: Capture the real UI 2.1 screenshot set.
 void test_generate_visual_validation_snapshots() {
+    using ViewMode = StereoFieldComponent::ViewMode;
+
     Dimension5AudioProcessor proc;
     proc.prepareToPlay(48000.0, 32);
 
-    const juce::File outDir = juce::File::getCurrentWorkingDirectory().getChildFile("build/snapshots");
+    const juce::File outDir = juce::File::getCurrentWorkingDirectory().getChildFile("docs/snapshots/ui21");
     outDir.createDirectory();
 
     auto* editor = dynamic_cast<Dimension5AudioProcessorEditor*>(proc.createEditor());
     check(editor != nullptr, "editor instantiated for snapshot generation");
 
-    auto feedAudioAndTelemetry = [&](int numFrames = 32, float widthVal = 1.0f, bool bypass = false) {
-        setParamHostValue(proc, "width", widthVal);
-        setParamHostValue(proc, "bypass", bypass ? 1.0f : 0.0f);
+    auto& field = editor->getStereoFieldComponent();
 
-        juce::AudioBuffer<float> buffer(2, numFrames);
-        for (int i = 0; i < numFrames; ++i) {
-            const float t = (float)i * 0.08f;
-            buffer.setSample(0, i, 0.40f * std::sin(t) + 0.15f * std::cos(t * 2.3f));
-            buffer.setSample(1, i, 0.35f * std::sin(t + 0.9f) - 0.20f * std::cos(t * 1.7f));
-        }
-        processTestBlock(proc, buffer);
-
-        StereoTelemetrySnapshot snap {};
-        if (proc.getStereoTelemetry(snap)) {
-            editor->getStereoFieldComponent().updateTelemetry(snap);
-        }
-        editor->getStereoFieldComponent().updateParameterGeometry(
-            widthVal,
-            proc.getFloatParam("depthMs"),
-            proc.getFloatParam("rateHz"),
-            proc.parameters.getRawParameterValue("mix")->load()
-        );
-        editor->getStereoFieldComponent().setBypassState(bypass);
+    struct SignalConfig {
+        float amplitude { 0.32f };
+        bool mono { false };
+        bool antiphase { false };
+        bool silence { false };
     };
 
-    // 1. Minimum Size (840 x 540)
+    auto feedSignal = [&](int blocks, float widthVal, float mixVal, bool bypass, SignalConfig cfg) {
+        proc.prepareToPlay(48000.0, 32);
+        field.resetDisplayState();
+        setParamHostValue(proc, "width", widthVal);
+        setParamHostValue(proc, "mix", mixVal);
+        setParamHostValue(proc, "bypass", bypass ? 1.0f : 0.0f);
+
+        double sampleIndex = 0.0;
+        constexpr double sr = 48000.0;
+        constexpr int frames = 64;
+        constexpr double pi = juce::MathConstants<double>::pi;
+
+        for (int b = 0; b < blocks; ++b) {
+            juce::AudioBuffer<float> buffer(2, frames);
+            for (int i = 0; i < frames; ++i) {
+                const double t = sampleIndex / sr;
+                float l = 0.0f;
+                float r = 0.0f;
+                if (!cfg.silence) {
+                    const double mod = 0.6 * std::sin(2.0 * pi * 0.7 * t);
+                    l = cfg.amplitude * (float)(0.62 * std::sin(2.0 * pi * 290.0 * t + mod)
+                                              + 0.28 * std::sin(2.0 * pi * 610.0 * t + 0.4));
+                    r = cfg.amplitude * (float)(0.62 * std::sin(2.0 * pi * 290.0 * t + mod + 1.05)
+                                              + 0.28 * std::sin(2.0 * pi * 430.0 * t + 1.8));
+                }
+                if (cfg.mono) {
+                    r = l;
+                }
+                if (cfg.antiphase) {
+                    r = -l;
+                }
+                buffer.setSample(0, i, l);
+                buffer.setSample(1, i, r);
+                ++sampleIndex;
+            }
+
+            processTestBlock(proc, buffer);
+
+            StereoTelemetrySnapshot snap {};
+            if (proc.getStereoTelemetry(snap)) {
+                field.updateTelemetry(snap);
+            }
+            field.updateParameterGeometry(widthVal,
+                                          proc.getFloatParam("depthMs"),
+                                          proc.getFloatParam("rateHz"),
+                                          proc.parameters.getRawParameterValue("mix")->load());
+            field.setBypassState(bypass);
+
+            if ((b % 16) == 15) {
+                juce::Thread::sleep(30);
+            }
+        }
+    };
+
+    auto save = [&](const char* name) {
+        editor->resetMeterDisplay();
+        editor->refreshPresentationNow();
+        check(saveSnapshotToPng(*editor, outDir.getChildFile(name)), name);
+    };
+
+    // 1. Minimum size
     editor->setSize(840, 540);
-    feedAudioAndTelemetry(64, 1.0f, false);
-    check(saveSnapshotToPng(*editor, outDir.getChildFile("01_minimum_size.png")), "saved 01_minimum_size.png");
+    field.setViewMode(ViewMode::Field);
+    feedSignal(128, 1.0f, 1.0f, false, { 0.30f, false, false, false });
+    save("01_minimum_size.png");
 
-    // 2. Standard Size (1000 x 620)
+    // 2. Standard size
     editor->setSize(1000, 620);
-    feedAudioAndTelemetry(64, 1.2f, false);
-    check(saveSnapshotToPng(*editor, outDir.getChildFile("02_standard_size.png")), "saved 02_standard_size.png");
+    feedSignal(128, 1.2f, 1.0f, false, { 0.32f, false, false, false });
+    save("02_standard_size.png");
 
-    // 3. Maximum Size (1400 x 870)
-    editor->setSize(1400, 870);
-    feedAudioAndTelemetry(64, 1.4f, false);
-    check(saveSnapshotToPng(*editor, outDir.getChildFile("03_maximum_size.png")), "saved 03_maximum_size.png");
+    // 3. Maximum size
+    editor->setSize(1600, 1000);
+    feedSignal(128, 1.4f, 1.0f, false, { 0.32f, false, false, false });
+    save("03_maximum_size.png");
 
-    // Restore Standard Size for remaining tests
+    // 4. Advanced drawer open
     editor->setSize(1000, 620);
-
-    // 4. Advanced Drawer Open
     editor->setAdvancedVisible(true);
-    feedAudioAndTelemetry(64, 1.0f, false);
-    check(saveSnapshotToPng(*editor, outDir.getChildFile("04_advanced_open.png")), "saved 04_advanced_open.png");
+    feedSignal(128, 1.0f, 1.0f, false, { 0.30f, false, false, false });
+    save("04_advanced_open.png");
     editor->setAdvancedVisible(false);
 
-    // 5. FIELD Mode Active
-    editor->getStereoFieldComponent().setViewMode(StereoFieldComponent::ViewMode::Field);
-    feedAudioAndTelemetry(64, 1.25f, false);
-    check(saveSnapshotToPng(*editor, outDir.getChildFile("05_field_mode.png")), "saved 05_field_mode.png");
+    // 5. FIELD
+    field.setViewMode(ViewMode::Field);
+    feedSignal(128, 1.25f, 1.0f, false, { 0.32f, false, false, false });
+    save("05_field_mode.png");
 
-    // 6. VECTOR Mode Active
-    editor->getStereoFieldComponent().setViewMode(StereoFieldComponent::ViewMode::Vector);
-    feedAudioAndTelemetry(64, 1.35f, false);
-    check(saveSnapshotToPng(*editor, outDir.getChildFile("06_vector_mode.png")), "saved 06_vector_mode.png");
+    // 6. VECTOR
+    field.setViewMode(ViewMode::Vector);
+    feedSignal(128, 1.35f, 1.0f, false, { 0.32f, false, false, false });
+    save("06_vector_mode.png");
 
-    // 7. DELTA Mode Active
-    editor->getStereoFieldComponent().setViewMode(StereoFieldComponent::ViewMode::Delta);
-    feedAudioAndTelemetry(64, 1.50f, false);
-    check(saveSnapshotToPng(*editor, outDir.getChildFile("07_delta_mode.png")), "saved 07_delta_mode.png");
+    // 7. DELTA
+    field.setViewMode(ViewMode::Delta);
+    feedSignal(128, 1.50f, 1.0f, false, { 0.32f, false, false, false });
+    save("07_delta_mode.png");
 
-    // 8. Bypass Active
-    editor->getStereoFieldComponent().setViewMode(StereoFieldComponent::ViewMode::Field);
-    feedAudioAndTelemetry(64, 1.0f, true);
-    check(saveSnapshotToPng(*editor, outDir.getChildFile("08_bypass_active.png")), "saved 08_bypass_active.png");
+    // 8. Bypass
+    field.setViewMode(ViewMode::Field);
+    feedSignal(128, 1.0f, 1.0f, true, { 0.30f, false, false, false });
+    save("08_bypass_active.png");
 
-    // 9. Silence State
+    // 9. Silence (real zero signal through the analyzer)
     {
-        setParamHostValue(proc, "bypass", 0.0f);
+        feedSignal(24, 1.0f, 1.0f, false, { 0.0f, false, false, true });
+        field.resetDisplayState();
         StereoTelemetrySnapshot silenceSnap {};
-        silenceSnap.frame.hasSignal = false;
-        silenceSnap.frame.isCorrelationValid = false;
-        silenceSnap.frame.correlationStatus = CorrelationStatus::Silence;
-        silenceSnap.frame.correlation = 1.0f;
-        silenceSnap.frame.midRms = 0.0f;
-        silenceSnap.frame.sideRms = 0.0f;
-        silenceSnap.frame.monoAttenuationDb = 0.0f;
-        silenceSnap.frame.sideMidRatioDb = -60.0f;
-        silenceSnap.frame.stereoDeltaDb = 0.0f;
-        silenceSnap.gonioCount = 0;
-
-        editor->getStereoFieldComponent().updateTelemetry(silenceSnap);
-        editor->getStereoFieldComponent().resetDisplayState();
-        editor->getStereoFieldComponent().setBypassState(false);
-        check(saveSnapshotToPng(*editor, outDir.getChildFile("09_silence.png")), "saved 09_silence.png");
+        if (proc.getStereoTelemetry(silenceSnap)) {
+            field.updateTelemetry(silenceSnap);
+        }
+        field.setBypassState(false);
+        editor->resetMeterDisplay();
+        save("09_silence.png");
     }
 
-    // 10. Test Stereo Audio with Wide Spatial Expansion
+    // 10. Wide stereo test audio
     {
         setParamHostValue(proc, "mode", (float)DIMENSION_MODE_IV);
-        setParamHostValue(proc, "width", 1.8f);
-        setParamHostValue(proc, "mix", 1.0f);
-        feedAudioAndTelemetry(128, 1.8f, false);
-        check(saveSnapshotToPng(*editor, outDir.getChildFile("10_stereo_test_audio.png")), "saved 10_stereo_test_audio.png");
+        field.setViewMode(ViewMode::Field);
+        feedSignal(144, 1.8f, 1.0f, false, { 0.34f, false, false, false });
+        save("10_stereo_test_audio.png");
     }
 
-    std::cout << "[JUCE Tests] Successfully generated all 10 real visual snapshots in build/snapshots/!\n";
+    // 11. Mono input, true input/output DELTA comparison
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+    field.setViewMode(ViewMode::Delta);
+    feedSignal(128, 1.2f, 1.0f, false, { 0.34f, true, false, false });
+    save("11_mono_input.png");
+
+    // 12. Antiphase input, true input/output DELTA comparison
+    field.setViewMode(ViewMode::Delta);
+    feedSignal(128, 1.2f, 1.0f, false, { 0.34f, false, true, false });
+    save("12_antiphase_input.png");
+
+    // 13. Low-level audio: adaptive visual gain must keep it legible
+    field.setViewMode(ViewMode::Field);
+    feedSignal(128, 1.0f, 1.0f, false, { 0.012f, false, false, false });
+    save("13_low_level_audio.png");
+
+    std::cout << "[JUCE Tests] Successfully generated UI 2.1 snapshots in docs/snapshots/ui21/!\n";
 
     delete editor;
+}
+
+// 46. Comparison telemetry transports genuinely time-aligned input/output samples
+void test_stereo_comparison_points_time_aligned() {
+    StereoAnalyzer analyzer;
+    analyzer.prepare(48000.0);
+
+    constexpr int kFrames = 1024;
+    std::vector<float> inL((size_t)kFrames);
+    std::vector<float> inR((size_t)kFrames);
+    std::vector<float> outL((size_t)kFrames);
+    std::vector<float> outR((size_t)kFrames);
+
+    for (int i = 0; i < kFrames; ++i) {
+        inL[(size_t)i] = 0.30f * std::sin(2.0f * juce::MathConstants<float>::pi * 440.0f * (float)i / 48000.0f);
+        inR[(size_t)i] = 0.22f * std::cos(2.0f * juce::MathConstants<float>::pi * 317.0f * (float)i / 48000.0f);
+        outL[(size_t)i] = 0.5f * inL[(size_t)i];
+        outR[(size_t)i] = 0.5f * inR[(size_t)i];
+    }
+
+    StereoTelemetrySnapshot snap {};
+    analyzer.processBlock(inL.data(), inR.data(), outL.data(), outR.data(), kFrames, snap);
+
+    check(snap.comparisonCount > 0, "comparison points produced");
+    check(snap.comparisonCount == 171, "comparison point decimation is ~8 kHz based");
+    check(snap.comparisonEndSequence == snap.comparisonCount, "sequence tracks produced points");
+    check(snap.gonioCount > 0, "legacy goniometer array still populated");
+
+    for (uint32_t i = 0; i < snap.comparisonCount; ++i) {
+        const auto& pt = snap.comparisonPoints[i];
+        check(std::isfinite(pt.inputMid) && std::isfinite(pt.inputSide), "comparison input finite");
+        check(std::isfinite(pt.outputMid) && std::isfinite(pt.outputSide), "comparison output finite");
+        check(std::abs(pt.outputMid - 0.5f * pt.inputMid) < 1.0e-6f, "output/input mid aligned at same sample");
+        check(std::abs(pt.outputSide - 0.5f * pt.inputSide) < 1.0e-6f, "output/input side aligned at same sample");
+    }
+}
+
+// 47. Comparison sequence is independent from the host block size
+void test_stereo_comparison_block_size_independence() {
+    std::vector<float> l(4800);
+    std::vector<float> r(4800);
+    for (size_t i = 0; i < l.size(); ++i) {
+        l[i] = 0.3f * std::sin((float)i * 0.037f);
+        r[i] = 0.2f * std::cos((float)i * 0.023f);
+    }
+
+    StereoAnalyzer smallBlocks;
+    smallBlocks.prepare(48000.0);
+    StereoAnalyzer largeBlocks;
+    largeBlocks.prepare(48000.0);
+
+    StereoTelemetrySnapshot snapSmall {};
+    StereoTelemetrySnapshot snapLarge {};
+
+    for (int pos = 0; pos < 4800; pos += 16) {
+        smallBlocks.processBlock(l.data() + pos, r.data() + pos,
+                                 l.data() + pos, r.data() + pos, 16, snapSmall);
+    }
+    for (int pos = 0; pos < 4800; pos += 64) {
+        largeBlocks.processBlock(l.data() + pos, r.data() + pos,
+                                 l.data() + pos, r.data() + pos, 64, snapLarge);
+    }
+
+    check(snapSmall.comparisonEndSequence == snapLarge.comparisonEndSequence,
+          "comparison sequence independent from block size");
+    check(snapSmall.comparisonCount == snapLarge.comparisonCount,
+          "snapshot point count independent from block size");
+    check(std::abs(snapSmall.comparisonPoints[snapSmall.comparisonCount - 1].inputMid -
+                   snapLarge.comparisonPoints[snapLarge.comparisonCount - 1].inputMid) < 1.0e-6f,
+          "latest comparison sample matches across block sizes");
+}
+
+// 48. True input telemetry: no synthesized input points, even when output exists
+void test_stereo_delta_requires_real_input_points() {
+    StereoFieldComponent field;
+
+    StereoTelemetrySnapshot snap {};
+    snap.frame.hasSignal = true;
+    snap.comparisonCount = 100;
+    snap.comparisonEndSequence = 100;
+    for (uint32_t i = 0; i < snap.comparisonCount; ++i) {
+        const float phase = (float)i * 0.1f;
+        snap.comparisonPoints[i].inputMid = 0.0f;
+        snap.comparisonPoints[i].inputSide = 0.0f;
+        snap.comparisonPoints[i].outputMid = 0.10f * std::sin(phase);
+        snap.comparisonPoints[i].outputSide = 0.05f * std::cos(phase);
+    }
+
+    field.resetDisplayState();
+    field.updateTelemetry(snap);
+
+    check(field.getActiveOutputPointCount() == 100, "output cloud uses measured output points");
+    check(field.getActiveInputPointCount() == 0, "input cloud never invents points when input is silent");
+}
+
+// 49. Adaptive visual scale and temporal persistence
+void test_stereo_field_adaptive_scale_and_persistence() {
+    StereoFieldComponent field;
+
+    StereoTelemetrySnapshot lowLevel {};
+    lowLevel.frame.hasSignal = true;
+    lowLevel.comparisonCount = 200;
+    lowLevel.comparisonEndSequence = 200;
+    for (uint32_t i = 0; i < lowLevel.comparisonCount; ++i) {
+        const float phase = (float)i * 0.08f;
+        lowLevel.comparisonPoints[i].inputMid = 0.02f * std::sin(phase);
+        lowLevel.comparisonPoints[i].inputSide = 0.01f * std::cos(phase);
+        lowLevel.comparisonPoints[i].outputMid = 0.02f * std::sin(phase);
+        lowLevel.comparisonPoints[i].outputSide = 0.015f * std::cos(phase);
+    }
+
+    field.resetDisplayState();
+    field.updateTelemetry(lowLevel);
+
+    check(field.getActiveOutputPointCount() == 200, "all measured points ingested once");
+    check(field.getDisplayScale() > 1.5f, "adaptive visual gain boosts low-level audio");
+    check(field.getDeltaDisplayScale() > 1.5f, "delay-free comparison scale is also adaptive");
+
+    StereoTelemetrySnapshot silence {};
+    silence.frame.hasSignal = false;
+    silence.comparisonCount = 0;
+    silence.comparisonEndSequence = 200;
+
+    field.updateTelemetry(silence);
+    check(field.getActiveOutputPointCount() >= 190, "points persist briefly after signal stops");
+
+    field.resetDisplayState();
+    check(field.getActiveOutputPointCount() == 0, "reset clears the visual cloud");
+    check(std::abs(field.getDisplayScale() - 1.0f) < 1.0e-6f, "reset restores unity display scale");
+}
+
+// 50. VECTOR does not bridge temporal discontinuities
+void test_stereo_field_vector_continuity() {
+    StereoFieldComponent field;
+    field.resetDisplayState();
+
+    auto fill = [](StereoTelemetrySnapshot& snap, uint32_t count, uint64_t endSequence) {
+        snap.frame.hasSignal = true;
+        snap.comparisonCount = count;
+        snap.comparisonEndSequence = endSequence;
+        for (uint32_t i = 0; i < count; ++i) {
+            const float phase = (float)i * 0.06f;
+            snap.comparisonPoints[i].inputMid = 0.05f * std::sin(phase);
+            snap.comparisonPoints[i].inputSide = 0.05f * std::cos(phase);
+            snap.comparisonPoints[i].outputMid = 0.06f * std::sin(phase);
+            snap.comparisonPoints[i].outputSide = 0.06f * std::cos(phase);
+        }
+    };
+
+    StereoTelemetrySnapshot first {};
+    fill(first, 50, 50);
+    field.updateTelemetry(first);
+
+    StereoTelemetrySnapshot second {};
+    fill(second, 91, 150);
+    field.updateTelemetry(second);
+
+    check(field.getVectorSegmentCount() == 139,
+          "vector connects only consecutive acquisition indices (gap stays open)");
+}
+
+// 51. DELTA uses one common visual scale derived from both input and output
+void test_stereo_delta_common_scale() {
+    StereoFieldComponent field;
+    field.resetDisplayState();
+
+    StereoTelemetrySnapshot snap {};
+    snap.frame.hasSignal = true;
+    snap.comparisonCount = 100;
+    snap.comparisonEndSequence = 100;
+    for (uint32_t i = 0; i < snap.comparisonCount; ++i) {
+        const float phase = (float)i * 0.09f;
+        snap.comparisonPoints[i].inputMid = 0.80f * std::sin(phase);
+        snap.comparisonPoints[i].inputSide = 0.20f * std::cos(phase);
+        snap.comparisonPoints[i].outputMid = 0.008f * std::sin(phase);
+        snap.comparisonPoints[i].outputSide = 0.002f * std::cos(phase);
+    }
+
+    field.updateTelemetry(snap);
+
+    check(field.getActiveInputPointCount() == 100, "DELTA input cloud populated from measured input");
+    check(field.getActiveOutputPointCount() == 100, "DELTA output cloud populated from measured output");
+    check(field.getDeltaDisplayScale() < field.getDisplayScale(),
+          "common DELTA scale accounts for the louder input (no fake expansion)");
+    check(field.getDeltaDisplayScale() > 0.0f && std::isfinite(field.getDeltaDisplayScale()),
+          "common DELTA scale is finite and positive");
 }
 } // namespace
 
@@ -1937,6 +2180,24 @@ int main() {
 
         std::cout << "[JUCE Tests] 45. test_generate_visual_validation_snapshots...\n";
         test_generate_visual_validation_snapshots();
+
+        std::cout << "[JUCE Tests] 46. test_stereo_comparison_points_time_aligned...\n";
+        test_stereo_comparison_points_time_aligned();
+
+        std::cout << "[JUCE Tests] 47. test_stereo_comparison_block_size_independence...\n";
+        test_stereo_comparison_block_size_independence();
+
+        std::cout << "[JUCE Tests] 48. test_stereo_delta_requires_real_input_points...\n";
+        test_stereo_delta_requires_real_input_points();
+
+        std::cout << "[JUCE Tests] 49. test_stereo_field_adaptive_scale_and_persistence...\n";
+        test_stereo_field_adaptive_scale_and_persistence();
+
+        std::cout << "[JUCE Tests] 50. test_stereo_field_vector_continuity...\n";
+        test_stereo_field_vector_continuity();
+
+        std::cout << "[JUCE Tests] 51. test_stereo_delta_common_scale...\n";
+        test_stereo_delta_common_scale();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;

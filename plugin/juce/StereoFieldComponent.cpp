@@ -1,6 +1,37 @@
 #include "StereoFieldComponent.h"
 #include <cmath>
 
+namespace {
+constexpr float kTwoPi = juce::MathConstants<float>::twoPi;
+constexpr float kCloudHalfLifeSec = 0.20f;
+constexpr float kTargetVisualPeak = 0.92f;
+constexpr float kMaxVisualGain = 48.0f;
+constexpr float kMinVisualScale = 0.45f;
+constexpr float kVisualNoiseFloor = 0.0020f;
+constexpr float kScaleAttackSec = 0.055f;
+constexpr float kScaleReleaseSec = 0.22f;
+constexpr float kPointRemovalAge = 0.05f;
+constexpr float kVectorMinAge = 0.08f;
+
+float smoothScale(float current, float target, float attackSec, float releaseSec, float dt) {
+    if (!std::isfinite(current) || !std::isfinite(target)) {
+        return 1.0f;
+    }
+    const float tau = (target < current) ? attackSec : releaseSec;
+    const float coeff = 1.0f - std::exp(-dt / juce::jmax(1.0e-3f, tau));
+    return current + coeff * (target - current);
+}
+
+float targetScaleForPeak(float peak) {
+    // Do not amplify below the noise floor: this prevents noise from being
+    // visually blown up while still making low-level musical signals legible.
+    if (!(peak > kVisualNoiseFloor)) {
+        return 1.0f;
+    }
+    return juce::jlimit(kMinVisualScale, kMaxVisualGain, kTargetVisualPeak / peak);
+}
+} // namespace
+
 StereoFieldComponent::StereoFieldComponent() {
     setOpaque(false);
 
@@ -35,69 +66,143 @@ void StereoFieldComponent::updateModeButtons() {
 }
 
 void StereoFieldComponent::setBypassState(bool isBypassed) {
-    bypassActive = isBypassed;
+    if (bypassActive != isBypassed) {
+        bypassActive = isBypassed;
+        repaint();
+    }
     metricsComponent.setBypassState(isBypassed);
+}
+
+void StereoFieldComponent::resetDisplayState() {
+    for (auto& pt : points) {
+        pt.age = 0.0f;
+        pt.sequence = 0;
+    }
+    pointWritePos = 0;
+    pointCount = 0;
+    lastIngestedSequence = 0;
+    lastUpdateTimeMs = 0.0;
+    displayScale = 1.0f;
+    deltaDisplayScale = 1.0f;
+    repaint();
 }
 
 void StereoFieldComponent::updateTelemetry(const StereoTelemetrySnapshot& snapshot) {
     lastTelemetry = snapshot;
     hasSignal = snapshot.frame.hasSignal;
-    metricsComponent.updateMetrics(snapshot.frame);
 
     const double now = juce::Time::getMillisecondCounterHiRes();
-    const double dtSec = (lastUpdateTimeMs > 0.0) ? (now - lastUpdateTimeMs) * 0.001 : 0.033;
+    double dtSec = (lastUpdateTimeMs > 0.0) ? (now - lastUpdateTimeMs) * 0.001 : 0.033;
     lastUpdateTimeMs = now;
+    dtSec = juce::jlimit(0.001, 0.25, dtSec);
+    const float dt = static_cast<float>(dtSec);
 
-    // Time-based phosphor persistence (~180 ms half-life)
-    const float decay = std::exp(-static_cast<float>(dtSec) / 0.180f);
-
-    if (hasSignal) {
-        // Dynamic auto-scale tracker with minimum floor
-        const float peakMax = juce::jmax(snapshot.frame.outputPeakL, snapshot.frame.outputPeakR,
-                                         snapshot.frame.inputPeakL, snapshot.frame.inputPeakR);
-        const float targetScale = (peakMax > 0.85f) ? (0.85f / peakMax) : 1.0f;
-        displayScale += 0.15f * (targetScale - displayScale);
-
-        // Ingest new output goniometer points into circular cloud history
-        for (uint32_t i = 0; i < snapshot.gonioCount; ++i) {
-            auto& pt = cloudPoints[cloudWritePos];
-            pt.x = snapshot.gonioPoints[i].side * displayScale;
-            pt.y = snapshot.gonioPoints[i].mid * displayScale;
-            pt.age = 1.0f;
-            cloudWritePos = (cloudWritePos + 1) % kMaxCloudPoints;
-
-            // Approximate input points for DELTA comparison
-            if (i < kMaxInputPoints) {
-                auto& inPt = inputPoints[inputWritePos];
-                // Synthesize input mid/side point proportionally
-                const float inRatio = (snapshot.frame.inputMidRms > 1e-4f) ? (snapshot.frame.inputSideRms / snapshot.frame.inputMidRms) : 0.0f;
-                inPt.x = snapshot.gonioPoints[i].side * inRatio * displayScale;
-                inPt.y = snapshot.gonioPoints[i].mid * displayScale;
-                inPt.age = 1.0f;
-                inputWritePos = (inputWritePos + 1) % kMaxInputPoints;
-            }
-        }
-    } else {
-        displayScale += 0.10f * (1.0f - displayScale);
+    // Time-based motion phase: independent from the repaint rate.
+    motionPhase += kTwoPi * juce::jmax(0.0f, paramRateHz) * dt;
+    if (motionPhase >= kTwoPi) {
+        motionPhase = std::fmod(motionPhase, kTwoPi);
     }
 
-    // Smooth continuous age decay
-    for (auto& pt : cloudPoints) {
+    // Perceptual persistence: exponential half-life, independent from FPS.
+    const float decay = std::exp(-std::log(2.0f) * dt / kCloudHalfLifeSec);
+    decayPoints(decay);
+
+    ingestComparisonPoints(snapshot);
+    updateVisualScale(snapshot, dtSec);
+
+    metricsComponent.updateMetrics(snapshot.frame, dtSec);
+}
+
+void StereoFieldComponent::decayPoints(float decayFactor) {
+    for (auto& pt : points) {
         if (pt.age > 0.0f) {
-            pt.age *= decay;
-            if (pt.age < 0.03f) {
+            pt.age *= decayFactor;
+            if (pt.age < kPointRemovalAge) {
                 pt.age = 0.0f;
+                pt.sequence = 0;
             }
         }
     }
-    for (auto& pt : inputPoints) {
-        if (pt.age > 0.0f) {
-            pt.age *= decay;
-            if (pt.age < 0.03f) {
-                pt.age = 0.0f;
+}
+
+void StereoFieldComponent::ingestComparisonPoints(const StereoTelemetrySnapshot& snapshot) {
+    const uint32_t n = juce::jmin<uint32_t>(snapshot.comparisonCount,
+                                            (uint32_t)StereoTelemetrySnapshot::kMaxComparisonPoints);
+    if (n == 0) {
+        return;
+    }
+
+    const uint64_t endSequence = snapshot.comparisonEndSequence;
+
+    // In silence the analyzer still produces zero-valued samples. They are
+    // real, but drawing them would create a false point at the origin, so we
+    // advance the sequence without ingesting them.
+    if (!snapshot.frame.hasSignal) {
+        lastIngestedSequence = endSequence;
+        return;
+    }
+    uint32_t toIngest = 0;
+
+    if (lastIngestedSequence == 0 || endSequence < lastIngestedSequence || endSequence == 0) {
+        // First update or analyzer reset: take the whole available window.
+        toIngest = n;
+    } else if (endSequence > lastIngestedSequence) {
+        const uint64_t fresh = endSequence - lastIngestedSequence;
+        toIngest = (uint32_t)juce::jmin<uint64_t>(fresh, (uint64_t)n);
+    }
+
+    if (toIngest > 0) {
+        const uint32_t start = n - toIngest;
+        for (uint32_t i = start; i < n; ++i) {
+            const auto& src = snapshot.comparisonPoints[i];
+            auto& dst = points[pointWritePos];
+            dst.inputSide = src.inputSide;
+            dst.inputMid = src.inputMid;
+            dst.outputSide = src.outputSide;
+            dst.outputMid = src.outputMid;
+            dst.age = 1.0f;
+            dst.sequence = endSequence - (uint64_t)(n - 1 - i);
+
+            pointWritePos = (pointWritePos + 1) % kMaxPoints;
+            if (pointCount < kMaxPoints) {
+                ++pointCount;
             }
         }
     }
+
+    lastIngestedSequence = endSequence;
+}
+
+void StereoFieldComponent::updateVisualScale(const StereoTelemetrySnapshot& snapshot, double deltaSeconds) {
+    float outputPeak = 0.0f;
+    float combinedPeak = 0.0f;
+
+    for (size_t k = 0; k < pointCount; ++k) {
+        const auto& pt = points[chronologicalIndex(k)];
+        if (pt.age <= kPointRemovalAge) {
+            continue;
+        }
+        outputPeak = juce::jmax(outputPeak, std::abs(pt.outputMid), std::abs(pt.outputSide));
+        const float inputPointPeak = juce::jmax(std::abs(pt.inputMid), std::abs(pt.inputSide));
+        combinedPeak = juce::jmax(combinedPeak, outputPeak, inputPointPeak);
+    }
+
+    if (outputPeak <= 1.0e-6f) {
+        outputPeak = juce::jmax(snapshot.frame.outputPeakL, snapshot.frame.outputPeakR);
+    }
+    if (combinedPeak <= 1.0e-6f) {
+        combinedPeak = juce::jmax(outputPeak, snapshot.frame.inputPeakL, snapshot.frame.inputPeakR);
+    }
+
+    const float dt = static_cast<float>(deltaSeconds);
+    const float outTarget = targetScaleForPeak(outputPeak);
+    const float combinedTarget = targetScaleForPeak(combinedPeak);
+
+    displayScale = smoothScale(displayScale, outTarget, kScaleAttackSec, kScaleReleaseSec, dt);
+    deltaDisplayScale = smoothScale(deltaDisplayScale, combinedTarget, kScaleAttackSec, kScaleReleaseSec, dt);
+
+    displayScale = juce::jlimit(kMinVisualScale, kMaxVisualGain, displayScale);
+    deltaDisplayScale = juce::jlimit(kMinVisualScale, kMaxVisualGain, deltaDisplayScale);
 }
 
 void StereoFieldComponent::updateParameterGeometry(float spread, float depthMs, float rateHz, float mix) {
@@ -105,31 +210,65 @@ void StereoFieldComponent::updateParameterGeometry(float spread, float depthMs, 
     paramDepthMs = depthMs;
     paramRateHz = rateHz;
     paramMix = mix;
+}
 
-    // Advance motion phase smoothly based on rate
-    motionPhase += 0.033f * rateHz * juce::MathConstants<float>::twoPi;
-    if (motionPhase > juce::MathConstants<float>::twoPi) {
-        motionPhase -= juce::MathConstants<float>::twoPi;
+uint32_t StereoFieldComponent::getActiveOutputPointCount() const noexcept {
+    uint32_t n = 0;
+    for (size_t k = 0; k < pointCount; ++k) {
+        if (points[chronologicalIndex(k)].age > kPointRemovalAge) {
+            ++n;
+        }
     }
+    return n;
+}
+
+uint32_t StereoFieldComponent::getActiveInputPointCount() const noexcept {
+    uint32_t n = 0;
+    for (size_t k = 0; k < pointCount; ++k) {
+        const auto& pt = points[chronologicalIndex(k)];
+        if (pt.age > kPointRemovalAge &&
+            (std::abs(pt.inputMid) > 1.0e-7f || std::abs(pt.inputSide) > 1.0e-7f)) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+uint32_t StereoFieldComponent::getVectorSegmentCount() const noexcept {
+    uint32_t segments = 0;
+    uint64_t previousSequence = 0;
+    bool hasPrevious = false;
+
+    for (size_t k = 0; k < pointCount; ++k) {
+        const auto& pt = points[chronologicalIndex(k)];
+        if (pt.age <= kVectorMinAge) {
+            hasPrevious = false;
+            continue;
+        }
+        if (hasPrevious && pt.sequence == previousSequence + 1) {
+            ++segments;
+        }
+        previousSequence = pt.sequence;
+        hasPrevious = true;
+    }
+    return segments;
 }
 
 void StereoFieldComponent::resized() {
     auto bounds = getLocalBounds();
 
-    // 1. Top bar with Mode selector buttons
-    headerBounds = bounds.removeFromTop(32);
-    auto modeButtonsArea = headerBounds.removeFromRight(190).reduced(0, 3);
+    headerBounds = bounds.removeFromTop(34);
+    auto modeButtonsArea = headerBounds.removeFromRight(juce::jlimit(156, 214, headerBounds.getWidth() / 2));
+    modeButtonsArea = modeButtonsArea.reduced(0, 4);
     const int btnW = modeButtonsArea.getWidth() / 3;
     fieldModeButton.setBounds(modeButtonsArea.removeFromLeft(btnW).reduced(2, 0));
     vectorModeButton.setBounds(modeButtonsArea.removeFromLeft(btnW).reduced(2, 0));
     deltaModeButton.setBounds(modeButtonsArea.reduced(2, 0));
 
-    // 2. Metrics Bar at bottom
-    const int metricsHeight = 64;
+    const int metricsHeight = juce::jlimit(86, 108, juce::roundToInt((float)bounds.getHeight() * 0.23f));
     metricsBounds = bounds.removeFromBottom(metricsHeight);
-    metricsComponent.setBounds(metricsBounds.reduced(8, 2));
+    metricsComponent.setBounds(metricsBounds.reduced(8, 3));
 
-    // 3. Central Scope Canvas
     scopeBounds = bounds;
 }
 
@@ -138,39 +277,35 @@ void StereoFieldComponent::paint(juce::Graphics& g) {
 
     auto totalArea = getLocalBounds().toFloat();
 
-    // Outer card container
     g.setColour(surfaceColour());
     g.fillRoundedRectangle(totalArea, 6.0f);
     g.setColour(dividerColour());
     g.drawRoundedRectangle(totalArea, 6.0f, 1.0f);
 
-    // Header divider line
     g.setColour(dividerColour());
     g.drawLine(totalArea.getX() + 8.0f, (float)headerBounds.getBottom(),
                totalArea.getRight() - 8.0f, (float)headerBounds.getBottom(), 1.0f);
 
-    // Header title
     g.setFont(juce::Font(11.0f, juce::Font::bold));
     g.setColour(secondaryText());
     auto titleArea = headerBounds.toFloat().reduced(12.0f, 0.0f);
-    g.drawText("STEREO FIELD MONITOR 2.0", titleArea.removeFromLeft(220.0f), juce::Justification::centredLeft);
+    g.drawText("STEREO FIELD MONITOR 2.1", titleArea.removeFromLeft(196.0f), juce::Justification::centredLeft);
 
-    // Active mode label
     juce::String modeDesc;
-    if (currentMode == ViewMode::Field)       modeDesc = "FIELD / Phosphor Cloud & Dispersion Aperture";
-    else if (currentMode == ViewMode::Vector) modeDesc = "VECTOR / Precision Lissajous Goniometer";
-    else                                      modeDesc = "DELTA / Comparative Analysis";
+    if (currentMode == ViewMode::Field)       modeDesc = "FIELD / Measured Phosphor Cloud";
+    else if (currentMode == ViewMode::Vector) modeDesc = "VECTOR / Continuous Lissajous";
+    else                                      modeDesc = "DELTA / True Input vs Output";
 
-    g.setFont(juce::Font(9.5f, juce::Font::plain));
-    g.setColour(secondaryText().withAlpha(0.6f));
-    g.drawText(modeDesc, titleArea, juce::Justification::centredLeft);
+    if (titleArea.getWidth() > 110.0f) {
+        g.setFont(juce::Font(9.5f, juce::Font::plain));
+        g.setColour(secondaryText().withAlpha(0.6f));
+        g.drawText(modeDesc, titleArea, juce::Justification::centredLeft);
+    }
 
-    // Metrics divider line
     g.setColour(dividerColour());
     g.drawLine(totalArea.getX() + 8.0f, (float)metricsBounds.getY(),
                totalArea.getRight() - 8.0f, (float)metricsBounds.getY(), 1.0f);
 
-    // Render active view mode in scopeBounds
     auto scopeArea = scopeBounds.toFloat().reduced(8.0f, 6.0f);
 
     if (currentMode == ViewMode::Field) {
@@ -183,7 +318,7 @@ void StereoFieldComponent::paint(juce::Graphics& g) {
 }
 
 // ==============================================================================
-// 1. FIELD MODE: Phosphor Cloud + Parametric Spatial Aperture
+// 1. FIELD MODE: Measured Phosphor Cloud + Parametric Configuration Aperture
 // ==============================================================================
 void StereoFieldComponent::drawFieldMode(juce::Graphics& g, juce::Rectangle<float> area) {
     using namespace Dimension5UI;
@@ -191,50 +326,101 @@ void StereoFieldComponent::drawFieldMode(juce::Graphics& g, juce::Rectangle<floa
     const auto center = area.getCentre();
     const float radius = juce::jmin(area.getWidth(), area.getHeight()) * 0.47f;
 
-    // Reticle with Mid, Side, and L/R diagonals
     drawReticle(g, center, radius, true);
 
-    // Auxiliary parameter aperture (distinct configuration layer)
-    drawAuxiliaryAperture(g, center, radius);
+    if (!bypassActive) {
+        drawAuxiliaryAperture(g, center, radius);
+    }
 
-    // Real measured audio cloud
-    if (!hasSignal) {
-        g.setFont(juce::Font(12.0f, juce::Font::bold));
-        g.setColour(secondaryText().withAlpha(0.5f));
-        g.drawText("MONITOR IDLE / STANDBY",
-                   center.x - 120.0f, center.y - 10.0f,
-                   240.0f, 20.0f,
-                   juce::Justification::centred);
-        return;
+    // A small, explicit label: this is a configuration guide, never a measurement.
+    if (!bypassActive) {
+        g.setFont(juce::Font(8.0f, juce::Font::plain));
+        g.setColour(secondaryText().withAlpha(0.38f));
+        g.drawText("CONFIG GUIDE", area.getX() + 4.0f, area.getY() + 2.0f,
+                   90.0f, 10.0f, juce::Justification::centredLeft);
     }
 
     const float scale = radius * 0.92f;
     const auto accent = spatialAccent();
+    const float scaleFactor = displayScale;
 
-    for (const auto& pt : cloudPoints) {
-        if (pt.age <= 0.03f) {
+    for (size_t k = 0; k < pointCount; ++k) {
+        const auto& pt = points[chronologicalIndex(k)];
+        if (pt.age <= kPointRemovalAge) {
             continue;
         }
 
-        const float px = center.x + juce::jlimit(-1.25f, 1.25f, pt.x) * scale;
-        const float py = center.y - juce::jlimit(-1.25f, 1.25f, pt.y) * scale;
+        const float px = center.x + juce::jlimit(-1.20f, 1.20f, pt.outputSide * scaleFactor) * scale;
+        const float py = center.y - juce::jlimit(-1.20f, 1.20f, pt.outputMid * scaleFactor) * scale;
 
-        // Glowing phosphor particle
-        const float alpha = pt.age * 0.85f;
-        g.setColour(accent.withAlpha(alpha));
-        g.fillEllipse(px - 1.4f, py - 1.4f, 2.8f, 2.8f);
+        // Discrete halo + small bright core: density and amplitude stay distinct.
+        g.setColour(accent.withAlpha(0.05f + 0.16f * pt.age));
+        g.fillEllipse(px - 3.0f, py - 3.0f, 6.0f, 6.0f);
 
-        // Core bright center for high energy
-        if (pt.age > 0.6f) {
-            g.setColour(primaryText().withAlpha(pt.age * 0.7f));
-            g.fillEllipse(px - 0.7f, py - 0.7f, 1.4f, 1.4f);
+        g.setColour(accent.withAlpha(0.30f + 0.60f * pt.age));
+        g.fillEllipse(px - 1.05f, py - 1.05f, 2.1f, 2.1f);
+
+        if (pt.age > 0.72f) {
+            g.setColour(primaryText().withAlpha(0.55f * (pt.age - 0.72f) / 0.28f));
+            g.fillEllipse(px - 0.55f, py - 0.55f, 1.1f, 1.1f);
         }
     }
+
+    if (getActiveOutputPointCount() == 0 && !hasSignal) {
+        g.setFont(juce::Font(10.5f, juce::Font::bold));
+        g.setColour(secondaryText().withAlpha(0.55f));
+        g.drawText("AWAITING SIGNAL",
+                   center.x - 100.0f, center.y + radius * 0.52f,
+                   200.0f, 16.0f, juce::Justification::centred);
+    }
+
+    if (bypassActive) {
+        drawBypassBadge(g, area);
+    }
+
+    drawAutoScaleBadge(g, area, scaleFactor);
 }
 
 // ==============================================================================
-// 2. VECTOR MODE: Precision Lissajous Oscilloscope
+// 2. VECTOR MODE: Continuous Lissajous, no invented segments
 // ==============================================================================
+juce::Path StereoFieldComponent::buildVectorPath(juce::Rectangle<float> area) const {
+    const auto center = area.getCentre();
+    const float radius = juce::jmin(area.getWidth(), area.getHeight()) * 0.47f;
+    const float scale = radius * 0.92f;
+
+    juce::Path path;
+    bool hasPrevious = false;
+    uint64_t previousSequence = 0;
+
+    auto moveTo = [&path](float x, float y) { path.startNewSubPath(x, y); };
+
+    for (size_t k = 0; k < pointCount; ++k) {
+        const auto& pt = points[chronologicalIndex(k)];
+        if (pt.age <= kVectorMinAge) {
+            hasPrevious = false;
+            continue;
+        }
+
+        const float px = center.x + juce::jlimit(-1.20f, 1.20f, pt.outputSide * displayScale) * scale;
+        const float py = center.y - juce::jlimit(-1.20f, 1.20f, pt.outputMid * displayScale) * scale;
+
+        if (!hasPrevious) {
+            moveTo(px, py);
+        } else if (pt.sequence == previousSequence + 1) {
+            // Only connect samples with known consecutive acquisition indices.
+            path.lineTo(px, py);
+        } else {
+            moveTo(px, py);
+        }
+
+        previousSequence = pt.sequence;
+        hasPrevious = true;
+    }
+
+    return path;
+}
+
 void StereoFieldComponent::drawVectorMode(juce::Graphics& g, juce::Rectangle<float> area) {
     using namespace Dimension5UI;
 
@@ -243,132 +429,185 @@ void StereoFieldComponent::drawVectorMode(juce::Graphics& g, juce::Rectangle<flo
 
     drawReticle(g, center, radius, true);
 
-    // Polar dB concentric reference rings (-6 dB, -12 dB, -18 dB)
-    g.setColour(dividerColour().withAlpha(0.35f));
+    g.setColour(dividerColour().withAlpha(0.30f));
     g.drawEllipse(center.x - radius * 0.75f, center.y - radius * 0.75f, radius * 1.5f, radius * 1.5f, 0.75f);
     g.drawEllipse(center.x - radius * 0.50f, center.y - radius * 0.50f, radius * 1.0f, radius * 1.0f, 0.75f);
     g.drawEllipse(center.x - radius * 0.25f, center.y - radius * 0.25f, radius * 0.5f, radius * 0.5f, 0.75f);
 
     g.setFont(juce::Font(8.5f, juce::Font::plain));
-    g.setColour(secondaryText().withAlpha(0.5f));
+    g.setColour(secondaryText().withAlpha(0.45f));
     g.drawText("-6 dB", center.x + 4.0f, center.y - radius * 0.75f - 9.0f, 35.0f, 10.0f, juce::Justification::centredLeft);
     g.drawText("-12 dB", center.x + 4.0f, center.y - radius * 0.50f - 9.0f, 35.0f, 10.0f, juce::Justification::centredLeft);
 
-    if (!hasSignal) {
-        g.setFont(juce::Font(12.0f, juce::Font::bold));
-        g.setColour(secondaryText().withAlpha(0.5f));
-        g.drawText("VECTOR SCOPE IDLE",
-                   center.x - 100.0f, center.y - 10.0f,
-                   200.0f, 20.0f,
-                   juce::Justification::centred);
+    if (getVectorSegmentCount() == 0) {
+        if (!hasSignal) {
+            g.setFont(juce::Font(10.5f, juce::Font::bold));
+            g.setColour(secondaryText().withAlpha(0.55f));
+            g.drawText("VECTOR SCOPE IDLE",
+                       center.x - 100.0f, center.y + radius * 0.52f,
+                       200.0f, 16.0f, juce::Justification::centred);
+        }
         return;
     }
 
-    const float scale = radius * 0.92f;
-    juce::Path vectorPath;
-    bool pathStarted = false;
+    const auto path = buildVectorPath(area);
 
-    // Build vector path connecting active points in chronological order
-    for (size_t i = 0; i < kMaxCloudPoints; ++i) {
-        const size_t idx = (cloudWritePos + i) % kMaxCloudPoints;
-        const auto& pt = cloudPoints[idx];
+    g.setColour(spatialAccent().withAlpha(0.18f));
+    g.strokePath(path, juce::PathStrokeType(2.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-        if (pt.age <= 0.08f) {
-            pathStarted = false;
-            continue;
-        }
+    g.setColour(spatialAccent().withAlpha(0.82f));
+    g.strokePath(path, juce::PathStrokeType(1.05f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-        const float px = center.x + juce::jlimit(-1.25f, 1.25f, pt.x) * scale;
-        const float py = center.y - juce::jlimit(-1.25f, 1.25f, pt.y) * scale;
-
-        if (!pathStarted) {
-            vectorPath.startNewSubPath(px, py);
-            pathStarted = true;
-        } else {
-            vectorPath.lineTo(px, py);
-        }
+    if (bypassActive) {
+        drawBypassBadge(g, area);
     }
-
-    // Outer glow stroke
-    g.setColour(spatialAccent().withAlpha(0.20f));
-    g.strokePath(vectorPath, juce::PathStrokeType(2.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-    // Core laser beam vector stroke
-    g.setColour(spatialAccent().withAlpha(0.85f));
-    g.strokePath(vectorPath, juce::PathStrokeType(1.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    drawAutoScaleBadge(g, area, displayScale);
 }
 
 // ==============================================================================
-// 3. DELTA MODE: Comparative Input vs Output Stereo Geometry
+// 3. DELTA MODE: True Input vs Output from time-aligned measured samples
 // ==============================================================================
 void StereoFieldComponent::drawDeltaMode(juce::Graphics& g, juce::Rectangle<float> area) {
     using namespace Dimension5UI;
 
-    const float panelW = area.getWidth() * 0.48f;
-    auto leftArea = area.removeFromLeft(panelW);
-    auto rightArea = area.removeFromRight(panelW);
-    auto centerBadgeArea = area;
+    auto working = area;
+    const float panelW = working.getWidth() * 0.415f;
+    auto leftArea = working.removeFromLeft(panelW);
+    auto rightArea = working.removeFromRight(panelW);
+    auto centerBadgeArea = working;
 
-    const float radius = juce::jmin(leftArea.getWidth(), leftArea.getHeight()) * 0.44f;
+    const float radius = juce::jmax(18.0f, juce::jmin(leftArea.getWidth(), leftArea.getHeight()) * 0.44f);
     const auto centerL = leftArea.getCentre();
     const auto centerR = rightArea.getCentre();
+    const float scale = radius * 0.92f;
+    const auto amber = analogAccent();
+    const auto teal = spatialAccent();
 
-    // 1. Left Scope: INPUT FIELD (Dry Reference)
     drawReticle(g, centerL, radius, false);
-    g.setFont(juce::Font(10.5f, juce::Font::bold));
-    g.setColour(analogAccent());
-    g.drawText("INPUT SIGNAL (PRE-BBD)", centerL.x - 90.0f, centerL.y - radius - 16.0f, 180.0f, 14.0f, juce::Justification::centred);
+    g.setFont(juce::Font(10.0f, juce::Font::bold));
+    g.setColour(amber);
+    g.drawText("INPUT / BEFORE", leftArea.getX(), leftArea.getY() + 2.0f,
+               leftArea.getWidth(), 14.0f, juce::Justification::centred);
 
-    // Input Envelope ellipse
-    if (hasSignal && lastTelemetry.frame.inputMidRms > 1e-4f) {
-        const float inRatio = lastTelemetry.frame.inputSideRms / lastTelemetry.frame.inputMidRms;
-        const float inRx = juce::jlimit(4.0f, radius * 0.9f, radius * inRatio * 0.8f);
-        const float inRy = juce::jlimit(8.0f, radius * 0.9f, radius * 0.7f);
+    drawReticle(g, centerR, radius, false);
+    g.setColour(teal);
+    g.drawText("OUTPUT / AFTER", rightArea.getX(), rightArea.getY() + 2.0f,
+               rightArea.getWidth(), 14.0f, juce::Justification::centred);
 
-        g.setColour(analogAccent().withAlpha(0.12f));
-        g.fillEllipse(centerL.x - inRx, centerL.y - inRy, inRx * 2.0f, inRy * 2.0f);
-        g.setColour(analogAccent().withAlpha(0.70f));
-        g.drawEllipse(centerL.x - inRx, centerL.y - inRy, inRx * 2.0f, inRy * 2.0f, 1.2f);
-    } else {
-        g.setFont(juce::Font(10.0f, juce::Font::plain));
-        g.setColour(secondaryText().withAlpha(0.5f));
-        g.drawText("NO INPUT", centerL.x - 40.0f, centerL.y - 6.0f, 80.0f, 12.0f, juce::Justification::centred);
+    const float deltaScaleFactor = deltaDisplayScale;
+
+    for (size_t k = 0; k < pointCount; ++k) {
+        const auto& pt = points[chronologicalIndex(k)];
+        if (pt.age <= kPointRemovalAge) {
+            continue;
+        }
+
+        // Input cloud (amber). Same common scale as the output cloud.
+        {
+            const float px = centerL.x + juce::jlimit(-1.20f, 1.20f, pt.inputSide * deltaScaleFactor) * scale;
+            const float py = centerL.y - juce::jlimit(-1.20f, 1.20f, pt.inputMid * deltaScaleFactor) * scale;
+            g.setColour(amber.withAlpha(0.04f + 0.13f * pt.age));
+            g.fillEllipse(px - 2.8f, py - 2.8f, 5.6f, 5.6f);
+            g.setColour(amber.withAlpha(0.28f + 0.55f * pt.age));
+            g.fillEllipse(px - 1.0f, py - 1.0f, 2.0f, 2.0f);
+        }
+
+        // Output cloud (teal). Same common scale as the input cloud.
+        {
+            const float px = centerR.x + juce::jlimit(-1.20f, 1.20f, pt.outputSide * deltaScaleFactor) * scale;
+            const float py = centerR.y - juce::jlimit(-1.20f, 1.20f, pt.outputMid * deltaScaleFactor) * scale;
+            g.setColour(teal.withAlpha(0.04f + 0.13f * pt.age));
+            g.fillEllipse(px - 2.8f, py - 2.8f, 5.6f, 5.6f);
+            g.setColour(teal.withAlpha(0.28f + 0.55f * pt.age));
+            g.fillEllipse(px - 1.0f, py - 1.0f, 2.0f, 2.0f);
+        }
     }
 
-    // 2. Center Transfer Indicator
+    if (!hasSignal) {
+        if (getActiveInputPointCount() == 0) {
+            g.setFont(juce::Font(9.5f, juce::Font::plain));
+            g.setColour(secondaryText().withAlpha(0.45f));
+            g.drawText("NO INPUT", centerL.x - 50.0f, centerL.y + radius * 0.55f, 100.0f, 14.0f, juce::Justification::centred);
+        }
+        if (getActiveOutputPointCount() == 0) {
+            g.setFont(juce::Font(9.5f, juce::Font::plain));
+            g.setColour(secondaryText().withAlpha(0.45f));
+            g.drawText("NO OUTPUT", centerR.x - 50.0f, centerR.y + radius * 0.55f, 100.0f, 14.0f, juce::Justification::centred);
+        }
+    }
+
+    // Central transfer readout: measured Side/Mid delta in dB.
     {
         const auto badgeCenter = centerBadgeArea.getCentre();
-        g.setFont(juce::Font(13.0f, juce::Font::bold));
-        g.setColour(spatialAccent());
-        g.drawText("-->", badgeCenter.x - 20.0f, badgeCenter.y - 20.0f, 40.0f, 20.0f, juce::Justification::centred);
+        const float badgeW = juce::jmax(70.0f, centerBadgeArea.getWidth());
 
-        const float deltaDb = lastTelemetry.frame.stereoDeltaDb;
-        juce::String deltaStr = bypassActive ? "BYPASS" : juce::String::formatted("%+.1f dB", (double)deltaDb);
-        g.setFont(juce::Font(10.0f, juce::Font::bold));
-        g.setColour(bypassActive ? warningAccent() : (deltaDb > 0.3f ? spatialAccent() : primaryText()));
-        g.drawText(deltaStr, badgeCenter.x - 35.0f, badgeCenter.y + 4.0f, 70.0f, 14.0f, juce::Justification::centred);
+        g.setFont(juce::Font(8.5f, juce::Font::bold));
+        g.setColour(secondaryText().withAlpha(0.75f));
+        g.drawText("STEREO DELTA", badgeCenter.x - badgeW * 0.5f, badgeCenter.y - 34.0f,
+                   badgeW, 12.0f, juce::Justification::centred);
+
+        const auto& f = lastTelemetry.frame;
+        juce::String valueStr = "--";
+        juce::String statusStr = "N/A";
+        juce::Colour valueColour = secondaryText();
+
+        const bool deltaValid = f.hasSignal && f.isStereoDeltaValid;
+        if (bypassActive) {
+            statusStr = "BYPASS";
+            valueColour = warningAccent();
+            valueStr = deltaValid ? juce::String::formatted("%+.1f dB", (double)f.stereoDeltaDb) : juce::String("--");
+        } else if (deltaValid) {
+            valueStr = juce::String::formatted("%+.1f dB", (double)f.stereoDeltaDb);
+            if (f.stereoDeltaDb > 0.4f) {
+                statusStr = "EXPANDED";
+                valueColour = spatialAccent();
+            } else if (f.stereoDeltaDb < -0.4f) {
+                statusStr = "NARROWED";
+                valueColour = analogAccent();
+            } else {
+                statusStr = "UNITY";
+                valueColour = primaryText();
+            }
+        } else if (f.hasSignal) {
+            constexpr float kFloor = 1.0e-5f;
+            valueStr = "N/A";
+            if (!f.isInputSideMidValid) {
+                if (f.inputSideRms > kFloor && f.inputMidRms <= kFloor) {
+                    statusStr = "FROM SIDE";
+                } else if (f.inputMidRms > kFloor && f.inputSideRms <= kFloor) {
+                    statusStr = "FROM MONO";
+                } else {
+                    statusStr = "INPUT N/A";
+                }
+            } else if (f.sideRms > kFloor && f.midRms <= kFloor) {
+                statusStr = "SIDE ONLY";
+            } else {
+                statusStr = "LIMITED";
+            }
+            valueColour = secondaryText();
+        }
+
+        g.setFont(juce::Font(14.5f, juce::Font::bold));
+        g.setColour(valueColour);
+        g.drawText(valueStr, badgeCenter.x - badgeW * 0.5f, badgeCenter.y - 20.0f,
+                   badgeW, 20.0f, juce::Justification::centred);
+
+        g.setFont(juce::Font(8.5f, juce::Font::bold));
+        g.setColour(valueColour.withAlpha(0.85f));
+        g.drawText(statusStr, badgeCenter.x - badgeW * 0.5f, badgeCenter.y + 1.0f,
+                   badgeW, 12.0f, juce::Justification::centred);
+
+        if (std::abs(deltaScaleFactor - 1.0f) > 0.06f) {
+            g.setFont(juce::Font(7.5f, juce::Font::plain));
+            g.setColour(secondaryText().withAlpha(0.55f));
+            g.drawText(juce::String::formatted("COMMON SCALE x%.1f", (double)deltaScaleFactor),
+                       badgeCenter.x - badgeW * 0.5f, badgeCenter.y + 15.0f,
+                       badgeW, 10.0f, juce::Justification::centred);
+        }
     }
 
-    // 3. Right Scope: OUTPUT FIELD (Post-BBD Enhancer)
-    drawReticle(g, centerR, radius, false);
-    g.setFont(juce::Font(10.5f, juce::Font::bold));
-    g.setColour(spatialAccent());
-    g.drawText("OUTPUT SIGNAL (ENHANCED)", centerR.x - 90.0f, centerR.y - radius - 16.0f, 180.0f, 14.0f, juce::Justification::centred);
-
-    // Output Envelope ellipse
-    if (hasSignal && lastTelemetry.frame.midRms > 1e-4f) {
-        const float outRatio = lastTelemetry.frame.sideRms / lastTelemetry.frame.midRms;
-        const float outRx = juce::jlimit(4.0f, radius * 0.95f, radius * outRatio * 0.8f);
-        const float outRy = juce::jlimit(8.0f, radius * 0.90f, radius * 0.7f);
-
-        g.setColour(spatialAccent().withAlpha(0.15f));
-        g.fillEllipse(centerR.x - outRx, centerR.y - outRy, outRx * 2.0f, outRy * 2.0f);
-        g.setColour(spatialAccent().withAlpha(0.85f));
-        g.drawEllipse(centerR.x - outRx, centerR.y - outRy, outRx * 2.0f, outRy * 2.0f, 1.5f);
-    } else {
-        g.setFont(juce::Font(10.0f, juce::Font::plain));
-        g.setColour(secondaryText().withAlpha(0.5f));
-        g.drawText("NO OUTPUT", centerR.x - 40.0f, centerR.y - 6.0f, 80.0f, 12.0f, juce::Justification::centred);
+    if (bypassActive) {
+        drawBypassBadge(g, area);
     }
 }
 
@@ -378,21 +617,16 @@ void StereoFieldComponent::drawDeltaMode(juce::Graphics& g, juce::Rectangle<floa
 void StereoFieldComponent::drawReticle(juce::Graphics& g, juce::Point<float> center, float radius, bool showDiagonals) {
     using namespace Dimension5UI;
 
-    // Reticle chassis
     g.setColour(bgColour());
     g.fillEllipse(center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f);
-    g.setColour(dividerColour());
+    g.setColour(dividerColour().withAlpha(0.85f));
     g.drawEllipse(center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f, 1.0f);
 
-    // Mid axis (vertical)
-    g.setColour(dividerColour().withAlpha(0.7f));
+    g.setColour(dividerColour().withAlpha(0.55f));
     g.drawLine(center.x, center.y - radius, center.x, center.y + radius, 1.0f);
-
-    // Side axis (horizontal)
     g.drawLine(center.x - radius, center.y, center.x + radius, center.y, 1.0f);
 
     if (showDiagonals) {
-        // 45-degree diagonal L and R axes
         const float diag = radius * 0.7071f;
         juce::Path diagPath;
         diagPath.startNewSubPath(center.x - diag, center.y - diag);
@@ -403,12 +637,11 @@ void StereoFieldComponent::drawReticle(juce::Graphics& g, juce::Point<float> cen
         float dashLengths[2] = { 3.0f, 4.0f };
         juce::Path dashedDiag;
         juce::PathStrokeType(0.75f).createDashedStroke(dashedDiag, diagPath, dashLengths, 2);
-        g.setColour(dividerColour().withAlpha(0.40f));
+        g.setColour(dividerColour().withAlpha(0.28f));
         g.fillPath(dashedDiag);
 
-        // Axis reference labels
-        g.setFont(juce::Font(9.5f, juce::Font::bold));
-        g.setColour(secondaryText());
+        g.setFont(juce::Font(9.0f, juce::Font::bold));
+        g.setColour(secondaryText().withAlpha(0.70f));
         g.drawText("M", center.x - 10.0f, center.y - radius - 2.0f, 20.0f, 12.0f, juce::Justification::centred);
         g.drawText("+S", center.x + radius - 18.0f, center.y - 12.0f, 22.0f, 12.0f, juce::Justification::centred);
         g.drawText("-S", center.x - radius - 4.0f, center.y - 12.0f, 22.0f, 12.0f, juce::Justification::centred);
@@ -418,47 +651,79 @@ void StereoFieldComponent::drawReticle(juce::Graphics& g, juce::Point<float> cen
 }
 
 // ==============================================================================
-// Auxiliary Dispersion Aperture (Parameter Feedback)
+// Configuration aperture: a smooth superellipse, explicitly a config guide
 // ==============================================================================
 void StereoFieldComponent::drawAuxiliaryAperture(juce::Graphics& g, juce::Point<float> center, float radius) {
     using namespace Dimension5UI;
 
-    if (bypassActive) {
-        // In bypass, draw muted aperture with bypass badge
-        g.setFont(juce::Font(11.0f, juce::Font::bold));
-        g.setColour(warningAccent().withAlpha(0.6f));
-        g.drawText("PROCESSOR BYPASS ENGAGED",
-                   center.x - 110.0f, center.y - radius + 12.0f,
-                   220.0f, 16.0f,
-                   juce::Justification::centred);
-        return;
-    }
+    const float spreadNorm = juce::jlimit(0.0f, 1.0f, paramSpread / 2.0f);
+    const float depthNorm = juce::jlimit(0.0f, 1.0f, paramDepthMs / 4.0f);
+    const float mixNorm = juce::jlimit(0.0f, 1.0f, paramMix);
 
-    // Width scales with SPREAD parameter and MIX
-    const float baseWidth = juce::jlimit(0.12f, 0.95f, (0.20f + 0.35f * paramSpread) * (0.3f + 0.7f * paramMix));
-    const float depthMod = (paramDepthMs / 6.0f) * 0.06f * std::sin(motionPhase);
-    const float effWidth = juce::jlimit(0.08f, 0.98f, baseWidth + depthMod);
-    const float effHeight = juce::jlimit(0.20f, 0.88f, 0.45f + 0.40f * paramMix);
+    const float baseWidth = (0.22f + 0.48f * spreadNorm) * (0.35f + 0.65f * mixNorm);
+    const float breathe = 0.030f * depthNorm * std::sin(motionPhase * 2.0f);
+    const float effWidth = juce::jlimit(0.10f, 0.96f, baseWidth + breathe);
+    const float effHeight = juce::jlimit(0.22f, 0.90f, 0.48f + 0.38f * mixNorm);
 
     const float rx = radius * effWidth;
     const float ry = radius * effHeight;
 
-    // Diamond spatial aperture
     juce::Path aperture;
-    aperture.startNewSubPath(center.x, center.y - ry);
-    aperture.lineTo(center.x + rx, center.y);
-    aperture.lineTo(center.x, center.y + ry);
-    aperture.lineTo(center.x - rx, center.y);
+    constexpr int segments = 96;
+    const float exponent = 2.0f / 2.7f; // smooth between ellipse and diamond
+
+    for (int s = 0; s <= segments; ++s) {
+        const float theta = kTwoPi * (float)s / (float)segments;
+        const float c = std::cos(theta);
+        const float sn = std::sin(theta);
+        const float sx = (c >= 0.0f ? 1.0f : -1.0f) * std::pow(std::abs(c), exponent);
+        const float sy = (sn >= 0.0f ? 1.0f : -1.0f) * std::pow(std::abs(sn), exponent);
+        const float breath = 1.0f + breathe * std::sin(theta * 2.0f + motionPhase);
+        const float px = center.x + rx * sx * breath;
+        const float py = center.y - ry * sy * breath;
+
+        if (s == 0) {
+            aperture.startNewSubPath(px, py);
+        } else {
+            aperture.lineTo(px, py);
+        }
+    }
     aperture.closeSubPath();
 
-    // Soft aperture wash
-    g.setColour(spatialAccent().withAlpha(0.05f * paramMix));
+    g.setColour(spatialAccent().withAlpha(0.035f * mixNorm));
     g.fillPath(aperture);
 
-    // Dashed technical aperture contour
-    float dashLengths[2] = { 4.0f, 3.0f };
+    float dashLengths[2] = { 5.0f, 4.0f };
     juce::Path dashedAperture;
     juce::PathStrokeType(1.0f).createDashedStroke(dashedAperture, aperture, dashLengths, 2);
-    g.setColour(spatialAccent().withAlpha(0.30f * paramMix));
+    g.setColour(spatialAccent().withAlpha(0.26f * mixNorm));
     g.fillPath(dashedAperture);
+}
+
+void StereoFieldComponent::drawAutoScaleBadge(juce::Graphics& g, juce::Rectangle<float> area, float scale) {
+    using namespace Dimension5UI;
+
+    if (!(scale > 1.08f) && !(scale < 0.98f)) {
+        return;
+    }
+
+    const juce::String text = juce::String::formatted("AUTO x%.2f", (double)scale);
+    const auto badge = juce::Rectangle<float>(area.getRight() - 96.0f, area.getBottom() - 15.0f, 92.0f, 12.0f);
+
+    g.setFont(juce::Font(8.0f, juce::Font::plain));
+    g.setColour(secondaryText().withAlpha(0.55f));
+    g.drawText(text, badge, juce::Justification::centredRight);
+}
+
+void StereoFieldComponent::drawBypassBadge(juce::Graphics& g, juce::Rectangle<float> area) {
+    using namespace Dimension5UI;
+
+    const auto badge = juce::Rectangle<float>(area.getRight() - 74.0f, area.getY() + 2.0f, 70.0f, 16.0f);
+    g.setColour(warningAccent().withAlpha(0.10f));
+    g.fillRoundedRectangle(badge, 4.0f);
+    g.setColour(warningAccent().withAlpha(0.65f));
+    g.drawRoundedRectangle(badge, 4.0f, 1.0f);
+    g.setFont(juce::Font(8.5f, juce::Font::bold));
+    g.setColour(warningAccent().withAlpha(0.9f));
+    g.drawText("BYPASS", badge, juce::Justification::centred);
 }
