@@ -145,6 +145,7 @@ public:
                 return true;
             }
         }
+        hasUpdate.store(true, std::memory_order_release);
         return false;
     }
 

@@ -919,7 +919,11 @@ void Dimension5AudioProcessor::getEffectiveConfig(PluginConfig& outConfig) const
 }
 
 void Dimension5AudioProcessor::getLastAppliedConfig(PluginConfig& outConfig) const {
-    appliedSnapshotBuffer.read(outConfig);
+    for (int retry = 0; retry < 16; ++retry) {
+        if (appliedSnapshotBuffer.read(outConfig)) {
+            return;
+        }
+    }
 }
 
 uint32_t Dimension5AudioProcessor::getSaturationCount() const {

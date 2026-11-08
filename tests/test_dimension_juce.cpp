@@ -990,8 +990,14 @@ void test_interleaving_2_continuous_production_bounded_budget() {
         while (producerRunning.load(std::memory_order_relaxed)) {
             const int count = producedCount.fetch_add(1, std::memory_order_relaxed);
             setParamHostValue(proc, "depthMs", 1.0f + (float)(count % 20) * 0.1f);
+            std::this_thread::yield();
         }
     });
+
+    // Ensure producer thread has actually started and produced updates
+    while (producedCount.load(std::memory_order_acquire) < 5) {
+        processStereoTestSignal(proc);
+    }
 
     // Run 50 blocks while producer is actively hammering the queue
     for (int i = 0; i < 50; ++i) {
@@ -1001,13 +1007,14 @@ void test_interleaving_2_continuous_production_bounded_budget() {
     producerRunning.store(false, std::memory_order_release);
     producer.join();
 
-    // Now run a few more blocks to allow convergence to final value
-    for (int i = 0; i < 10; ++i) {
+    // Now run blocks to allow convergence to final value
+    for (int i = 0; i < 20; ++i) {
         processStereoTestSignal(proc);
     }
 
     Dimension5AudioProcessor::PluginConfig finalCfg;
     proc.getLastAppliedConfig(finalCfg);
+    check(producedCount.load() >= 5, "Producer executed updates");
     check(finalCfg.dspParams.depthMs >= 1.0f && finalCfg.dspParams.depthMs <= 3.0f,
           "Audio progressed without hanging and converged to a valid depthMs");
 }
