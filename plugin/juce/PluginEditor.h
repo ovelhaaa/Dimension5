@@ -23,6 +23,16 @@ public:
     bool isAdvancedVisible() const noexcept { return advancedVisible; }
     void setAdvancedVisible(bool shouldBeVisible);
 
+    // Synchronous presentation refresh used by the deterministic snapshot
+    // harness (the normal editor drives the same code from its timer).
+    void refreshPresentationNow() { timerCallback(); }
+
+    void resetMeterDisplay() {
+        inMeterLeft = inMeterRight = outMeterLeft = outMeterRight = 0.0f;
+        inPeakHoldLeft = inPeakHoldRight = outPeakHoldLeft = outPeakHoldRight = 0.0f;
+        repaint(bottomBarBounds);
+    }
+
 private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboAttachment  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
@@ -50,6 +60,8 @@ private:
     juce::Slider outputSlider;
     juce::Label inputLabel;
     juce::Label outputLabel;
+    juce::Label inputDbLabel;
+    juce::Label outputDbLabel;
     juce::TextButton advancedButton;
 
     // Advanced Drawer Components
@@ -65,15 +77,24 @@ private:
     std::unique_ptr<SliderAttachment> outputAttachment;
     std::array<std::unique_ptr<SliderAttachment>, 7> advancedAttachments;
 
-    // Meter levels (smoothed) and bounds
+    // Meter levels (smoothed), peak hold and bounds
     float inMeterLeft = 0.0f;
     float inMeterRight = 0.0f;
     float outMeterLeft = 0.0f;
     float outMeterRight = 0.0f;
+    float inPeakHoldLeft = 0.0f;
+    float inPeakHoldRight = 0.0f;
+    float outPeakHoldLeft = 0.0f;
+    float outPeakHoldRight = 0.0f;
+
     juce::Rectangle<int> inMeterBounds;
     juce::Rectangle<int> outMeterBounds;
+    juce::Rectangle<int> bottomBarBounds;
+    juce::Rectangle<int> advancedBounds;
 
     bool advancedVisible = false;
+    int heightBeforeAdvanced = 0;
+    double lastTimerMs = 0.0;
 
     void configureBottomSlider(juce::Slider& slider, juce::Label& label,
                                const juce::String& labelText, const juce::String& suffix);
@@ -83,7 +104,11 @@ private:
 
     void updateCompareButtons();
     void drawStereoMeter(juce::Graphics& g, juce::Rectangle<int> bounds,
-                         float leftVal, float rightVal, const juce::String& label);
+                         float leftVal, float rightVal,
+                         float leftPeak, float rightPeak);
+    void layoutBottomSection(juce::Rectangle<int> section, juce::Slider& slider,
+                             juce::Label& label, juce::Label& dbLabel,
+                             juce::Rectangle<int>& meterBounds);
 
     void timerCallback() override;
 

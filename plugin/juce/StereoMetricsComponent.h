@@ -5,22 +5,24 @@
 #include "Dimension5LookAndFeel.h"
 
 /**
- * StereoMetricsComponent
- * 
- * High-legibility professional metrics readout bar:
- * - CORRELATION with graduated graphic indicator (-1 to +1, silence & single-channel handling)
- * - SIDE / MID ratio in dB
- * - MONO SUM integrity in dB
- * - STEREO DELTA expansion in dB
- * 
- * Replaces the cramped 3-column text block with 4 distinct technical instrument cards.
+ * StereoMetricsComponent 2.1
+ *
+ * High-legibility measurement strip:
+ * - CORRELATION
+ * - SIDE / MID
+ * - MONO SUM
+ * - STEREO DELTA
+ *
+ * Each card separates title, numeric value, graphical indicator and validity
+ * state. Invalid, silent and undefined measurements are never presented with
+ * finite numeric values, and no judgement is made when there is no signal.
  */
 class StereoMetricsComponent final : public juce::Component {
 public:
     StereoMetricsComponent();
     ~StereoMetricsComponent() override = default;
 
-    void updateMetrics(const StereoAnalysisFrame& frame);
+    void updateMetrics(const StereoAnalysisFrame& frame, double deltaSeconds);
     void setBypassState(bool isBypassed);
 
     void paint(juce::Graphics& g) override;
@@ -30,10 +32,9 @@ private:
     StereoAnalysisFrame currentFrame {};
     bool bypassActive { false };
 
-    // Smoothed display values for visual stability
+    // Smoothed display values (time-based, FPS independent)
     float smoothedCorr { 1.0f };
     float smoothedOutSmDb { -60.0f };
-    float smoothedInSmDb { -60.0f };
     float smoothedMonoAttenDb { 0.0f };
     float smoothedStereoDeltaDb { 0.0f };
 

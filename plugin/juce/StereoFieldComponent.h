@@ -1,7 +1,7 @@
 #pragma once
 
 #include <array>
-#include <vector>
+#include <cstdint>
 #include <JuceHeader.h>
 
 #include "StereoAnalyzer.h"
@@ -9,15 +9,16 @@
 #include "Dimension5LookAndFeel.h"
 
 /**
- * StereoFieldComponent 2.0
- * 
+ * StereoFieldComponent 2.1
+ *
  * Professional Stereo Field Monitor for Dimension5 BBD Stereo Enhancer.
- * Protagonist of the user interface (~65% width).
- * 
- * Three selectable view modes:
- * - FIELD:  Dynamic phosphorescent cloud + parameter aperture/dispersion geometry
- * - VECTOR: High-precision Lissajous / Goniometer with phase & vector envelope
- * - DELTA:  Comparative Input vs Output expansion and mono compatibility
+ *
+ * All three views are driven exclusively by genuinely measured audio:
+ * - FIELD:  phosphor cloud of real output samples + configuration aperture.
+ * - VECTOR: Lissajous trajectory with strict temporal continuity (no invented
+ *           segments across dropped samples).
+ * - DELTA:  side-by-side INPUT / OUTPUT goniometers built from time-aligned
+ *           input/output sample pairs, shown with a common visual scale.
  */
 class StereoFieldComponent final : public juce::Component {
 public:
@@ -37,48 +38,50 @@ public:
     void setViewMode(ViewMode mode);
     ViewMode getViewMode() const noexcept { return currentMode; }
 
-    void resetDisplayState() {
-        for (auto& pt : cloudPoints) pt.age = 0.0f;
-        for (auto& pt : inputPoints) pt.age = 0.0f;
-        displayScale = 1.0f;
-        repaint();
-    }
+    void resetDisplayState();
 
     void paint(juce::Graphics& g) override;
     void resized() override;
 
+    // --- Inspection hooks (tests / diagnostics) ---------------------------------
+    float getDisplayScale() const noexcept { return displayScale; }
+    float getDeltaDisplayScale() const noexcept { return deltaDisplayScale; }
+    uint32_t getActiveOutputPointCount() const noexcept;
+    uint32_t getActiveInputPointCount() const noexcept;
+    uint32_t getVectorSegmentCount() const noexcept;
+    uint64_t getLastIngestedSequence() const noexcept { return lastIngestedSequence; }
+    bool isAutoScaleActive() const noexcept {
+        return displayScale > 1.08f || displayScale < 0.98f;
+    }
+
 private:
-    struct CloudPoint {
-        float x { 0.0f };
-        float y { 0.0f };
+    struct ComparisonDisplayPoint {
+        float inputSide { 0.0f };
+        float inputMid { 0.0f };
+        float outputSide { 0.0f };
+        float outputMid { 0.0f };
         float age { 0.0f };
+        uint64_t sequence { 0 };
     };
 
     ViewMode currentMode { ViewMode::Field };
 
-    // View selector pill buttons
     juce::TextButton fieldModeButton;
     juce::TextButton vectorModeButton;
     juce::TextButton deltaModeButton;
 
-    // Metrics panel embedded at bottom
     StereoMetricsComponent metricsComponent;
 
-    // Cloud & vector history (ring buffer)
-    static constexpr size_t kMaxCloudPoints = 512;
-    std::array<CloudPoint, kMaxCloudPoints> cloudPoints {};
-    size_t cloudWritePos { 0 };
-
-    // Input signal history for DELTA mode comparison
-    static constexpr size_t kMaxInputPoints = 128;
-    std::array<CloudPoint, kMaxInputPoints> inputPoints {};
-    size_t inputWritePos { 0 };
+    static constexpr size_t kMaxPoints = 1536;
+    std::array<ComparisonDisplayPoint, kMaxPoints> points {};
+    size_t pointWritePos { 0 };
+    size_t pointCount { 0 };
+    uint64_t lastIngestedSequence { 0 };
 
     StereoTelemetrySnapshot lastTelemetry {};
     bool hasSignal { false };
     bool bypassActive { false };
 
-    // Continuous time persistence tracking
     double lastUpdateTimeMs { 0.0 };
 
     // Parameter configuration geometry state
@@ -88,24 +91,36 @@ private:
     float paramMix { 1.0f };
     float motionPhase { 0.0f };
 
-    // Auto-scale envelope
+    // Visual auto-gain envelopes (independent from audio gain)
     float displayScale { 1.0f };
+    float deltaDisplayScale { 1.0f };
 
-    // Layout areas
     juce::Rectangle<int> headerBounds;
     juce::Rectangle<int> scopeBounds;
     juce::Rectangle<int> metricsBounds;
 
     void updateModeButtons();
 
+    void ingestComparisonPoints(const StereoTelemetrySnapshot& snapshot);
+    void updateVisualScale(const StereoTelemetrySnapshot& snapshot, double deltaSeconds);
+    void decayPoints(float decayFactor);
+
+    size_t chronologicalIndex(size_t k) const noexcept {
+        const size_t oldest = (pointWritePos + kMaxPoints - pointCount) % kMaxPoints;
+        return (oldest + k) % kMaxPoints;
+    }
+
     // Mode-specific rendering
     void drawFieldMode(juce::Graphics& g, juce::Rectangle<float> area);
     void drawVectorMode(juce::Graphics& g, juce::Rectangle<float> area);
     void drawDeltaMode(juce::Graphics& g, juce::Rectangle<float> area);
 
-    // Reticle & Auxiliary Geometry
     void drawReticle(juce::Graphics& g, juce::Point<float> center, float radius, bool showDiagonals);
     void drawAuxiliaryAperture(juce::Graphics& g, juce::Point<float> center, float radius);
+    void drawAutoScaleBadge(juce::Graphics& g, juce::Rectangle<float> area, float scale);
+    void drawBypassBadge(juce::Graphics& g, juce::Rectangle<float> area);
+
+    juce::Path buildVectorPath(juce::Rectangle<float> area) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(StereoFieldComponent)
 };
