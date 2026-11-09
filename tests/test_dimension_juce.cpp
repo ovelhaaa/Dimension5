@@ -2042,6 +2042,67 @@ void test_stereo_delta_common_scale() {
 }
 } // namespace
 
+void test_spatial_engine_juce_parameters_and_legacy_xml_recall() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    auto* widthParam = proc.parameters.getParameter("stereoWidth");
+    auto* bfParam = proc.parameters.getParameter("bassFocusHz");
+    check(widthParam != nullptr, "stereoWidth parameter exists in APVTS");
+    check(bfParam != nullptr, "bassFocusHz parameter exists in APVTS");
+
+    check(std::abs(proc.getFloatParam("stereoWidth") - 1.0f) < 1e-4f, "stereoWidth defaults to 1.0");
+    check(std::abs(proc.getFloatParam("bassFocusHz") - 0.0f) < 1e-4f, "bassFocusHz defaults to 0.0");
+
+    setParamHostValue(proc, "stereoWidth", 1.75f);
+    setParamHostValue(proc, "bassFocusHz", 120.0f);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.stereoWidth - 1.75f) < 1e-4f, "applied stereoWidth is 1.75");
+    check(std::abs(cfg.dspParams.bassFocusHz - 120.0f) < 1e-4f, "applied bassFocusHz is 120.0");
+
+    proc.selectCompareSlot(0);
+    proc.selectCompareSlot(1);
+    setParamHostValue(proc, "stereoWidth", 0.5f);
+    setParamHostValue(proc, "bassFocusHz", 80.0f);
+    processStereoTestSignal(proc);
+    proc.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.stereoWidth - 0.5f) < 1e-4f, "slot B stereoWidth is 0.5");
+    check(std::abs(cfg.dspParams.bassFocusHz - 80.0f) < 1e-4f, "slot B bassFocusHz is 80.0");
+
+    proc.selectCompareSlot(0);
+    processStereoTestSignal(proc);
+    proc.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.stereoWidth - 1.75f) < 1e-4f, "slot A stereoWidth recalled as 1.75");
+    check(std::abs(cfg.dspParams.bassFocusHz - 120.0f) < 1e-4f, "slot A bassFocusHz recalled as 120.0");
+
+    juce::MemoryBlock destData;
+    proc.getStateInformation(destData);
+    std::unique_ptr<juce::XmlElement> xml(proc.getXmlFromBinary(destData.getData(), (int)destData.getSize()));
+    check(xml != nullptr, "valid xml");
+    for (int i = xml->getNumChildElements() - 1; i >= 0; --i) {
+        auto* child = xml->getChildElement(i);
+        if (child->getStringAttribute("id") == "stereoWidth" || child->getStringAttribute("id") == "bassFocusHz") {
+            xml->removeChildElement(child, true);
+        }
+    }
+    juce::MemoryBlock legacyData;
+    proc.copyXmlToBinary(*xml, legacyData);
+
+    setParamHostValue(proc, "stereoWidth", 0.2f);
+    setParamHostValue(proc, "bassFocusHz", 250.0f);
+    processStereoTestSignal(proc);
+
+    proc.setStateInformation(legacyData.getData(), (int)legacyData.getSize());
+    processStereoTestSignal(proc);
+
+    proc.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.stereoWidth - 1.0f) < 1e-4f, "legacy state recall defaults stereoWidth to 1.0");
+    check(std::abs(cfg.dspParams.bassFocusHz - 0.0f) < 1e-4f, "legacy state recall defaults bassFocusHz to 0.0");
+}
+
 int main() {
     juce::ScopedJuceInitialiser_GUI initialiser;
 
@@ -2198,6 +2259,9 @@ int main() {
 
         std::cout << "[JUCE Tests] 51. test_stereo_delta_common_scale...\n";
         test_stereo_delta_common_scale();
+
+        std::cout << "[JUCE Tests] 52. test_spatial_engine_juce_parameters_and_legacy_xml_recall...\n";
+        test_spatial_engine_juce_parameters_and_legacy_xml_recall();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;

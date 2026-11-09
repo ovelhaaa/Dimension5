@@ -23,14 +23,16 @@ struct AdvancedSpec {
     const char* suffix;
 };
 
-constexpr AdvancedSpec kAdvancedSpecs[7] = {
+constexpr AdvancedSpec kAdvancedSpecs[9] = {
     { "baseDelayMs",     "BASE DELAY", " ms" },
     { "hpfHz",           "LOW FOCUS",  " Hz" },
     { "analogAmount",    "ANALOG",     "" },
     { "companderAmount", "COMPANDER",  "" },
+    { "stereoWidth",     "STEREO WIDTH", "x" },
     { "dryGain",         "DRY",        "x" },
     { "wetDirectGain",   "WET DIRECT", "x" },
-    { "wetCrossGain",    "WET CROSS",  "x" }
+    { "wetCrossGain",    "WET CROSS",  "x" },
+    { "bassFocusHz",     "BASS FOCUS", " Hz" }
 };
 
 float meterToNormalised(float value) {
@@ -175,9 +177,22 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
         const juce::String sfx = kAdvancedSpecs[i].suffix;
         advancedSliders[i].setTextValueSuffix("");
         advancedSliders[i].setNumDecimalPlacesToDisplay(2);
-        advancedSliders[i].textFromValueFunction = [sfx](double val) {
-            return juce::String(val, 2) + sfx;
-        };
+        const juce::String specId = kAdvancedSpecs[i].id;
+        if (specId == "bassFocusHz") {
+            advancedSliders[i].setNumDecimalPlacesToDisplay(0);
+            advancedSliders[i].textFromValueFunction = [](double val) {
+                if (val <= 0.5) return juce::String("OFF");
+                return juce::String(juce::roundToInt(val)) + " Hz";
+            };
+            advancedSliders[i].valueFromTextFunction = [](const juce::String& text) {
+                if (text.trim().equalsIgnoreCase("off")) return 0.0;
+                return text.getDoubleValue();
+            };
+        } else {
+            advancedSliders[i].textFromValueFunction = [sfx](double val) {
+                return juce::String(val, 2) + sfx;
+            };
+        }
         advancedSliders[i].updateText();
     }
 
@@ -455,12 +470,12 @@ void Dimension5AudioProcessorEditor::resized() {
         const int numSliders = (int)advancedSliders.size();
         const int colGap = 32;
         const int colW = juce::jmax(150, (advArea.getWidth() - colGap) / 2);
-        const int rowH = juce::jlimit(26, 34, advArea.getHeight() / 4 - 4);
+        const int rowH = juce::jlimit(22, 30, advArea.getHeight() / 5 - 4);
         const int labelW = juce::jlimit(78, 118, juce::roundToInt((float)colW * 0.34f));
 
         for (int i = 0; i < numSliders; ++i) {
-            const int col = (i < 4) ? 0 : 1;
-            const int rowIdx = (i < 4) ? i : (i - 4);
+            const int col = (i < 5) ? 0 : 1;
+            const int rowIdx = (i < 5) ? i : (i - 5);
             juce::Rectangle<int> row(advArea.getX() + col * (colW + colGap),
                                      advArea.getY() + rowIdx * (rowH + 4),
                                      colW, rowH);

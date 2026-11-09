@@ -67,15 +67,15 @@ private:
     // Advanced Drawer Components
     juce::Label advancedTitleLabel;
     juce::Label advancedHintLabel;
-    std::array<juce::Slider, 7> advancedSliders;
-    std::array<juce::Label, 7> advancedLabels;
+    std::array<juce::Slider, 9> advancedSliders;
+    std::array<juce::Label, 9> advancedLabels;
 
     // Attachments
     std::unique_ptr<ComboAttachment> modeAttachment;
     std::unique_ptr<ButtonAttachment> bypassAttachment;
     std::unique_ptr<SliderAttachment> inputAttachment;
     std::unique_ptr<SliderAttachment> outputAttachment;
-    std::array<std::unique_ptr<SliderAttachment>, 7> advancedAttachments;
+    std::array<std::unique_ptr<SliderAttachment>, 9> advancedAttachments;
 
     // Meter levels (smoothed), peak hold and bounds
     float inMeterLeft = 0.0f;

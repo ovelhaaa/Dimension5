@@ -104,6 +104,7 @@ static void dimension_clear_state(DimensionDSP* d) {
     d->compEnvL = d->compEnvR = 0.0f;
     d->expEnvL = d->expEnvR = 0.0f;
     d->bbdStateL = d->bbdStateR = 0.0f;
+    d->bassFocusState = 0.0f;
 }
 
 static DimensionParams dimension_default_params(float sampleRate) {
@@ -125,6 +126,8 @@ static DimensionParams dimension_default_params(float sampleRate) {
     p.companderAmount = 0.35f;
     p.noiseAmount = 0.0f;
     p.width = 1.0f;
+    p.stereoWidth = 1.0f;
+    p.bassFocusHz = 0.0f;
     return p;
 }
 
@@ -196,10 +199,13 @@ static inline void dimension_sync_smoothers(DimensionDSP* d) {
     d->smoothInputGain = d->params.inputGain;
     d->smoothOutputGain = d->params.outputGain;
     d->smoothWidth = d->params.width;
+    d->smoothStereoWidth = d->params.stereoWidth;
     d->smoothHpfHz = d->params.hpfHz;
     d->smoothLpfHz = d->params.lpfHz;
     d->smoothAnalogAmount = d->params.analogAmount;
     d->smoothCompanderAmount = d->params.companderAmount;
+    d->smoothBassFocusHz = (d->params.bassFocusHz > 0.0f) ? d->params.bassFocusHz : 120.0f;
+    d->smoothBassFocusAmount = (d->params.bassFocusHz > 0.0f) ? 1.0f : 0.0f;
 }
 
 void Dimension_Init(DimensionDSP* d, float sampleRate) {
@@ -249,6 +255,8 @@ void Dimension_SetParams(DimensionDSP* d, const DimensionParams* p) {
     d->params.companderAmount = dimension_sanitize_param(d->params.companderAmount, 0.35f, 0.0f, 1.0f);
     d->params.noiseAmount = dimension_sanitize_param(d->params.noiseAmount, 0.0f, 0.0f, 1.0f);
     d->params.width = dimension_sanitize_param(d->params.width, 1.0f, 0.0f, 2.0f);
+    d->params.stereoWidth = dimension_sanitize_param(d->params.stereoWidth, 1.0f, 0.0f, 2.0f);
+    d->params.bassFocusHz = dimension_sanitize_param(d->params.bassFocusHz, 0.0f, 0.0f, 500.0f);
     if (d->params.mode != DIMENSION_MODE_CUSTOM) {
         dimension_apply_mode_preset(&d->params, d->params.mode);
     }
@@ -293,7 +301,7 @@ void Dimension_ProcessBlock(
     const float atkC = expf(-1.0f / (0.005f * sr));
     const float relC = expf(-1.0f / (0.080f * sr));
 
-    /* Block-rate smoother for filter cutoffs and analog saturation.
+    /* Block-rate smoother for filter cutoffs, analog saturation, and bass focus.
      * Derived from effective block frame count n to guarantee consistent
      * time constant (~30 ms) across blocks of 16, 32, 64 or partial frames.
      * Computes only one exponential once per block. */
@@ -303,13 +311,24 @@ void Dimension_ProcessBlock(
     d->smoothLpfHz += blockSmoothCoeff * (d->params.lpfHz - d->smoothLpfHz);
     d->smoothAnalogAmount += blockSmoothCoeff * (d->params.analogAmount - d->smoothAnalogAmount);
 
+    const float targetBassFocusAmount = (d->params.bassFocusHz > 0.0f) ? 1.0f : 0.0f;
+    const float targetBassFocusHz = (d->params.bassFocusHz > 0.0f) ? d->params.bassFocusHz : d->smoothBassFocusHz;
+    d->smoothBassFocusAmount += blockSmoothCoeff * (targetBassFocusAmount - d->smoothBassFocusAmount);
+    d->smoothBassFocusHz += blockSmoothCoeff * (targetBassFocusHz - d->smoothBassFocusHz);
+    if (d->smoothBassFocusAmount < 1e-4f && targetBassFocusAmount == 0.0f) {
+        d->smoothBassFocusAmount = 0.0f;
+        d->bassFocusState = 0.0f;
+    }
+    const float bassFocusAlpha = one_pole_alpha(d->smoothBassFocusHz, sr);
+    const float bassFocusAmount = d->smoothBassFocusAmount;
+
     const float hpfAlpha = one_pole_alpha(d->smoothHpfHz, sr);
     const float lpfAlpha = one_pole_alpha(d->smoothLpfHz, sr);
     const float analogAmount = dimension_clampf(d->smoothAnalogAmount, 0.0f, 1.0f);
     const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - analogAmount), sr);
 
     for (uint32_t i = 0U; i < n; ++i) {
-        /* Per-sample parameter smoothing (rate, depth, delay, matrix gains, width, input/output gains) */
+        /* Per-sample parameter smoothing (rate, depth, delay, matrix gains, width, stereoWidth, input/output gains) */
         d->smoothRateHz += smoothCoeff * (d->params.rateHz - d->smoothRateHz);
         d->smoothDepthMs += smoothCoeff * (d->params.depthMs - d->smoothDepthMs);
         d->smoothBaseDelayMs += smoothCoeff * (d->params.baseDelayMs - d->smoothBaseDelayMs);
@@ -319,12 +338,17 @@ void Dimension_ProcessBlock(
         d->smoothInputGain += smoothCoeff * (d->params.inputGain - d->smoothInputGain);
         d->smoothOutputGain += smoothCoeff * (d->params.outputGain - d->smoothOutputGain);
         d->smoothWidth += smoothCoeff * (d->params.width - d->smoothWidth);
+        d->smoothStereoWidth += smoothCoeff * (d->params.stereoWidth - d->smoothStereoWidth);
+        if (fabsf(d->smoothStereoWidth - 1.0f) < 1e-5f && d->params.stereoWidth == 1.0f) {
+            d->smoothStereoWidth = 1.0f;
+        }
         d->smoothCompanderAmount += smoothCoeff * (d->params.companderAmount - d->smoothCompanderAmount);
 
         const float inGain = dimension_clampf(d->smoothInputGain, 0.0f, 8.0f);
         const float outGain = dimension_clampf(d->smoothOutputGain, 0.0f, 8.0f);
         const float gDry = dimension_clampf(d->smoothDryGain, 0.0f, 2.0f);
         const float width = dimension_clampf(d->smoothWidth, 0.0f, 2.0f);
+        const float stereoWidth = dimension_clampf(d->smoothStereoWidth, 0.0f, 2.0f);
 
         float xL = dimension_sanitize_sample(inL[i]) * inGain;
         float xR = dimension_sanitize_sample(inR[i]) * inGain;
@@ -399,6 +423,24 @@ void Dimension_ProcessBlock(
 
         float yL = gDry * dryL + gWet1 * wetL - gWet2 * wetR;
         float yR = gDry * dryR + gWet1 * wetR - gWet2 * wetL;
+
+        /* Spatial Engine 2.0: True Stereo Width and Bass Focus (Mid/Side processing)
+         * Exact bit-neutral bypass when stereoWidth == 1.0 and bassFocusAmount == 0.0f.
+         * The Mid component (0.5*(yL+yR)) is mathematically invariant in the linear domain. */
+        if (stereoWidth != 1.0f || bassFocusAmount > 0.0f) {
+            const float mid = 0.5f * (yL + yR);
+            const float side = 0.5f * (yL - yR);
+
+            d->bassFocusState += bassFocusAlpha * (side - d->bassFocusState);
+            if (fabsf(d->bassFocusState) < 1.0e-15f) {
+                d->bassFocusState = 0.0f;
+            }
+            const float sideFiltered = side - bassFocusAmount * d->bassFocusState;
+            const float processedSide = sideFiltered * stereoWidth;
+
+            yL = mid + processedSide;
+            yR = mid - processedSide;
+        }
 
         yL *= outGain;
         yR *= outGain;

@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define DIMENSION_PARAM_SCHEMA_VERSION 1U
+#define DIMENSION_PARAM_SCHEMA_VERSION 2U
 
 typedef enum DimensionParamId {
     DIMENSION_PARAM_INPUT_GAIN = 0,
@@ -22,6 +22,8 @@ typedef enum DimensionParamId {
     DIMENSION_PARAM_ANALOG_AMOUNT,
     DIMENSION_PARAM_COMPANDER_AMOUNT,
     DIMENSION_PARAM_WIDTH,
+    DIMENSION_PARAM_STEREO_WIDTH,
+    DIMENSION_PARAM_BASS_FOCUS_HZ,
     DIMENSION_PARAM_COUNT
 } DimensionParamId;
 
@@ -55,7 +57,9 @@ static const DimensionParamDescriptor DimensionParamDescriptors[DIMENSION_PARAM_
     { DIMENSION_PARAM_LPF_HZ, "lpfHz", "Color", "Hz", 2000.0f, 12000.0f, 8000.0f, DIMENSION_PARAM_ROLE_PRIMARY, 1U },
     { DIMENSION_PARAM_ANALOG_AMOUNT, "analogAmount", "Analog", "", 0.0f, 1.0f, 0.35f, DIMENSION_PARAM_ROLE_PRIMARY, 1U },
     { DIMENSION_PARAM_COMPANDER_AMOUNT, "companderAmount", "Compander", "", 0.0f, 1.0f, 0.35f, DIMENSION_PARAM_ROLE_ADVANCED, 1U },
-    { DIMENSION_PARAM_WIDTH, "width", "Width", "", 0.0f, 2.0f, 1.0f, DIMENSION_PARAM_ROLE_PRIMARY, 1U }
+    { DIMENSION_PARAM_WIDTH, "width", "Width", "", 0.0f, 2.0f, 1.0f, DIMENSION_PARAM_ROLE_PRIMARY, 1U },
+    { DIMENSION_PARAM_STEREO_WIDTH, "stereoWidth", "Stereo Width", "x", 0.0f, 2.0f, 1.0f, DIMENSION_PARAM_ROLE_PRIMARY, 1U },
+    { DIMENSION_PARAM_BASS_FOCUS_HZ, "bassFocusHz", "Bass Focus", "Hz", 0.0f, 300.0f, 0.0f, DIMENSION_PARAM_ROLE_ADVANCED, 1U }
 };
 
 static inline const DimensionParamDescriptor* Dimension_GetParamDescriptor(DimensionParamId id) {

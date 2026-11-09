@@ -327,10 +327,12 @@ static int test_regression_signal_metrics(void) {
 }
 
 static int test_parameter_schema_is_stable(void) {
-    CHECK(DIMENSION_PARAM_SCHEMA_VERSION == 1U);
-    CHECK(DIMENSION_PARAM_COUNT == 13);
+    CHECK(DIMENSION_PARAM_SCHEMA_VERSION == 2U);
+    CHECK(DIMENSION_PARAM_COUNT == 15);
     CHECK(DIMENSION_PARAM_INPUT_GAIN == 0);
     CHECK(DIMENSION_PARAM_WIDTH == 12);
+    CHECK(DIMENSION_PARAM_STEREO_WIDTH == 13);
+    CHECK(DIMENSION_PARAM_BASS_FOCUS_HZ == 14);
 
     for (uint32_t i = 0U; i < (uint32_t)DIMENSION_PARAM_COUNT; ++i) {
         const DimensionParamDescriptor* desc = Dimension_GetParamDescriptor((DimensionParamId)i);
@@ -659,6 +661,234 @@ static int test_mono_in_stereo_out_decorrelation(void) {
     return 0;
 }
 
+static int test_spatial_engine_neutrality(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    Dimension_SetMode(&d, DIMENSION_MODE_I);
+
+    DimensionParams p = d.params;
+    CHECK(p.stereoWidth == 1.0f);
+    CHECK(p.bassFocusHz == 0.0f);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        inL[i] = 0.1f * sinf(2.0f * PI_F * 440.0f * (float)i / TEST_SR);
+        inR[i] = 0.05f * cosf(2.0f * PI_F * 880.0f * (float)i / TEST_SR);
+    }
+    Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        CHECK(isfinite(outL[i]) && isfinite(outR[i]));
+    }
+    return 0;
+}
+
+static int test_spatial_engine_side_control(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    Dimension_SetMode(&d, DIMENSION_MODE_I);
+    DimensionParams p;
+    Dimension_GetParams(&d, &p);
+    p.stereoWidth = 0.0f;
+    Dimension_SetParams(&d, &p);
+    Dimension_Reset(&d);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    for (uint32_t n = 0; n < 4800; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            inL[i] = 0.15f * sinf(2.0f * PI_F * 440.0f * (float)(n + i) / TEST_SR);
+            inR[i] = 0.10f * cosf(2.0f * PI_F * 330.0f * (float)(n + i) / TEST_SR);
+        }
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float side = 0.5f * (outL[i] - outR[i]);
+            CHECK(fabsf(side) < 1e-4f);
+        }
+    }
+
+    DimensionDSP d1, d2;
+    Dimension_Init(&d1, TEST_SR);
+    Dimension_SetMode(&d1, DIMENSION_MODE_I);
+    p.stereoWidth = 1.0f;
+    Dimension_SetParams(&d1, &p);
+    Dimension_Reset(&d1);
+
+    Dimension_Init(&d2, TEST_SR);
+    Dimension_SetMode(&d2, DIMENSION_MODE_I);
+    p.stereoWidth = 2.0f;
+    Dimension_SetParams(&d2, &p);
+    Dimension_Reset(&d2);
+
+    double sideEnergy1 = 0.0, sideEnergy2 = 0.0;
+    for (uint32_t n = 0; n < 4800; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            inL[i] = 0.15f * sinf(2.0f * PI_F * 440.0f * (float)(n + i) / TEST_SR);
+            inR[i] = 0.10f * cosf(2.0f * PI_F * 330.0f * (float)(n + i) / TEST_SR);
+        }
+        float outL1[BLOCK], outR1[BLOCK], outL2[BLOCK], outR2[BLOCK];
+        Dimension_ProcessBlock(&d1, inL, inR, outL1, outR1, BLOCK);
+        Dimension_ProcessBlock(&d2, inL, inR, outL2, outR2, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float side1 = 0.5f * (outL1[i] - outR1[i]);
+            const float side2 = 0.5f * (outL2[i] - outR2[i]);
+            sideEnergy1 += (double)side1 * (double)side1;
+            sideEnergy2 += (double)side2 * (double)side2;
+        }
+    }
+    CHECK(sideEnergy1 > 0.001);
+    const double ratio = sideEnergy2 / sideEnergy1;
+    CHECK(ratio > 3.9 && ratio < 4.1);
+    return 0;
+}
+
+static int test_spatial_engine_mid_integrity(void) {
+    DimensionDSP dRef, dWidth0, dWidth2, dBassFocus;
+    Dimension_Init(&dRef, TEST_SR);
+    Dimension_SetMode(&dRef, DIMENSION_MODE_II);
+
+    Dimension_Init(&dWidth0, TEST_SR);
+    Dimension_SetMode(&dWidth0, DIMENSION_MODE_II);
+    DimensionParams p;
+    Dimension_GetParams(&dWidth0, &p);
+    p.stereoWidth = 0.0f;
+    Dimension_SetParams(&dWidth0, &p);
+
+    Dimension_Init(&dWidth2, TEST_SR);
+    Dimension_SetMode(&dWidth2, DIMENSION_MODE_II);
+    p.stereoWidth = 2.0f;
+    Dimension_SetParams(&dWidth2, &p);
+
+    Dimension_Init(&dBassFocus, TEST_SR);
+    Dimension_SetMode(&dBassFocus, DIMENSION_MODE_II);
+    p.stereoWidth = 1.5f;
+    p.bassFocusHz = 150.0f;
+    Dimension_SetParams(&dBassFocus, &p);
+
+    float inL[BLOCK], inR[BLOCK];
+    float oLRef[BLOCK], oRRef[BLOCK];
+    float oL0[BLOCK], oR0[BLOCK];
+    float oL2[BLOCK], oR2[BLOCK];
+    float oLBF[BLOCK], oRBF[BLOCK];
+
+    for (uint32_t n = 0; n < 4800; n += BLOCK) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            inL[i] = 0.12f * sinf(2.0f * PI_F * 500.0f * (float)(n + i) / TEST_SR);
+            inR[i] = 0.08f * cosf(2.0f * PI_F * 750.0f * (float)(n + i) / TEST_SR);
+        }
+        Dimension_ProcessBlock(&dRef, inL, inR, oLRef, oRRef, BLOCK);
+        Dimension_ProcessBlock(&dWidth0, inL, inR, oL0, oR0, BLOCK);
+        Dimension_ProcessBlock(&dWidth2, inL, inR, oL2, oR2, BLOCK);
+        Dimension_ProcessBlock(&dBassFocus, inL, inR, oLBF, oRBF, BLOCK);
+
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float midRef = 0.5f * (oLRef[i] + oRRef[i]);
+            const float mid0   = 0.5f * (oL0[i] + oR0[i]);
+            const float mid2   = 0.5f * (oL2[i] + oR2[i]);
+            const float midBF  = 0.5f * (oLBF[i] + oRBF[i]);
+            CHECK(fabsf(midRef - mid0) < 1e-5f);
+            CHECK(fabsf(midRef - mid2) < 1e-5f);
+            CHECK(fabsf(midRef - midBF) < 1e-5f);
+        }
+    }
+    return 0;
+}
+
+static int test_spatial_engine_bass_focus_response(void) {
+    const float freqs[] = { 40.0f, 60.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 5000.0f };
+    const size_t numFreqs = sizeof(freqs) / sizeof(freqs[0]);
+
+    for (size_t f = 0; f < numFreqs; ++f) {
+        const float freq = freqs[f];
+        DimensionDSP dOff, dOn;
+        Dimension_Init(&dOff, TEST_SR);
+        Dimension_SetMode(&dOff, DIMENSION_MODE_CUSTOM);
+        DimensionParams p;
+        Dimension_GetParams(&dOff, &p);
+        p.dryGain = 0.0f;
+        p.wetDirectGain = 1.0f;
+        p.wetCrossGain = 0.0f;
+        p.depthMs = 0.0f;
+        p.analogAmount = 0.0f;
+        p.companderAmount = 0.0f;
+        p.bassFocusHz = 0.0f;
+        Dimension_SetParams(&dOff, &p);
+        Dimension_Reset(&dOff);
+
+        Dimension_Init(&dOn, TEST_SR);
+        p.bassFocusHz = 120.0f;
+        Dimension_SetParams(&dOn, &p);
+        Dimension_Reset(&dOn);
+
+        double sideEnergyOff = 0.0, sideEnergyOn = 0.0;
+        float inL[BLOCK], inR[BLOCK], oLOff[BLOCK], oROff[BLOCK], oLOn[BLOCK], oROn[BLOCK];
+
+        for (uint32_t n = 0; n < 4800; n += BLOCK) {
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                const float s = 0.15f * sinf(2.0f * PI_F * freq * (float)(n + i) / TEST_SR);
+                inL[i] = s;
+                inR[i] = -s;
+            }
+            Dimension_ProcessBlock(&dOff, inL, inR, oLOff, oROff, BLOCK);
+            Dimension_ProcessBlock(&dOn, inL, inR, oLOn, oROn, BLOCK);
+            if (n >= 1920) {
+                for (uint32_t i = 0; i < BLOCK; ++i) {
+                    const float sOff = 0.5f * (oLOff[i] - oROff[i]);
+                    const float sOn  = 0.5f * (oLOn[i] - oROn[i]);
+                    sideEnergyOff += (double)sOff * (double)sOff;
+                    sideEnergyOn  += (double)sOn * (double)sOn;
+                }
+            }
+        }
+        const double powerRatio = sideEnergyOn / sideEnergyOff;
+        const double db = 10.0 * log10(powerRatio);
+
+        if (freq == 40.0f) {
+            CHECK(db < -8.0);
+        } else if (freq == 60.0f) {
+            CHECK(db < -5.5 && db > -9.0);
+        } else if (freq >= 1000.0f) {
+            CHECK(db > -0.2);
+        }
+    }
+    return 0;
+}
+
+static int test_spatial_engine_automation_smoothness(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    Dimension_SetMode(&d, DIMENSION_MODE_I);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        inL[i] = 0.15f;
+        inR[i] = 0.10f;
+    }
+
+    Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+
+    DimensionParams p = d.params;
+    p.stereoWidth = 2.0f;
+    p.bassFocusHz = 250.0f;
+    Dimension_SetParams(&d, &p);
+
+    float prevL = outL[BLOCK - 1];
+    float prevR = outR[BLOCK - 1];
+    float maxDelta = 0.0f;
+
+    for (uint32_t b = 0; b < 20; ++b) {
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float dL = fabsf(outL[i] - prevL);
+            const float dR = fabsf(outR[i] - prevR);
+            if (dL > maxDelta) maxDelta = dL;
+            if (dR > maxDelta) maxDelta = dR;
+            prevL = outL[i];
+            prevR = outR[i];
+        }
+    }
+    CHECK(maxDelta < 0.02f);
+    return 0;
+}
+
 int main(void) {
 #define RUN_TEST(fn) do { if ((fn)() != 0) return 1; } while (0)
     RUN_TEST(test_zero_input_long_no_nan_low_dc);
@@ -677,6 +907,11 @@ int main(void) {
     RUN_TEST(test_smoothed_controls_transitions);
     RUN_TEST(test_mode_to_custom_preserves_audio_and_params);
     RUN_TEST(test_mono_in_stereo_out_decorrelation);
+    RUN_TEST(test_spatial_engine_neutrality);
+    RUN_TEST(test_spatial_engine_side_control);
+    RUN_TEST(test_spatial_engine_mid_integrity);
+    RUN_TEST(test_spatial_engine_bass_focus_response);
+    RUN_TEST(test_spatial_engine_automation_smoothness);
     puts("test_dimension_core: OK");
     return 0;
 }
