@@ -27,6 +27,17 @@ jobs:
         with:
           name: dimension5-wav-${{ matrix.compiler }}
           path: out/*.wav
+      - name: Spatial Engine 2.0 Full Validation
+        if: matrix.compiler == 'gcc'
+        run: ./build/dimension5_spatial_engine_validation --full tests/test_vectors/legacy_baseline docs/audio/spatial-engine-2.0
+      - name: Upload Spatial Engine Validation Report
+        if: matrix.compiler == 'gcc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dimension5-spatial-validation
+          path: |
+            docs/audio/spatial-engine-2.0/*.wav
+            docs/audio/spatial-engine-2.0/*.json
 
   web:
     name: Web/WASM
@@ -85,3 +96,9 @@ jobs:
         with:
           name: dimension5-vst3-windows
           path: build-plugin/plugin/juce/Dimension5Plugin_artefacts/Release/VST3/*.vst3
+
+      - name: Upload UI Snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: dimension5-ui21-snapshots
+          path: docs/snapshots/ui21/*.png

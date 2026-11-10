@@ -69,3 +69,5 @@ compile_commands.json
 out/
 external/
 docs/audio/
+tests/test_vectors/legacy_baseline/*.bin
+tests/test_vectors/legacy_baseline/*.wav
