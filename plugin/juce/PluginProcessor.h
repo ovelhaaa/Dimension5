@@ -14,6 +14,7 @@ extern "C" {
 }
 
 #include "StereoAnalyzer.h"
+#include "SnapshotBuffer.h"
 
 namespace dimension_ipc {
 
@@ -166,116 +167,7 @@ private:
     alignas(64) std::atomic<bool> hasUpdate { false };
 };
 
-/**
- * Robust snapshot buffer for single-writer (audio thread) multi-reader (inspection).
- * Guarantees:
- * 1. Writer claims a slot with compare_exchange(0, kBusyWriteBit). If any reader is reading
- *    (state > 0) or slot is currently published, writer skips it.
- * 2. If all candidate slots are unavailable, writer safely preserves the last published snapshot.
- * 3. Reader atomically reserves the published slot before reading (state -> state + 1),
- *    preventing writer reuse during read.
- * 4. Deterministic test hooks allow unit tests to verify race window immunity.
- */
-template <typename T, size_t NumSlots = 8>
-class SnapshotBuffer {
-public:
-    static_assert(NumSlots >= 3, "NumSlots must be >= 3");
-
-    SnapshotBuffer() = default;
-
-    // Test hooks (empty in production, set by tests to force interleavings)
-    std::function<void(uint32_t slot)> testHookPreReserve { nullptr };
-    std::function<void(uint32_t slot)> testHookDuringRead { nullptr };
-
-    bool publish(const T& val, uint64_t gen = 0) {
-        const uint64_t effectiveGen = (gen != 0) ? gen : (autoGen.fetch_add(1, std::memory_order_relaxed) + 1);
-        const uint32_t cur = currentPublishedSlot.load(std::memory_order_relaxed);
-        for (size_t i = 0; i < NumSlots; ++i) {
-            const uint32_t cand = (uint32_t)((cur + 1 + i) % NumSlots);
-            if (cand == cur) {
-                continue; // Do not overwrite currently published slot
-            }
-            uint32_t expected = 0;
-            if (slots[cand].state.compare_exchange_strong(expected, kBusyWriteBit,
-                                                         std::memory_order_acquire,
-                                                         std::memory_order_relaxed)) {
-                slots[cand].data = val;
-                slots[cand].generation.store(effectiveGen, std::memory_order_release);
-                slots[cand].state.store(0, std::memory_order_release);
-
-                // Monotonic generation ordering: never allow older generation to overwrite newer published slot
-                uint64_t currentLatestGen = latestPublishedGeneration.load(std::memory_order_acquire);
-                while (effectiveGen >= currentLatestGen) {
-                    if (latestPublishedGeneration.compare_exchange_weak(currentLatestGen, effectiveGen,
-                                                                        std::memory_order_release,
-                                                                        std::memory_order_acquire)) {
-                        currentPublishedSlot.store(cand, std::memory_order_release);
-                        break;
-                    }
-                }
-                return true;
-            }
-        }
-        // Policy: preserve the last published snapshot if all other slots are busy
-        return false;
-    }
-
-    bool read(T& out) const {
-        uint64_t ignoredGen = 0;
-        return read(out, ignoredGen);
-    }
-
-    bool read(T& out, uint64_t& outGen) const {
-        for (int attempt = 0; attempt < 8; ++attempt) {
-            const uint32_t idx = currentPublishedSlot.load(std::memory_order_acquire);
-
-            if (testHookPreReserve) {
-                testHookPreReserve(idx);
-            }
-
-            uint32_t s = slots[idx].state.load(std::memory_order_acquire);
-            if (s & kBusyWriteBit) {
-                continue;
-            }
-
-            if (slots[idx].state.compare_exchange_weak(s, s + 1,
-                                                      std::memory_order_acquire,
-                                                      std::memory_order_relaxed)) {
-                if (testHookDuringRead) {
-                    testHookDuringRead(idx);
-                }
-
-                out = slots[idx].data;
-                outGen = slots[idx].generation.load(std::memory_order_acquire);
-                slots[idx].state.fetch_sub(1, std::memory_order_release);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void forceSlotBusyForTest(size_t slot, bool busy) {
-        slots[slot % NumSlots].state.store(busy ? kBusyWriteBit : 0, std::memory_order_release);
-    }
-
-    uint64_t getLatestPublishedGeneration() const {
-        return latestPublishedGeneration.load(std::memory_order_acquire);
-    }
-
-private:
-    static constexpr uint32_t kBusyWriteBit = 0x80000000U;
-
-    struct alignas(64) Slot {
-        T data {};
-        std::atomic<uint64_t> generation { 0 };
-        mutable std::atomic<uint32_t> state { 0 };
-    };
-
-    alignas(64) Slot slots[NumSlots];
-    alignas(64) std::atomic<uint32_t> currentPublishedSlot { 0 };
-    alignas(64) std::atomic<uint64_t> latestPublishedGeneration { 0 };
-    alignas(64) std::atomic<uint64_t> autoGen { 0 };
-};
+// Robust multi-producer multi-reader snapshot buffer is defined in SnapshotBuffer.h
 
 } // namespace dimension_ipc
 
