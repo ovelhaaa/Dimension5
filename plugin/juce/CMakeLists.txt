@@ -81,5 +81,10 @@ target_link_libraries(dimension5_snapshot_standalone_tests
   PRIVATE
     Threads::Threads)
 
+if(DIMENSION5_ENABLE_TSAN AND NOT MSVC)
+  target_compile_options(dimension5_snapshot_standalone_tests PRIVATE -fsanitize=thread)
+  target_link_options(dimension5_snapshot_standalone_tests PRIVATE -fsanitize=thread)
+endif()
+
 add_test(NAME dimension5_snapshot_standalone_tests COMMAND dimension5_snapshot_standalone_tests)
 

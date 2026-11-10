@@ -208,7 +208,7 @@ void Dimension5AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBl
     bypassEffectLevel = activeConfig.bypassTarget;
     smoothMix = activeConfig.mix;
 
-    appliedSnapshotBuffer.publish(activeConfig);
+    appliedSnapshotBuffer.publish(activeConfig, lastAppliedGeneration);
 }
 
 void Dimension5AudioProcessor::releaseResources() {
@@ -278,7 +278,7 @@ void Dimension5AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
             Dimension_SetMode(&dsp, activeConfig.dspParams.mode);
         }
         Dimension_SetParams(&dsp, &activeConfig.dspParams);
-        appliedSnapshotBuffer.publish(activeConfig);
+        appliedSnapshotBuffer.publish(activeConfig, lastAppliedGeneration);
     }
 
     const float targetMix = activeConfig.mix;

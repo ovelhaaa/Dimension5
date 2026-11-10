@@ -3,6 +3,7 @@ project(Dimension5 VERSION 0.1.0 LANGUAGES C)
 
 option(DIMENSION5_ENABLE_ASAN "Enable AddressSanitizer for host builds" OFF)
 option(DIMENSION5_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer for host builds" OFF)
+option(DIMENSION5_ENABLE_TSAN "Enable ThreadSanitizer for host builds" OFF)
 option(DIMENSION5_ENABLE_FAST_MATH "Enable fast-math optimizations explicitly" OFF)
 option(DIMENSION5_BUILD_JUCE_PLUGIN "Build the JUCE VST3/plugin wrapper" OFF)
 set(DIMENSION5_JUCE_DIR "" CACHE PATH "Optional path to a local JUCE checkout")
