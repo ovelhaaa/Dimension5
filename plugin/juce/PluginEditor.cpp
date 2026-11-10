@@ -11,10 +11,12 @@ constexpr int kBottomBarHeight = 90;
 constexpr int kAdvancedPanelHeight = 200;
 constexpr int kBaseWidth = 1000;
 constexpr int kBaseHeight = 620;
-constexpr int kMinWidth = 840;
-constexpr int kMinHeight = 540;
-constexpr int kMaxWidth = 1600;
-constexpr int kMaxHeight = 1000;
+constexpr int kMinWidth = Dimension5AudioProcessorEditor::kMinWidth;
+constexpr int kMinHeight = Dimension5AudioProcessorEditor::kMinHeightClosed;
+constexpr int kMinHeightClosed = Dimension5AudioProcessorEditor::kMinHeightClosed;
+constexpr int kMinHeightOpen = Dimension5AudioProcessorEditor::kMinHeightOpen;
+constexpr int kMaxWidth = Dimension5AudioProcessorEditor::kMaxWidth;
+constexpr int kMaxHeight = Dimension5AudioProcessorEditor::kMaxHeight;
 constexpr int kWatermarkSafeWidth = 126;
 
 struct AdvancedSpec {
@@ -262,7 +264,8 @@ void Dimension5AudioProcessorEditor::setAdvancedVisible(bool shouldBeVisible) {
             advancedLabels[i].setVisible(true);
             advancedSliders[i].setVisible(true);
         }
-        const int targetHeight = juce::jlimit(kMinHeight, kMaxHeight, getHeight() + kAdvancedPanelHeight);
+        const int targetHeight = juce::jlimit(kMinHeightOpen, kMaxHeight, heightBeforeAdvanced + kAdvancedPanelHeight);
+        setResizeLimits(kMinWidth, kMinHeightOpen, kMaxWidth, kMaxHeight);
         setSize(getWidth(), targetHeight);
     } else {
         advancedVisible = false;
@@ -272,8 +275,9 @@ void Dimension5AudioProcessorEditor::setAdvancedVisible(bool shouldBeVisible) {
             advancedLabels[i].setVisible(false);
             advancedSliders[i].setVisible(false);
         }
+        setResizeLimits(kMinWidth, kMinHeightClosed, kMaxWidth, kMaxHeight);
         const int fallback = getHeight() - kAdvancedPanelHeight;
-        const int targetHeight = juce::jlimit(kMinHeight, kMaxHeight,
+        const int targetHeight = juce::jlimit(kMinHeightClosed, kMaxHeight,
                                               heightBeforeAdvanced > 0 ? heightBeforeAdvanced : fallback);
         setSize(getWidth(), targetHeight);
     }
@@ -401,44 +405,50 @@ void Dimension5AudioProcessorEditor::layoutBottomSection(juce::Rectangle<int> se
 
 void Dimension5AudioProcessorEditor::resized() {
     auto area = getLocalBounds().reduced(kMargin);
+    const int totalH = getHeight();
+    const bool isCompact = totalH < 680;
 
     // =========================================================================
     // 1. Header Layout (adaptive)
     // =========================================================================
-    auto headerArea = area.removeFromTop(kHeaderHeight - 8);
+    const int headerH = isCompact ? 44 : 52;
+    auto headerArea = area.removeFromTop(headerH - 6);
 
-    const int brandW = juce::jlimit(140, 220, juce::roundToInt((float)headerArea.getWidth() * 0.17f));
+    const int brandW = juce::jlimit(130, 220, juce::roundToInt((float)headerArea.getWidth() * 0.17f));
     auto brandArea = headerArea.removeFromLeft(brandW);
-    titleLabel.setBounds(brandArea.removeFromTop(24));
-    subtitleLabel.setBounds(brandArea.removeFromTop(16));
+    titleLabel.setFont(juce::Font(isCompact ? 17.0f : 20.0f, juce::Font::bold));
+    titleLabel.setBounds(brandArea.removeFromTop(isCompact ? 20 : 24));
+    subtitleLabel.setBounds(brandArea.removeFromTop(isCompact ? 14 : 16));
 
+    const int btnH = isCompact ? 24 : 28;
     auto rightHeaderArea = headerArea.removeFromRight(190);
-    bypassButton.setBounds(rightHeaderArea.removeFromRight(78).withHeight(28));
-    rightHeaderArea.removeFromRight(8);
-    compareCopyButton.setBounds(rightHeaderArea.removeFromRight(44).withHeight(28));
+    bypassButton.setBounds(rightHeaderArea.removeFromRight(76).withHeight(btnH));
+    rightHeaderArea.removeFromRight(6);
+    compareCopyButton.setBounds(rightHeaderArea.removeFromRight(42).withHeight(btnH));
     rightHeaderArea.removeFromRight(4);
-    compareBButton.setBounds(rightHeaderArea.removeFromRight(26).withHeight(28));
+    compareBButton.setBounds(rightHeaderArea.removeFromRight(26).withHeight(btnH));
     rightHeaderArea.removeFromRight(3);
-    compareAButton.setBounds(rightHeaderArea.removeFromRight(26).withHeight(28));
+    compareAButton.setBounds(rightHeaderArea.removeFromRight(26).withHeight(btnH));
 
-    headerArea.removeFromLeft(14);
-    headerArea.removeFromRight(14);
-    const int comboH = 28;
-    const int modeW = juce::jlimit(96, 120, juce::roundToInt((float)headerArea.getWidth() * 0.25f));
-    const int presetW = juce::jlimit(150, 240, headerArea.getWidth() - modeW - 8);
+    headerArea.removeFromLeft(12);
+    headerArea.removeFromRight(12);
+    const int comboH = btnH;
+    const int modeW = juce::jlimit(88, 120, juce::roundToInt((float)headerArea.getWidth() * 0.25f));
+    const int presetW = juce::jlimit(140, 240, headerArea.getWidth() - modeW - 8);
 
     presetBox.setBounds(headerArea.removeFromLeft(presetW).withHeight(comboH));
     headerArea.removeFromLeft(8);
     modeBox.setBounds(headerArea.removeFromLeft(juce::jmin(modeW, headerArea.getWidth())).withHeight(comboH));
 
-    area.removeFromTop(10);
+    area.removeFromTop(isCompact ? 6 : 10);
 
     // =========================================================================
     // 2. Bottom Bar + Advanced Drawer
     // =========================================================================
-    const int advHeight = advancedVisible ? kAdvancedPanelHeight : 0;
-    auto bottomArea = area.removeFromBottom(kBottomBarHeight + advHeight);
-    bottomBarBounds = bottomArea.removeFromTop(kBottomBarHeight);
+    const int bottomH = isCompact ? 72 : kBottomBarHeight;
+    const int advHeight = advancedVisible ? (isCompact ? 154 : kAdvancedPanelHeight) : 0;
+    auto bottomArea = area.removeFromBottom(bottomH + advHeight);
+    bottomBarBounds = bottomArea.removeFromTop(bottomH);
     advancedBounds = advancedVisible ? bottomArea : juce::Rectangle<int>();
 
     auto bar = bottomBarBounds;
@@ -446,10 +456,10 @@ void Dimension5AudioProcessorEditor::resized() {
     juce::ignoreUnused(safeArea);
 
     const int advW = juce::jlimit(96, 124, bar.getWidth() / 7);
-    advancedButton.setBounds(bar.removeFromRight(advW).reduced(0, (kBottomBarHeight - 30) / 2));
-    bar.removeFromRight(14);
+    advancedButton.setBounds(bar.removeFromRight(advW).reduced(0, juce::jmax(2, (bottomH - 28) / 2)));
+    bar.removeFromRight(12);
 
-    const int sectionW = juce::jlimit(220, 330, (bar.getWidth() - 28) / 2);
+    const int sectionW = juce::jlimit(200, 330, (bar.getWidth() - 24) / 2);
 
     auto inSection = bar.removeFromLeft(sectionW);
     auto outSection = bar.removeFromRight(sectionW);
@@ -461,23 +471,24 @@ void Dimension5AudioProcessorEditor::resized() {
     // 3. Advanced Drawer Layout
     // =========================================================================
     if (advancedVisible && !advancedBounds.isEmpty()) {
-        auto advArea = advancedBounds.reduced(20, 10);
-        auto advHeader = advArea.removeFromTop(20);
+        auto advArea = advancedBounds.reduced(16, isCompact ? 6 : 10);
+        const int advHdrH = isCompact ? 18 : 20;
+        auto advHeader = advArea.removeFromTop(advHdrH);
         advancedTitleLabel.setBounds(advHeader.removeFromLeft(juce::jmin(260, advHeader.getWidth() / 2)));
         advancedHintLabel.setBounds(advHeader);
 
-        advArea.removeFromTop(8);
+        advArea.removeFromTop(isCompact ? 4 : 8);
         const int numSliders = (int)advancedSliders.size();
-        const int colGap = 32;
+        const int colGap = isCompact ? 20 : 32;
         const int colW = juce::jmax(150, (advArea.getWidth() - colGap) / 2);
-        const int rowH = juce::jlimit(22, 30, advArea.getHeight() / 5 - 4);
-        const int labelW = juce::jlimit(78, 118, juce::roundToInt((float)colW * 0.34f));
+        const int rowH = juce::jlimit(20, 30, (advArea.getHeight() - 16) / 5);
+        const int labelW = juce::jlimit(76, 118, juce::roundToInt((float)colW * 0.35f));
 
         for (int i = 0; i < numSliders; ++i) {
             const int col = (i < 5) ? 0 : 1;
             const int rowIdx = (i < 5) ? i : (i - 5);
             juce::Rectangle<int> row(advArea.getX() + col * (colW + colGap),
-                                     advArea.getY() + rowIdx * (rowH + 4),
+                                     advArea.getY() + rowIdx * (rowH + (isCompact ? 2 : 4)),
                                      colW, rowH);
             advancedLabels[(size_t)i].setBounds(row.removeFromLeft(labelW));
             advancedSliders[(size_t)i].setBounds(row);
@@ -487,10 +498,10 @@ void Dimension5AudioProcessorEditor::resized() {
     // =========================================================================
     // 4. Central Area: Stereo Field Monitor + Spatial Controls
     // =========================================================================
-    area.removeFromBottom(8);
+    area.removeFromBottom(isCompact ? 4 : 8);
     const int totalW = area.getWidth();
-    const int controlsW = juce::jlimit(300, 420, juce::roundToInt((float)totalW * 0.35f));
-    const int gap = 12;
+    const int controlsW = juce::jlimit(280, 420, juce::roundToInt((float)totalW * 0.35f));
+    const int gap = isCompact ? 8 : 12;
 
     auto controlsArea = area.removeFromRight(controlsW);
     area.removeFromRight(gap);

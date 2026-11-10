@@ -43,6 +43,9 @@ typedef struct RegressionResult {
     double maxDiffOverall;
     double rmsDiffOverall;
     uint32_t divergentSamples;
+    uint32_t bitExactSamples;
+    uint32_t totalSamples;
+    int isBitExact;
 } RegressionResult;
 
 static int ensure_single_dir(const char* dir) {
@@ -254,7 +257,16 @@ static int run_regression_against_baseline(const char* baselineDir, RegressionRe
 
         double maxDiffL = 0.0, maxDiffR = 0.0, sumSqDiff = 0.0;
         uint32_t divergent = 0;
+        uint32_t bitExact = 0;
         for (uint32_t i = 0; i < tc->frames; ++i) {
+            uint32_t cLb, rLb, cRb, rRb;
+            memcpy(&cLb, &curL[i], sizeof(float));
+            memcpy(&rLb, &refL[i], sizeof(float));
+            memcpy(&cRb, &curR[i], sizeof(float));
+            memcpy(&rRb, &refR[i], sizeof(float));
+            if (cLb == rLb && cRb == rRb) {
+                ++bitExact;
+            }
             const double dL = fabs((double)curL[i] - (double)refL[i]);
             const double dR = fabs((double)curR[i] - (double)refR[i]);
             if (dL > maxDiffL) maxDiffL = dL;
@@ -275,10 +287,14 @@ static int run_regression_against_baseline(const char* baselineDir, RegressionRe
         results[c].maxDiffOverall = maxOverall;
         results[c].rmsDiffOverall = rmsOverall;
         results[c].divergentSamples = divergent;
+        results[c].bitExactSamples = bitExact;
+        results[c].totalSamples = tc->frames;
+        results[c].isBitExact = (bitExact == tc->frames);
 
-        printf("  %-26s : %s | MaxDiff: %.1e (L: %.1e, R: %.1e) | RMS: %.1e | DivSamples: %u/%u\n",
-               tc->id, passed ? "PASS" : "FAIL", maxOverall, maxDiffL, maxDiffR, rmsOverall,
-               divergent, tc->frames);
+        const char* statusStr = passed ? (results[c].isBitExact ? "PASS (Bit-exact)" : "PASS (Tolerance)") : "FAIL";
+        printf("  %-26s : %-18s | MaxDiff: %.1e (L: %.1e, R: %.1e) | RMS: %.1e | BitExact: %u/%u\n",
+               tc->id, statusStr, maxOverall, maxDiffL, maxDiffR, rmsOverall,
+               bitExact, tc->frames);
 
         free(refL); free(refR);
         free(inL); free(inR);
@@ -697,13 +713,23 @@ int main(int argc, char** argv) {
                     (long)time(NULL), overallSuccess ? "PASSED" : "FAILED");
             fprintf(sr, "  \"regression_cases\": [\n");
             for (size_t c = 0; c < numCases; ++c) {
-                fprintf(sr, "    { \"id\": \"%s\", \"passed\": %s, \"maxDiff\": %.2e, \"rmsDiff\": %.2e, \"divergent\": %u }%s\n",
+                fprintf(sr, "    { \"id\": \"%s\", \"passed\": %s, \"bitExact\": %s, \"bitExactSamples\": %u, \"maxDiff\": %.2e, \"rmsDiff\": %.2e, \"divergent\": %u }%s\n",
                         regResults[c].id, regResults[c].passed ? "true" : "false",
+                        regResults[c].isBitExact ? "true" : "false",
+                        regResults[c].bitExactSamples,
                         regResults[c].maxDiffOverall, regResults[c].rmsDiffOverall,
                         regResults[c].divergentSamples, (c + 1 < numCases) ? "," : "");
             }
             fprintf(sr, "  ],\n  \"overallSuccess\": %s\n}\n", overallSuccess ? "true" : "false");
             fclose(sr);
+        }
+    }
+
+    int allCasesBitExact = 1;
+    for (size_t c = 0; c < numCases; ++c) {
+        if (!regResults[c].isBitExact) {
+            allCasesBitExact = 0;
+            break;
         }
     }
 
@@ -713,7 +739,15 @@ int main(int argc, char** argv) {
     if (overallSuccess) {
         printf(" STATUS: >>> VALIDATION SUCCESS (PASSED) <<<\n");
         printf(" Zero audible regression vs authentic legacy baseline (08903b8).\n");
-        printf(" Spatial Engine 2.0 neutral state is mathematically bit-exact.\n");
+        if (allCasesBitExact) {
+            printf(" Equivalence: Mathematically bit-exact (100%% identical sample bits).\n");
+        } else {
+            printf(" Equivalence: Numerically equivalent within tolerance (maxDiff < 1e-5).\n");
+        }
+        printf(" Verification criteria:\n");
+        printf("   - Maximum difference threshold: 1.0e-5\n");
+        printf("   - Audio regression cases tested: %u\n", (unsigned)numCases);
+        printf("   - Bit-exact cases: %s\n", allCasesBitExact ? "ALL (100%)" : "Preserved within strict tolerance");
         printf("=================================================================\n");
         return 0;
     } else {

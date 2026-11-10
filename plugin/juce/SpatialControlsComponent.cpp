@@ -3,14 +3,21 @@
 namespace {
 void placeKnob(juce::Rectangle<int> cell, int knobSize,
                juce::Label& label, juce::Slider& slider, int labelHeight) {
-    const int sliderHeight = knobSize + 22;
-    const int totalHeight = labelHeight + sliderHeight;
-    const int boxWidth = juce::jmin(cell.getWidth(), knobSize + 24);
-    auto box = cell.withSizeKeepingCentre(boxWidth, juce::jmin(cell.getHeight(), totalHeight));
+    if (cell.isEmpty()) {
+        label.setBounds(0, 0, 0, 0);
+        slider.setBounds(0, 0, 0, 0);
+        return;
+    }
+    const int effectiveLabelH = juce::jlimit(12, 18, juce::jmin(labelHeight, cell.getHeight() / 3));
+    label.setBounds(cell.removeFromTop(effectiveLabelH));
 
-    label.setBounds(box.removeFromTop(labelHeight));
-    auto sliderArea = box.withSizeKeepingCentre(juce::jmin(box.getWidth(), knobSize), sliderHeight);
-    slider.setBounds(sliderArea);
+    // Slider stays strictly within the remaining cell bounds - NEVER expand vertically outside cell
+    const int availW = cell.getWidth();
+    const int availH = cell.getHeight();
+    const int targetW = juce::jmin(availW, knobSize + 24);
+    const int targetH = juce::jmin(availH, knobSize + 22);
+    auto sliderBox = cell.withSizeKeepingCentre(targetW, targetH);
+    slider.setBounds(sliderBox);
 }
 } // namespace
 
@@ -114,43 +121,58 @@ void SpatialControlsComponent::attachParameters(juce::AudioProcessorValueTreeSta
 }
 
 void SpatialControlsComponent::resized() {
-    auto bounds = getLocalBounds().reduced(10);
+    auto bounds = getLocalBounds().reduced(juce::jlimit(6, 10, getWidth() / 36));
 
-    // Section title row
-    bounds.removeFromTop(30);
+    // Responsive header title
+    const bool isCompactHeight = bounds.getHeight() < 240;
+    const int titleH = isCompactHeight ? 22 : 28;
+    bounds.removeFromTop(titleH);
 
-    // Leave a slim footer at the bottom for engine identification.
-    bounds.removeFromBottom(22);
+    // Responsive footer (omit if vertical space is tight)
+    const int footerH = isCompactHeight ? (bounds.getHeight() < 170 ? 0 : 14) : 20;
+    if (footerH > 0) {
+        bounds.removeFromBottom(footerH);
+    }
 
-    const int heroSize = juce::jlimit(96, 184, juce::jmin(bounds.getWidth() / 2 - 16,
-                                                          juce::roundToInt((float)bounds.getHeight() * 0.42f)));
-    const int secondarySize = juce::jlimit(70, 120, juce::jmin(bounds.getWidth() / 3 - 12,
-                                                               juce::roundToInt((float)bounds.getHeight() * 0.26f)));
+    const int totalAvailH = juce::jmax(40, bounds.getHeight());
 
-    const int heroRowH = 18 + heroSize + 22;
-    const int secondaryRowH = 16 + secondarySize + 22;
-    const int contentH = heroRowH + 18 + secondaryRowH;
+    // Allocate proportional vertical space between hero row and secondary row
+    const int interRowGap = isCompactHeight ? 6 : juce::jlimit(8, 16, totalAvailH / 18);
+    const int heightForRows = juce::jmax(30, totalAvailH - interRowGap);
 
-    auto content = bounds.withHeight(juce::jmin(bounds.getHeight(), contentH));
-    content.setY(bounds.getY() + juce::jmax(0, (bounds.getHeight() - content.getHeight()) / 2));
+    // 56% for hero knobs (SPREAD, MIX), 44% for secondary (DEPTH, MOTION, COLOR)
+    const int heroRowH = (heightForRows * 56) / 100;
+    const int secondaryRowH = heightForRows - heroRowH;
 
-    auto heroRow = content.removeFromTop(heroRowH);
-    content.removeFromTop(18);
-    auto secondaryRow = content.removeFromTop(secondaryRowH);
+    auto heroRow = bounds.removeFromTop(heroRowH);
+    bounds.removeFromTop(interRowGap);
+    auto secondaryRow = bounds.removeFromTop(secondaryRowH);
 
     const int heroWidth = heroRow.getWidth() / 2;
-    auto spreadBox = heroRow.removeFromLeft(heroWidth).reduced(4, 0);
-    auto mixBox = heroRow.reduced(4, 0);
-    placeKnob(spreadBox, heroSize, spreadLabel, spreadSlider, 18);
-    placeKnob(mixBox, heroSize, mixLabel, mixSlider, 18);
+    auto spreadBox = heroRow.removeFromLeft(heroWidth).reduced(3, 0);
+    auto mixBox = heroRow.reduced(3, 0);
+
+    const int maxHeroKnobFromH = juce::jmax(24, heroRowH - 34);
+    const int maxHeroKnobFromW = juce::jmax(24, heroWidth - 16);
+    const int heroSize = juce::jlimit(36, 180, juce::jmin(maxHeroKnobFromW, maxHeroKnobFromH));
+
+    const int heroLabelH = isCompactHeight ? 14 : 18;
+    placeKnob(spreadBox, heroSize, spreadLabel, spreadSlider, heroLabelH);
+    placeKnob(mixBox, heroSize, mixLabel, mixSlider, heroLabelH);
 
     const int secWidth = secondaryRow.getWidth() / 3;
-    auto depthBox = secondaryRow.removeFromLeft(secWidth).reduced(3, 0);
-    auto motionBox = secondaryRow.removeFromLeft(secWidth).reduced(3, 0);
-    auto colorBox = secondaryRow.reduced(3, 0);
-    placeKnob(depthBox, secondarySize, depthLabel, depthSlider, 16);
-    placeKnob(motionBox, secondarySize, motionLabel, motionSlider, 16);
-    placeKnob(colorBox, secondarySize, colorLabel, colorSlider, 16);
+    auto depthBox = secondaryRow.removeFromLeft(secWidth).reduced(2, 0);
+    auto motionBox = secondaryRow.removeFromLeft(secWidth).reduced(2, 0);
+    auto colorBox = secondaryRow.reduced(2, 0);
+
+    const int maxSecKnobFromH = juce::jmax(20, secondaryRowH - 28);
+    const int maxSecKnobFromW = juce::jmax(20, secWidth - 12);
+    const int secondarySize = juce::jlimit(28, 120, juce::jmin(maxSecKnobFromW, maxSecKnobFromH));
+
+    const int secLabelH = isCompactHeight ? 13 : 16;
+    placeKnob(depthBox, secondarySize, depthLabel, depthSlider, secLabelH);
+    placeKnob(motionBox, secondarySize, motionLabel, motionSlider, secLabelH);
+    placeKnob(colorBox, secondarySize, colorLabel, colorSlider, secLabelH);
 }
 
 void SpatialControlsComponent::paint(juce::Graphics& g) {
@@ -163,19 +185,21 @@ void SpatialControlsComponent::paint(juce::Graphics& g) {
     g.setColour(dividerColour());
     g.drawRoundedRectangle(bounds, 6.0f, 1.0f);
 
-    const float headerH = 32.0f;
+    const float headerH = (getHeight() < 240) ? 24.0f : 32.0f;
     g.setColour(dividerColour());
     g.drawLine(bounds.getX() + 8.0f, bounds.getY() + headerH, bounds.getRight() - 8.0f, bounds.getY() + headerH, 1.0f);
 
-    g.setFont(juce::Font(11.0f, juce::Font::bold));
+    g.setFont(juce::Font((getHeight() < 240) ? 10.0f : 11.0f, juce::Font::bold));
     g.setColour(secondaryText());
     g.drawText("SPATIAL MATRIX CONTROLS", bounds.getX() + 12.0f, bounds.getY(),
                bounds.getWidth() - 24.0f, headerH, juce::Justification::centredLeft);
 
-    // Footer identification: clearly informational, never fabricated measurements.
-    g.setFont(juce::Font(8.0f, juce::Font::plain));
-    g.setColour(secondaryText().withAlpha(0.45f));
-    g.drawText("BBD-LITE ENGINE / STEREO MATRIX",
-               bounds.getX() + 12.0f, bounds.getBottom() - 20.0f,
-               bounds.getWidth() - 24.0f, 14.0f, juce::Justification::centredLeft);
+    // Footer identification: displayed when sufficient vertical clearance exists
+    if (getHeight() >= 190) {
+        g.setFont(juce::Font(8.0f, juce::Font::plain));
+        g.setColour(secondaryText().withAlpha(0.45f));
+        g.drawText("BBD-LITE ENGINE / STEREO MATRIX",
+                   bounds.getX() + 12.0f, bounds.getBottom() - 18.0f,
+                   bounds.getWidth() - 24.0f, 14.0f, juce::Justification::centredLeft);
+    }
 }

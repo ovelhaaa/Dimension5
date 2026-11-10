@@ -187,7 +187,8 @@ public:
     std::function<void(uint32_t slot)> testHookPreReserve { nullptr };
     std::function<void(uint32_t slot)> testHookDuringRead { nullptr };
 
-    bool publish(const T& val) {
+    bool publish(const T& val, uint64_t gen = 0) {
+        const uint64_t effectiveGen = (gen != 0) ? gen : (autoGen.fetch_add(1, std::memory_order_relaxed) + 1);
         const uint32_t cur = currentPublishedSlot.load(std::memory_order_relaxed);
         for (size_t i = 0; i < NumSlots; ++i) {
             const uint32_t cand = (uint32_t)((cur + 1 + i) % NumSlots);
@@ -199,8 +200,19 @@ public:
                                                          std::memory_order_acquire,
                                                          std::memory_order_relaxed)) {
                 slots[cand].data = val;
+                slots[cand].generation.store(effectiveGen, std::memory_order_release);
                 slots[cand].state.store(0, std::memory_order_release);
-                currentPublishedSlot.store(cand, std::memory_order_release);
+
+                // Monotonic generation ordering: never allow older generation to overwrite newer published slot
+                uint64_t currentLatestGen = latestPublishedGeneration.load(std::memory_order_acquire);
+                while (effectiveGen >= currentLatestGen) {
+                    if (latestPublishedGeneration.compare_exchange_weak(currentLatestGen, effectiveGen,
+                                                                        std::memory_order_release,
+                                                                        std::memory_order_acquire)) {
+                        currentPublishedSlot.store(cand, std::memory_order_release);
+                        break;
+                    }
+                }
                 return true;
             }
         }
@@ -209,6 +221,11 @@ public:
     }
 
     bool read(T& out) const {
+        uint64_t ignoredGen = 0;
+        return read(out, ignoredGen);
+    }
+
+    bool read(T& out, uint64_t& outGen) const {
         for (int attempt = 0; attempt < 8; ++attempt) {
             const uint32_t idx = currentPublishedSlot.load(std::memory_order_acquire);
 
@@ -229,6 +246,7 @@ public:
                 }
 
                 out = slots[idx].data;
+                outGen = slots[idx].generation.load(std::memory_order_acquire);
                 slots[idx].state.fetch_sub(1, std::memory_order_release);
                 return true;
             }
@@ -240,16 +258,23 @@ public:
         slots[slot % NumSlots].state.store(busy ? kBusyWriteBit : 0, std::memory_order_release);
     }
 
+    uint64_t getLatestPublishedGeneration() const {
+        return latestPublishedGeneration.load(std::memory_order_acquire);
+    }
+
 private:
     static constexpr uint32_t kBusyWriteBit = 0x80000000U;
 
     struct alignas(64) Slot {
         T data {};
+        std::atomic<uint64_t> generation { 0 };
         mutable std::atomic<uint32_t> state { 0 };
     };
 
     alignas(64) Slot slots[NumSlots];
     alignas(64) std::atomic<uint32_t> currentPublishedSlot { 0 };
+    alignas(64) std::atomic<uint64_t> latestPublishedGeneration { 0 };
+    alignas(64) std::atomic<uint64_t> autoGen { 0 };
 };
 
 } // namespace dimension_ipc
@@ -312,7 +337,9 @@ public:
 
     void applyModePresetToAdvancedParameters(DimensionMode mode);
     bool isUpdatingModePreset() const;
-    void getEffectiveConfig(PluginConfig& outConfig) const;
+    bool getEffectiveConfig(PluginConfig& outConfig) const;
+    bool getEffectiveConfig(PluginConfig& outConfig, uint64_t& outGen) const;
+    void constructConfigFromParameters(PluginConfig& cfg) const;
     void getLastAppliedConfig(PluginConfig& outConfig) const;
     uint32_t getSaturationCount() const;
     void deliverPendingUpdates();
@@ -363,7 +390,6 @@ private:
     std::atomic<int> currentProgram { 0 };
     std::atomic<int> activeCompareSlot { 0 };
 
-    PluginConfig stagedConfig {};
     PluginConfig activeConfig {};
     uint64_t lastAppliedGeneration { 0 };
     std::atomic<float> currentSampleRate { DIMENSION_SAMPLE_RATE_DEFAULT };
