@@ -23,6 +23,21 @@ public:
     bool isAdvancedVisible() const noexcept { return advancedVisible; }
     void setAdvancedVisible(bool shouldBeVisible);
 
+    static constexpr int kMinWidth = 840;
+    static constexpr int kMinHeightClosed = 540;
+    static constexpr int kMinHeightOpen = 720;
+    static constexpr int kMaxWidth = 1600;
+    static constexpr int kMaxHeight = 1000;
+
+    // Direct accessors for automated geometry and accessibility validation
+    const std::array<juce::Slider, 9>& getAdvancedSliders() const noexcept { return advancedSliders; }
+    const std::array<juce::Label, 9>& getAdvancedLabels() const noexcept { return advancedLabels; }
+    const juce::Slider& getInputSlider() const noexcept { return inputSlider; }
+    const juce::Slider& getOutputSlider() const noexcept { return outputSlider; }
+    const juce::TextButton& getAdvancedButton() const noexcept { return advancedButton; }
+    const juce::Rectangle<int>& getAdvancedBounds() const noexcept { return advancedBounds; }
+    const juce::Rectangle<int>& getBottomBarBounds() const noexcept { return bottomBarBounds; }
+
     // Synchronous presentation refresh used by the deterministic snapshot
     // harness (the normal editor drives the same code from its timer).
     void refreshPresentationNow() { timerCallback(); }

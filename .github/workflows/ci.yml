@@ -100,5 +100,7 @@ jobs:
       - name: Upload UI Snapshots
         uses: actions/upload-artifact@v4
         with:
-          name: dimension5-ui21-snapshots
-          path: docs/snapshots/ui21/*.png
+          name: dimension5-ui-snapshots
+          path: |
+            docs/snapshots/ui21/*.png
+            docs/snapshots/ui212/*.png

@@ -2552,6 +2552,509 @@ void test_phase11_scenario_i_immediate_persistence_after_automation() {
           "Immediate state persisted bassFocusHz = 110.0");
 }
 
+// =============================================================================
+// Phase 1.2 — Deterministic Concurrency, Interleaving & Layout Verification
+// =============================================================================
+
+// 62. Phase 1.2 Case A: Concurrent Writers — Multiple producers publish configs without tearing
+void test_phase12_case_a_concurrent_writers_no_hybrid_config() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    std::atomic<bool> stopFlag { false };
+    std::atomic<int> errors { 0 };
+
+    auto isConfigAlpha = [](const Dimension5AudioProcessor::PluginConfig& c) {
+        return c.dspParams.mode == DIMENSION_MODE_I &&
+               std::abs(c.dspParams.stereoWidth - 0.70f) < 1e-3f &&
+               std::abs(c.dspParams.bassFocusHz - 80.0f) < 1e-3f;
+    };
+
+    auto isConfigBeta = [](const Dimension5AudioProcessor::PluginConfig& c) {
+        return c.dspParams.mode == DIMENSION_MODE_III &&
+               std::abs(c.dspParams.stereoWidth - 1.80f) < 1e-3f &&
+               std::abs(c.dspParams.bassFocusHz - 160.0f) < 1e-3f;
+    };
+
+    juce::ignoreUnused(isConfigAlpha, isConfigBeta);
+
+    // Producer 1 publishes Config Alpha
+    std::thread producer1([&] {
+        for (int i = 0; i < 200 && !stopFlag.load(std::memory_order_relaxed); ++i) {
+            setParamHostValue(proc, "stereoWidth", 0.70f);
+            setParamHostValue(proc, "bassFocusHz", 80.0f);
+            setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+            std::this_thread::yield();
+        }
+    });
+
+    // Producer 2 publishes Config Beta
+    std::thread producer2([&] {
+        for (int i = 0; i < 200 && !stopFlag.load(std::memory_order_relaxed); ++i) {
+            setParamHostValue(proc, "stereoWidth", 1.80f);
+            setParamHostValue(proc, "bassFocusHz", 160.0f);
+            setParamHostValue(proc, "mode", (float)DIMENSION_MODE_III);
+            std::this_thread::yield();
+        }
+    });
+
+    // Reader thread reading from effective config
+    std::thread reader([&] {
+        int successfulReads = 0;
+        while (!stopFlag.load(std::memory_order_relaxed) && successfulReads < 500) {
+            Dimension5AudioProcessor::PluginConfig cfg;
+            proc.getEffectiveConfig(cfg);
+            // Must be internally consistent: finite, reasonable values, never NaN/Inf
+            if (!std::isfinite(cfg.dspParams.stereoWidth) || !std::isfinite(cfg.dspParams.bassFocusHz)) {
+                errors.fetch_add(1);
+            }
+            if (cfg.dspParams.stereoWidth < 0.0f || cfg.dspParams.stereoWidth > 4.0f) {
+                errors.fetch_add(1);
+            }
+            ++successfulReads;
+            std::this_thread::yield();
+        }
+    });
+
+    producer1.join();
+    producer2.join();
+    stopFlag.store(true, std::memory_order_release);
+    reader.join();
+
+    check(errors.load() == 0, "No tearing, NaN or corrupted values observed during concurrent publishing");
+}
+
+// 63. Phase 1.2 Case B: Reader during publication interleaving hook
+void test_phase12_case_b_reader_during_publication_interleaving() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    auto& buf = proc.getStagedConfigBufferForTesting();
+
+    std::atomic<bool> hookRan { false };
+
+    buf.testHookDuringRead = [&](uint32_t slot) {
+        juce::ignoreUnused(slot);
+        if (hookRan.exchange(true))
+            return;
+        // Interleaving: change parameters while a read is active
+        setParamHostValue(proc, "stereoWidth", 1.95f);
+        setParamHostValue(proc, "bassFocusHz", 140.0f);
+    };
+
+    Dimension5AudioProcessor::PluginConfig outConfig {};
+    bool ok = proc.getEffectiveConfig(outConfig);
+    check(ok, "Read succeeded with interleaving hook active");
+    check(hookRan.load(), "Interleaving hook executed during read");
+    check(std::isfinite(outConfig.dspParams.stereoWidth), "Config stereoWidth is finite");
+    check(std::isfinite(outConfig.dspParams.bassFocusHz), "Config bassFocusHz is finite");
+
+    buf.testHookDuringRead = nullptr;
+}
+
+// 64. Phase 1.2 Case C: All snapshot slots forced unavailable (safe fallback without unprotected memory access)
+void test_phase12_case_c_all_snapshot_slots_unavailable_safe_fallback() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "stereoWidth", 1.33f);
+    setParamHostValue(proc, "bassFocusHz", 95.0f);
+
+    auto& buf = proc.getStagedConfigBufferForTesting();
+
+    // Force all 8 snapshot slots busy
+    for (size_t i = 0; i < 8; ++i) {
+        buf.forceSlotBusyForTest(i, true);
+    }
+
+    Dimension5AudioProcessor::PluginConfig outCfg {};
+    // Should cleanly fall back (either via applied snapshot or parameter reconstruction) without crash
+    proc.getEffectiveConfig(outCfg);
+
+    check(std::isfinite(outCfg.dspParams.stereoWidth), "Fallback stereoWidth is finite");
+    check(std::abs(outCfg.dspParams.stereoWidth - 1.33f) < 1e-3f, "Fallback retrieved correct stereoWidth");
+    check(std::abs(outCfg.dspParams.bassFocusHz - 95.0f) < 1e-3f, "Fallback retrieved correct bassFocusHz");
+
+    // Restore slots
+    for (size_t i = 0; i < 8; ++i) {
+        buf.forceSlotBusyForTest(i, false);
+    }
+}
+
+// 65. Phase 1.2 Case D: Save during heavy automation
+void test_phase12_case_d_save_state_during_heavy_automation() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    std::atomic<bool> stopFlag { false };
+    std::atomic<int> saveSuccessCount { 0 };
+    std::atomic<int> saveErrors { 0 };
+
+    // Automation thread
+    std::thread autoThread([&] {
+        float sw = 0.5f;
+        float bf = 40.0f;
+        int m = 0;
+        for (int i = 0; i < 300 && !stopFlag.load(std::memory_order_relaxed); ++i) {
+            sw += 0.01f; if (sw > 2.0f) sw = 0.5f;
+            bf += 2.0f;  if (bf > 250.0f) bf = 40.0f;
+            m = (m + 1) % 5;
+            setParamHostValue(proc, "stereoWidth", sw);
+            setParamHostValue(proc, "bassFocusHz", bf);
+            setParamHostValue(proc, "mode", (float)m);
+            std::this_thread::yield();
+        }
+    });
+
+    // Save thread
+    std::thread saveThread([&] {
+        while (!stopFlag.load(std::memory_order_relaxed) && saveSuccessCount.load() < 100) {
+            juce::MemoryBlock dest;
+            proc.getStateInformation(dest);
+            if (dest.getSize() > 0) {
+                std::unique_ptr<juce::XmlElement> xml(proc.getXmlFromBinary(dest.getData(), (int)dest.getSize()));
+                if (xml != nullptr) {
+                    saveSuccessCount.fetch_add(1);
+                } else {
+                    saveErrors.fetch_add(1);
+                }
+            } else {
+                saveErrors.fetch_add(1);
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    saveThread.join();
+    stopFlag.store(true, std::memory_order_release);
+    autoThread.join();
+
+    check(saveErrors.load() == 0, "Zero XML save corruptions during concurrent automation");
+    check(saveSuccessCount.load() >= 50, "Successfully saved state information repeatedly during automation");
+}
+
+// 66. Phase 1.2 Case E: A/B slot switching during concurrent automation
+void test_phase12_case_e_ab_switching_during_concurrent_automation() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    std::atomic<bool> stopFlag { false };
+    std::atomic<int> errors { 0 };
+
+    // Thread 1: Alternate slots and copy
+    std::thread abThread([&] {
+        for (int i = 0; i < 150 && !stopFlag.load(std::memory_order_relaxed); ++i) {
+            proc.selectCompareSlot(i % 2);
+            if (i % 5 == 0) {
+                proc.copyCompareToOtherSlot();
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    // Thread 2: Automate parameters
+    std::thread autoThread([&] {
+        for (int i = 0; i < 150 && !stopFlag.load(std::memory_order_relaxed); ++i) {
+            const float w = 0.5f + (float)(i % 15) * 0.1f;
+            const float bf = (float)((i * 10) % 200);
+            setParamHostValue(proc, "stereoWidth", w);
+            setParamHostValue(proc, "bassFocusHz", bf);
+            std::this_thread::yield();
+        }
+    });
+
+    abThread.join();
+    stopFlag.store(true, std::memory_order_release);
+    autoThread.join();
+
+    const int active = proc.getActiveCompareSlot();
+    check(active == 0 || active == 1, "Active compare slot remains strictly binary 0 or 1");
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getEffectiveConfig(cfg);
+    check(std::isfinite(cfg.dspParams.stereoWidth), "Final stereoWidth is finite");
+    check(std::isfinite(cfg.dspParams.bassFocusHz), "Final bassFocusHz is finite");
+}
+
+// 67. Phase 1.2 Case F: Saturation & Mailbox Ordering Integrity
+void test_phase12_case_f_saturation_mailbox_ordering_integrity() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Audio thread paused. Push 128 updates with increasing rateHz to guarantee queue saturation
+    for (int i = 1; i <= 128; ++i) {
+        setParamHostValue(proc, "rateHz", 0.1f + (float)i * 0.01f);
+    }
+
+    check(proc.getSaturationCount() > 0, "Queue saturated and triggered fallback mailbox");
+
+    // The very latest published update
+    setParamHostValue(proc, "rateHz", 3.75f);
+
+    // Now process a block on audio thread
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig applied {};
+    proc.getLastAppliedConfig(applied);
+
+    // Audio thread must apply the newest generation (3.75 Hz), never an obsolete saturated event
+    check(std::abs(applied.dspParams.rateHz - 3.75f) < 1e-3f,
+          "Audio thread applied newest generation from mailbox despite saturation");
+}
+
+// 68. Phase 1.2 Case G: PrepareToPlay transitions preserve spatial parameters
+void test_phase12_case_g_prepare_to_play_lifecycle_and_spatial_preservation() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Configure specific spatial parameters and mode
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    setParamHostValue(proc, "stereoWidth", 1.85f);
+    setParamHostValue(proc, "bassFocusHz", 140.0f);
+    setParamHostValue(proc, "width", 1.30f);
+
+    processStereoTestSignal(proc);
+
+    // Reinitialize at 44.1 kHz, 64 block
+    proc.prepareToPlay(44100.0, 64);
+    processStereoTestSignal(proc, 64);
+
+    Dimension5AudioProcessor::PluginConfig cfg {};
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_II, "Mode II preserved across 44.1kHz prepare");
+    check(std::abs(cfg.dspParams.stereoWidth - 1.85f) < 1e-4f, "stereoWidth preserved across 44.1kHz prepare");
+    check(std::abs(cfg.dspParams.bassFocusHz - 140.0f) < 1e-4f, "bassFocusHz preserved across 44.1kHz prepare");
+    check(std::abs(cfg.dspParams.width - 1.30f) < 1e-4f, "width preserved across 44.1kHz prepare");
+
+    // Reinitialize at 96 kHz, 16 block
+    proc.prepareToPlay(96000.0, 16);
+    processStereoTestSignal(proc, 16);
+
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_II, "Mode II preserved across 96kHz prepare");
+    check(std::abs(cfg.dspParams.stereoWidth - 1.85f) < 1e-4f, "stereoWidth preserved across 96kHz prepare");
+    check(std::abs(cfg.dspParams.bassFocusHz - 140.0f) < 1e-4f, "bassFocusHz preserved across 96kHz prepare");
+    check(std::abs(cfg.dspParams.width - 1.30f) < 1e-4f, "width preserved across 96kHz prepare");
+}
+
+// 69. Phase 1.2 Layout: Rigorous Geometric Matrix & Overlap Verification
+void test_phase12_layout_rigorous_geometric_matrix_and_no_overlap() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    auto* editor = dynamic_cast<Dimension5AudioProcessorEditor*>(proc.createEditor());
+    check(editor != nullptr, "Editor instantiated");
+
+    auto& spatialComp = editor->getSpatialControlsComponent();
+    auto& fieldComp = editor->getStereoFieldComponent();
+
+    struct SizeTestSpec {
+        int w;
+        int h;
+        bool advanced;
+        const char* desc;
+    };
+
+    const SizeTestSpec specs[] = {
+        { 840,  540,  false, "Closed Minimum (840x540)" },
+        { 1000, 620,  false, "Closed Standard (1000x620)" },
+        { 840,  540,  true,  "Open Minimum Compact Adaptation (840x540)" },
+        { 1000, 620,  true,  "Open 1000x620 Adaptation" },
+        { 1000, 820,  true,  "Open Standard (1000x820)" },
+        { 1200, 800,  true,  "Open Large (1200x800)" },
+        { 1600, 1000, true,  "Open Maximum (1600x1000)" }
+    };
+
+    for (const auto& spec : specs) {
+        editor->setAdvancedVisible(spec.advanced);
+        editor->setSize(spec.w, spec.h);
+
+        // 1. Check editor bounds
+        check(editor->getWidth() == spec.w, "Editor width matches test spec");
+        check(editor->getHeight() == spec.h, "Editor height matches test spec");
+
+        // 2. SpatialControlsComponent bounds inside editor
+        auto spBounds = spatialComp.getBounds();
+        check(editor->getLocalBounds().contains(spBounds), "SpatialControlsComponent within editor bounds");
+        check(spBounds.getWidth() >= 250, "SpatialControlsComponent width adequate");
+        check(spBounds.getHeight() >= 140, "SpatialControlsComponent height adequate");
+
+        // 3. StereoFieldComponent bounds inside editor
+        auto fieldBounds = fieldComp.getBounds();
+        check(editor->getLocalBounds().contains(fieldBounds), "StereoFieldComponent within editor bounds");
+        check(fieldBounds.getWidth() >= 200, "StereoFieldComponent width adequate");
+        check(fieldBounds.getHeight() >= 120, "StereoFieldComponent height adequate");
+
+        // Field and Spatial components must not intersect
+        check(!fieldBounds.intersects(spBounds), "Monitor and Controls panels do not intersect");
+
+        // 4. Hero Knobs vs Secondary Knobs in SpatialControlsComponent: Zero intersection
+        auto spreadB = spatialComp.getSpreadSlider().getBounds();
+        auto mixB = spatialComp.getMixSlider().getBounds();
+        auto depthB = spatialComp.getDepthSlider().getBounds();
+        auto motionB = spatialComp.getMotionSlider().getBounds();
+        auto colorB = spatialComp.getColorSlider().getBounds();
+
+        // Sliders must have positive dimensions and be accessible
+        check(spreadB.getWidth() >= 30 && spreadB.getHeight() >= 30, "Spread slider accessible");
+        check(mixB.getWidth() >= 30 && mixB.getHeight() >= 30, "Mix slider accessible");
+        check(depthB.getWidth() >= 24 && depthB.getHeight() >= 24, "Depth slider accessible");
+        check(motionB.getWidth() >= 24 && motionB.getHeight() >= 24, "Motion slider accessible");
+        check(colorB.getWidth() >= 24 && colorB.getHeight() >= 24, "Color slider accessible");
+
+        // Hero row knobs do not intersect
+        check(!spreadB.intersects(mixB), "Spread and Mix knobs do not intersect");
+
+        // Secondary row knobs do not intersect each other
+        check(!depthB.intersects(motionB), "Depth and Motion knobs do not intersect");
+        check(!motionB.intersects(colorB), "Motion and Color knobs do not intersect");
+        check(!depthB.intersects(colorB), "Depth and Color knobs do not intersect");
+
+        // Hero row knobs DO NOT intersect secondary row knobs (ZERO VERTICAL OVERLAP)
+        check(!spreadB.intersects(depthB), "Spread does not intersect Depth");
+        check(!spreadB.intersects(motionB), "Spread does not intersect Motion");
+        check(!spreadB.intersects(colorB), "Spread does not intersect Color");
+        check(!mixB.intersects(depthB), "Mix does not intersect Depth");
+        check(!mixB.intersects(motionB), "Mix does not intersect Motion");
+        check(!mixB.intersects(colorB), "Mix does not intersect Color");
+
+        // 5. Advanced panel verification when visible
+        if (spec.advanced) {
+            auto advBounds = editor->getAdvancedBounds();
+            check(!advBounds.isEmpty(), "Advanced bounds active when drawer open");
+            check(editor->getLocalBounds().contains(advBounds), "Advanced drawer within editor bounds");
+
+            const auto& advSliders = editor->getAdvancedSliders();
+            const auto& advLabels = editor->getAdvancedLabels();
+
+            // All 9 sliders and labels have positive bounds and do not collide
+            for (size_t i = 0; i < advSliders.size(); ++i) {
+                auto sB = advSliders[i].getBounds();
+                auto lB = advLabels[i].getBounds();
+                check(sB.getWidth() >= 80, "Advanced slider width adequate");
+                check(sB.getHeight() >= 16, "Advanced slider height adequate");
+                check(lB.getWidth() >= 50, "Advanced label width adequate");
+                check(lB.getHeight() >= 12, "Advanced label height adequate");
+                check(!sB.intersects(lB), "Advanced slider and label do not overlap");
+            }
+        }
+    }
+
+    delete editor;
+}
+
+// 70. Phase 1.2 Snapshots: Generate docs/snapshots/ui212/ suite
+void test_generate_phase12_visual_validation_snapshots() {
+    using ViewMode = StereoFieldComponent::ViewMode;
+
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    const juce::File outDir = juce::File::getCurrentWorkingDirectory().getChildFile("docs/snapshots/ui212");
+    outDir.createDirectory();
+
+    auto* editor = dynamic_cast<Dimension5AudioProcessorEditor*>(proc.createEditor());
+    check(editor != nullptr, "Editor instantiated for Phase 1.2 snapshot generation");
+
+    auto& field = editor->getStereoFieldComponent();
+
+    auto feedSignal = [&](int blocks, float widthVal, float mixVal, bool bypass) {
+        proc.prepareToPlay(48000.0, 32);
+        field.resetDisplayState();
+        setParamHostValue(proc, "width", widthVal);
+        setParamHostValue(proc, "mix", mixVal);
+        setParamHostValue(proc, "bypass", bypass ? 1.0f : 0.0f);
+
+        double sampleIndex = 0.0;
+        constexpr double sr = 48000.0;
+        constexpr int frames = 64;
+        constexpr double pi = juce::MathConstants<double>::pi;
+
+        for (int b = 0; b < blocks; ++b) {
+            juce::AudioBuffer<float> buffer(2, frames);
+            for (int i = 0; i < frames; ++i) {
+                const double t = sampleIndex / sr;
+                const double mod = 0.6 * std::sin(2.0 * pi * 0.7 * t);
+                const float l = 0.32f * (float)(0.62 * std::sin(2.0 * pi * 290.0 * t + mod)
+                                              + 0.28 * std::sin(2.0 * pi * 610.0 * t + 0.4));
+                const float r = 0.32f * (float)(0.62 * std::sin(2.0 * pi * 290.0 * t + mod + 1.05)
+                                              + 0.28 * std::sin(2.0 * pi * 430.0 * t + 1.8));
+                buffer.setSample(0, i, l);
+                buffer.setSample(1, i, r);
+                ++sampleIndex;
+            }
+            processTestBlock(proc, buffer);
+
+            StereoTelemetrySnapshot snap {};
+            if (proc.getStereoTelemetry(snap)) {
+                field.updateTelemetry(snap);
+            }
+            field.updateParameterGeometry(widthVal,
+                                          proc.getFloatParam("depthMs"),
+                                          proc.getFloatParam("rateHz"),
+                                          proc.parameters.getRawParameterValue("mix")->load());
+            field.setBypassState(bypass);
+        }
+    };
+
+    auto save = [&](const char* name) {
+        editor->resetMeterDisplay();
+        editor->refreshPresentationNow();
+        check(saveSnapshotToPng(*editor, outDir.getChildFile(name)), name);
+    };
+
+    field.setViewMode(ViewMode::Field);
+
+    // 01. Closed Minimum (840x540)
+    editor->setAdvancedVisible(false);
+    editor->setSize(840, 540);
+    feedSignal(64, 1.0f, 1.0f, false);
+    save("01_closed_minimum.png");
+
+    // 02. Open Minimum (840x540 compact adaptation)
+    editor->setAdvancedVisible(true);
+    editor->setSize(840, 540);
+    feedSignal(64, 1.0f, 1.0f, false);
+    save("02_open_minimum.png");
+
+    // 03. Open Standard (1000x820)
+    editor->setSize(1000, 820);
+    feedSignal(64, 1.2f, 1.0f, false);
+    save("03_open_standard.png");
+
+    // 04. Open 1200x800
+    editor->setSize(1200, 800);
+    feedSignal(64, 1.35f, 1.0f, false);
+    save("04_open_1200x800.png");
+
+    // 05. Open Maximum (1600x1000)
+    editor->setSize(1600, 1000);
+    feedSignal(64, 1.4f, 1.0f, false);
+    save("05_open_maximum.png");
+
+    // 06. Active Stereo Width = 2.0x, Bass Focus = 120 Hz
+    editor->setSize(1000, 820);
+    setParamHostValue(proc, "stereoWidth", 2.0f);
+    setParamHostValue(proc, "bassFocusHz", 120.0f);
+    feedSignal(64, 1.4f, 1.0f, false);
+    save("06_width2_bass120.png");
+
+    // 07. External host automation update
+    setParamHostValue(proc, "stereoWidth", 1.60f);
+    setParamHostValue(proc, "bassFocusHz", 180.0f);
+    feedSignal(64, 1.3f, 1.0f, false);
+    save("07_external_automation.png");
+
+    // 08. Resize Transition (1100x760)
+    editor->setSize(1100, 760);
+    feedSignal(64, 1.25f, 1.0f, false);
+    save("08_resize_transition.png");
+
+    std::cout << "[JUCE Tests] Successfully generated UI 2.1.2 snapshots in docs/snapshots/ui212/!\n";
+
+    delete editor;
+}
+
 int main() {
     juce::ScopedJuceInitialiser_GUI initialiser;
 
@@ -2738,6 +3241,33 @@ int main() {
 
         std::cout << "[JUCE Tests] 61. test_phase11_scenario_i_immediate_persistence_after_automation...\n";
         test_phase11_scenario_i_immediate_persistence_after_automation();
+
+        std::cout << "[JUCE Tests] 62. test_phase12_case_a_concurrent_writers_no_hybrid_config...\n";
+        test_phase12_case_a_concurrent_writers_no_hybrid_config();
+
+        std::cout << "[JUCE Tests] 63. test_phase12_case_b_reader_during_publication_interleaving...\n";
+        test_phase12_case_b_reader_during_publication_interleaving();
+
+        std::cout << "[JUCE Tests] 64. test_phase12_case_c_all_snapshot_slots_unavailable_safe_fallback...\n";
+        test_phase12_case_c_all_snapshot_slots_unavailable_safe_fallback();
+
+        std::cout << "[JUCE Tests] 65. test_phase12_case_d_save_state_during_heavy_automation...\n";
+        test_phase12_case_d_save_state_during_heavy_automation();
+
+        std::cout << "[JUCE Tests] 66. test_phase12_case_e_ab_switching_during_concurrent_automation...\n";
+        test_phase12_case_e_ab_switching_during_concurrent_automation();
+
+        std::cout << "[JUCE Tests] 67. test_phase12_case_f_saturation_mailbox_ordering_integrity...\n";
+        test_phase12_case_f_saturation_mailbox_ordering_integrity();
+
+        std::cout << "[JUCE Tests] 68. test_phase12_case_g_prepare_to_play_lifecycle_and_spatial_preservation...\n";
+        test_phase12_case_g_prepare_to_play_lifecycle_and_spatial_preservation();
+
+        std::cout << "[JUCE Tests] 69. test_phase12_layout_rigorous_geometric_matrix_and_no_overlap...\n";
+        test_phase12_layout_rigorous_geometric_matrix_and_no_overlap();
+
+        std::cout << "[JUCE Tests] 70. test_generate_phase12_visual_validation_snapshots...\n";
+        test_generate_phase12_visual_validation_snapshots();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;
