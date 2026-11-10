@@ -64,6 +64,24 @@ add_executable(dimension5_spatial_engine_validation tools/spatial_engine_validat
 target_link_libraries(dimension5_spatial_engine_validation PRIVATE dimension5_core)
 dimension5_apply_host_options(dimension5_spatial_engine_validation)
 
+# Authentic legacy DSP baseline (commit 08903b86de41)
+add_library(dimension5_legacy_core STATIC tools/legacy_baseline/dimension_dsp.c)
+set_target_properties(dimension5_legacy_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(dimension5_legacy_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools/legacy_baseline)
+if(NOT MSVC)
+  target_compile_options(dimension5_legacy_core PRIVATE -Wall -Wextra -Wshadow -Wdouble-promotion)
+  target_link_libraries(dimension5_legacy_core PUBLIC m)
+endif()
+
+add_executable(dimension5_legacy_render tools/legacy_baseline/dimension5_legacy_render.c)
+target_link_libraries(dimension5_legacy_render PRIVATE dimension5_legacy_core)
+dimension5_apply_host_options(dimension5_legacy_render)
+
+# Validation tests in CTest
+add_test(NAME dimension5_legacy_render COMMAND dimension5_legacy_render ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vectors/legacy_baseline)
+add_test(NAME dimension5_spatial_engine_validation_smoke COMMAND dimension5_spatial_engine_validation --smoke --baseline-dir=${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vectors/legacy_baseline)
+set_tests_properties(dimension5_spatial_engine_validation_smoke PROPERTIES DEPENDS dimension5_legacy_render)
+
 if(DIMENSION5_BUILD_JUCE_PLUGIN)
   enable_language(CXX)
   set(CMAKE_CXX_STANDARD 17)

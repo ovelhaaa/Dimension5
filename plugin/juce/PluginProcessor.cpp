@@ -77,6 +77,11 @@ void updateValueTreeWithConfig(juce::ValueTree& state, const Dimension5AudioProc
         auto child = state.getChildWithProperty("id", id);
         if (child.isValid()) {
             child.setProperty("value", (double)val, nullptr);
+        } else {
+            juce::ValueTree newChild("PARAM");
+            newChild.setProperty("id", id, nullptr);
+            newChild.setProperty("value", (double)val, nullptr);
+            state.addChild(newChild, -1, nullptr);
         }
     };
     setVal(kModeParamId, (float)cfg.dspParams.mode);
@@ -396,9 +401,12 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
             cfg.dspParams.inputGain = getFloatParam("inputGain");
             cfg.dspParams.outputGain = getFloatParam("outputGain");
             cfg.dspParams.width = getFloatParam("width");
+            cfg.dspParams.stereoWidth = getFloatParam("stereoWidth");
+            cfg.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
             cfg.mix = getMix();
             cfg.bypassTarget = getBypassTarget();
 
+            stagedConfig = cfg;
             stagedConfigBuffer.publish(cfg);
             publishConfigToAudio(cfg, newGen);
 
@@ -409,7 +417,10 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
             effectiveMode.store((int)DIMENSION_MODE_CUSTOM, std::memory_order_release);
             stagedConfigBuffer.read(cfg);
             cfg.dspParams.mode = DIMENSION_MODE_CUSTOM;
+            cfg.dspParams.stereoWidth = getFloatParam("stereoWidth");
+            cfg.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
 
+            stagedConfig = cfg;
             stagedConfigBuffer.publish(cfg);
             publishConfigToAudio(cfg, newGen);
 
@@ -436,7 +447,11 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
             cfg.dspParams.inputGain = getFloatParam("inputGain");
             cfg.dspParams.outputGain = getFloatParam("outputGain");
             cfg.dspParams.width = getFloatParam("width");
+            cfg.dspParams.stereoWidth = getFloatParam("stereoWidth");
+            cfg.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
             cfg.dspParams.mode = DIMENSION_MODE_CUSTOM;
+            cfg.mix = getMix();
+            cfg.bypassTarget = getBypassTarget();
 
             pendingModeSyncGeneration.store(newGen, std::memory_order_release);
             pendingHostMode.store((int)DIMENSION_MODE_CUSTOM, std::memory_order_release);
@@ -446,6 +461,7 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
         applySingleParamToDspParams(cfg.dspParams, parameterID, newValue);
         cfg.dspParams.mode = DIMENSION_MODE_CUSTOM;
 
+        stagedConfig = cfg;
         stagedConfigBuffer.publish(cfg);
         publishConfigToAudio(cfg, newGen);
         return;
@@ -468,6 +484,7 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
     } else if (parameterID == "bassFocusHz") {
         cfg.dspParams.bassFocusHz = newValue;
     }
+    stagedConfig = cfg;
     stagedConfigBuffer.publish(cfg);
     publishConfigToAudio(cfg, newGen);
 }
@@ -670,13 +687,28 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
 
         currentProgram.store(juce::jlimit(0, getNumPrograms() - 1, xml->getIntAttribute("program", currentProgram.load())), std::memory_order_relaxed);
         activeCompareSlot.store(juce::jlimit(0, 1, xml->getIntAttribute("activeCompareSlot", activeCompareSlot.load())), std::memory_order_relaxed);
+        auto ensureParamXml = [](juce::XmlElement* parent, const char* id, float defaultVal) {
+            for (auto* child : parent->getChildIterator()) {
+                if (child->getStringAttribute("id") == id) {
+                    return;
+                }
+            }
+            auto* newElem = parent->createNewChildElement("PARAM");
+            newElem->setAttribute("id", id);
+            newElem->setAttribute("value", (double)defaultVal);
+        };
+
         if (auto* slotXml = xml->getChildByName("CompareA")) {
             slotXml->setTagName(parameters.state.getType());
+            ensureParamXml(slotXml, "stereoWidth", 1.0f);
+            ensureParamXml(slotXml, "bassFocusHz", 0.0f);
             compareStates[0] = juce::ValueTree::fromXml(*slotXml);
             slotXml->setTagName("CompareA");
         }
         if (auto* slotXml = xml->getChildByName("CompareB")) {
             slotXml->setTagName(parameters.state.getType());
+            ensureParamXml(slotXml, "stereoWidth", 1.0f);
+            ensureParamXml(slotXml, "bassFocusHz", 0.0f);
             compareStates[1] = juce::ValueTree::fromXml(*slotXml);
             slotXml->setTagName("CompareB");
         }
@@ -687,6 +719,9 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
         if (auto* slotXml = stateXml->getChildByName("CompareB")) {
             stateXml->removeChildElement(slotXml, true);
         }
+
+        ensureParamXml(stateXml.get(), "stereoWidth", 1.0f);
+        ensureParamXml(stateXml.get(), "bassFocusHz", 0.0f);
 
         parameters.replaceState(juce::ValueTree::fromXml(*stateXml));
 
@@ -703,8 +738,6 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             p.inputGain = getFloatParam("inputGain");
             p.outputGain = getFloatParam("outputGain");
             p.width = getFloatParam("width");
-        p.stereoWidth = getFloatParam("stereoWidth");
-        p.bassFocusHz = getFloatParam("bassFocusHz");
             p.stereoWidth = getFloatParam("stereoWidth");
             p.bassFocusHz = getFloatParam("bassFocusHz");
 
@@ -734,8 +767,8 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             stagedConfig.dspParams.companderAmount = getFloatParam("companderAmount");
             stagedConfig.dspParams.noiseAmount = 0.0f;
             stagedConfig.dspParams.width = getFloatParam("width");
-    stagedConfig.dspParams.stereoWidth = getFloatParam("stereoWidth");
-    stagedConfig.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
+            stagedConfig.dspParams.stereoWidth = getFloatParam("stereoWidth");
+            stagedConfig.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
             stagedConfig.mix = getMix();
             stagedConfig.bypassTarget = getBypassTarget();
 
@@ -820,7 +853,16 @@ void Dimension5AudioProcessor::switchToCustomMode() {
         stagedConfigBuffer.read(cfg);
         const auto baseMode = (DimensionMode)juce::jlimit(0, 3, lastPresetMode.load(std::memory_order_acquire));
         Dimension_GetModeParams(baseMode, &cfg.dspParams);
+        cfg.dspParams.sampleRate = currentSampleRate.load(std::memory_order_relaxed);
+        cfg.dspParams.inputGain = getFloatParam("inputGain");
+        cfg.dspParams.outputGain = getFloatParam("outputGain");
+        cfg.dspParams.width = getFloatParam("width");
+        cfg.dspParams.stereoWidth = getFloatParam("stereoWidth");
+        cfg.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
         cfg.dspParams.mode = DIMENSION_MODE_CUSTOM;
+        cfg.mix = getMix();
+        cfg.bypassTarget = getBypassTarget();
+
         const uint64_t newGen = stateGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
         stagedConfig = cfg;
         stagedConfigBuffer.publish(cfg);
@@ -869,6 +911,19 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
     if (!compareStates[safeSlot].isValid()) {
         compareStates[safeSlot] = parameters.copyState();
     }
+
+    auto ensureTreeParam = [](juce::ValueTree& vt, const char* id, float defaultVal) {
+        if (!vt.isValid()) return;
+        auto child = vt.getChildWithProperty("id", id);
+        if (!child.isValid()) {
+            juce::ValueTree newChild("PARAM");
+            newChild.setProperty("id", id, nullptr);
+            newChild.setProperty("value", (double)defaultVal, nullptr);
+            vt.addChild(newChild, -1, nullptr);
+        }
+    };
+    ensureTreeParam(compareStates[safeSlot], "stereoWidth", 1.0f);
+    ensureTreeParam(compareStates[safeSlot], "bassFocusHz", 0.0f);
 
     isBatchRestoring.store(true, std::memory_order_release);
     presentationUpdateNeeded.store(false, std::memory_order_release);
@@ -921,8 +976,8 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
         stagedConfig.dspParams.companderAmount = getFloatParam("companderAmount");
         stagedConfig.dspParams.noiseAmount = 0.0f;
         stagedConfig.dspParams.width = getFloatParam("width");
-    stagedConfig.dspParams.stereoWidth = getFloatParam("stereoWidth");
-    stagedConfig.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
+        stagedConfig.dspParams.stereoWidth = getFloatParam("stereoWidth");
+        stagedConfig.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
         stagedConfig.mix = getMix();
         stagedConfig.bypassTarget = getBypassTarget();
 

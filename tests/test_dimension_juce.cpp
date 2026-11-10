@@ -1786,11 +1786,40 @@ void test_generate_visual_validation_snapshots() {
     feedSignal(128, 1.4f, 1.0f, false, { 0.32f, false, false, false });
     save("03_maximum_size.png");
 
-    // 4. Advanced drawer open
+    // 4. Advanced drawer open (Standard size 1000x620, neutral spatial settings)
     editor->setSize(1000, 620);
     editor->setAdvancedVisible(true);
+    setParamHostValue(proc, "stereoWidth", 1.0f);
+    setParamHostValue(proc, "bassFocusHz", 0.0f);
     feedSignal(128, 1.0f, 1.0f, false, { 0.30f, false, false, false });
     save("04_advanced_open.png");
+
+    // 4a. Advanced drawer open at minimum size (840x540)
+    editor->setSize(840, 540);
+    feedSignal(64, 1.0f, 1.0f, false, { 0.30f, false, false, false });
+    save("04a_advanced_open_840x540.png");
+
+    // 4b. Advanced drawer open at maximum size (1600x1000)
+    editor->setSize(1600, 1000);
+    feedSignal(64, 1.0f, 1.0f, false, { 0.30f, false, false, false });
+    save("04b_advanced_open_1600x1000.png");
+
+    // 4c. Advanced drawer with active spatial parameters: Stereo Width = 2.0, Bass Focus = 120 Hz
+    editor->setSize(1000, 620);
+    setParamHostValue(proc, "stereoWidth", 2.0f);
+    setParamHostValue(proc, "bassFocusHz", 120.0f);
+    feedSignal(128, 1.4f, 1.0f, false, { 0.32f, false, false, false });
+    save("04c_advanced_active_width2_bass120.png");
+
+    // 4d. Advanced drawer reflecting external host automation update
+    setParamHostValue(proc, "stereoWidth", 1.60f);
+    setParamHostValue(proc, "bassFocusHz", 180.0f);
+    feedSignal(64, 1.3f, 1.0f, false, { 0.30f, false, false, false });
+    save("04d_advanced_external_automation.png");
+
+    // Restore neutral settings
+    setParamHostValue(proc, "stereoWidth", 1.0f);
+    setParamHostValue(proc, "bassFocusHz", 0.0f);
     editor->setAdvancedVisible(false);
 
     // 5. FIELD
@@ -2103,6 +2132,426 @@ void test_spatial_engine_juce_parameters_and_legacy_xml_recall() {
     check(std::abs(cfg.dspParams.bassFocusHz - 0.0f) < 1e-4f, "legacy state recall defaults bassFocusHz to 0.0");
 }
 
+// 53. Phase 1.1 Scenario A: Mode switching I -> II -> III -> IV -> I preserves stereoWidth and bassFocusHz
+void test_phase11_scenario_a_mode_switching_preserves_spatial_params() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+    setParamHostValue(proc, "stereoWidth", 1.60f);
+    setParamHostValue(proc, "bassFocusHz", 120.0f);
+    processStereoTestSignal(proc);
+
+    DimensionMode modesToTest[] = {
+        DIMENSION_MODE_II,
+        DIMENSION_MODE_III,
+        DIMENSION_MODE_IV,
+        DIMENSION_MODE_I
+    };
+
+    for (DimensionMode targetMode : modesToTest) {
+        setParamHostValue(proc, "mode", (float)targetMode);
+        processStereoTestSignal(proc);
+
+        // 1. APVTS parameter value
+        check(std::abs(proc.getFloatParam("stereoWidth") - 1.60f) < 1e-4f,
+              "APVTS stereoWidth preserved across mode transition");
+        check(std::abs(proc.getFloatParam("bassFocusHz") - 120.0f) < 1e-4f,
+              "APVTS bassFocusHz preserved across mode transition");
+
+        // 2. Staged configuration
+        Dimension5AudioProcessor::PluginConfig stagedCfg;
+        proc.getEffectiveConfig(stagedCfg);
+        check(std::abs(stagedCfg.dspParams.stereoWidth - 1.60f) < 1e-4f,
+              "stagedConfig stereoWidth preserved across mode transition");
+        check(std::abs(stagedCfg.dspParams.bassFocusHz - 120.0f) < 1e-4f,
+              "stagedConfig bassFocusHz preserved across mode transition");
+        check(stagedCfg.dspParams.mode == targetMode,
+              "stagedConfig mode matches target mode");
+
+        // 3. Last applied config on DSP
+        Dimension5AudioProcessor::PluginConfig appliedCfg;
+        proc.getLastAppliedConfig(appliedCfg);
+        check(std::abs(appliedCfg.dspParams.stereoWidth - 1.60f) < 1e-4f,
+              "DSP appliedConfig stereoWidth preserved across mode transition");
+        check(std::abs(appliedCfg.dspParams.bassFocusHz - 120.0f) < 1e-4f,
+              "DSP appliedConfig bassFocusHz preserved across mode transition");
+        check(appliedCfg.dspParams.mode == targetMode,
+              "DSP appliedConfig mode matches target mode");
+
+        // 4. Persisted state
+        juce::MemoryBlock mb;
+        proc.getStateInformation(mb);
+        std::unique_ptr<juce::XmlElement> xml(proc.getXmlFromBinary(mb.getData(), (int)mb.getSize()));
+        check(xml != nullptr, "persisted xml valid");
+        auto* wChild = xml->getChildByAttribute("id", "stereoWidth");
+        auto* bChild = xml->getChildByAttribute("id", "bassFocusHz");
+        check(wChild != nullptr && std::abs((float)wChild->getDoubleAttribute("value") - 1.60f) < 1e-4f,
+              "persisted state stereoWidth is 1.60");
+        check(bChild != nullptr && std::abs((float)bChild->getDoubleAttribute("value") - 120.0f) < 1e-4f,
+              "persisted state bassFocusHz is 120.0");
+    }
+}
+
+// 54. Phase 1.1 Scenario B: Mode II -> Custom transition preserves spatial parameters
+void test_phase11_scenario_b_mode_to_custom_preserves_spatial_params() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Initial setup: Mode II, Stereo Width = 1.75, Bass Focus = 150 Hz, Depth = 1.4 ms
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    setParamHostValue(proc, "stereoWidth", 1.75f);
+    setParamHostValue(proc, "bassFocusHz", 150.0f);
+    processStereoTestSignal(proc);
+
+    // Alter Depth from 1.4 to 2.2 ms
+    setParamHostValue(proc, "depthMs", 2.2f);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_CUSTOM, "Transitioned to Custom mode on depth edit");
+    check(std::abs(cfg.dspParams.stereoWidth - 1.75f) < 1e-4f, "stereoWidth preserved on depth edit to Custom");
+    check(std::abs(cfg.dspParams.bassFocusHz - 150.0f) < 1e-4f, "bassFocusHz preserved on depth edit to Custom");
+    check(std::abs(cfg.dspParams.depthMs - 2.2f) < 1e-4f, "depthMs updated to 2.2 ms");
+
+    // Test other advanced parameters from Mode I -> Custom
+    const char* advParams[] = {
+        "rateHz", "lpfHz", "baseDelayMs", "analogAmount", "companderAmount",
+        "dryGain", "wetDirectGain", "wetCrossGain", "hpfHz"
+    };
+    float testVals[] = {
+        0.80f, 6000.0f, 12.0f, 0.70f, 0.65f,
+        0.90f, 0.60f, 0.40f, 150.0f
+    };
+
+    for (size_t i = 0; i < 9; ++i) {
+        setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+        setParamHostValue(proc, "stereoWidth", 1.75f);
+        setParamHostValue(proc, "bassFocusHz", 150.0f);
+        processStereoTestSignal(proc);
+
+        setParamHostValue(proc, advParams[i], testVals[i]);
+        processStereoTestSignal(proc);
+
+        proc.getLastAppliedConfig(cfg);
+        check(cfg.dspParams.mode == DIMENSION_MODE_CUSTOM, "Switched to Custom on advanced param edit");
+        check(std::abs(cfg.dspParams.stereoWidth - 1.75f) < 1e-4f, "stereoWidth survived edit to Custom");
+        check(std::abs(cfg.dspParams.bassFocusHz - 150.0f) < 1e-4f, "bassFocusHz survived edit to Custom");
+    }
+
+    // Direct selection of Custom via switchToCustomMode()
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_III);
+    setParamHostValue(proc, "stereoWidth", 1.75f);
+    setParamHostValue(proc, "bassFocusHz", 150.0f);
+    processStereoTestSignal(proc);
+
+    proc.switchToCustomMode();
+    processStereoTestSignal(proc);
+
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_CUSTOM, "switchToCustomMode sets Custom");
+    check(std::abs(cfg.dspParams.stereoWidth - 1.75f) < 1e-4f, "stereoWidth preserved in switchToCustomMode");
+    check(std::abs(cfg.dspParams.bassFocusHz - 150.0f) < 1e-4f, "bassFocusHz preserved in switchToCustomMode");
+}
+
+// 55. Phase 1.1 Scenario C: Factory preset selection policy
+void test_phase11_scenario_c_factory_presets_policy() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Set non-neutral spatial controls
+    setParamHostValue(proc, "stereoWidth", 1.85f);
+    setParamHostValue(proc, "bassFocusHz", 140.0f);
+    processStereoTestSignal(proc);
+
+    for (int pIdx = 0; pIdx < proc.getNumPrograms(); ++pIdx) {
+        proc.setCurrentProgram(pIdx);
+        processStereoTestSignal(proc);
+
+        check(std::abs(proc.getFloatParam("stereoWidth") - 1.0f) < 1e-4f,
+              "Factory preset resets stereoWidth to neutral 1.0");
+        check(std::abs(proc.getFloatParam("bassFocusHz") - 0.0f) < 1e-4f,
+              "Factory preset resets bassFocusHz to neutral 0.0 (OFF)");
+
+        Dimension5AudioProcessor::PluginConfig cfg;
+        proc.getLastAppliedConfig(cfg);
+        check(std::abs(cfg.dspParams.stereoWidth - 1.0f) < 1e-4f,
+              "DSP appliedConfig has stereoWidth 1.0 for factory preset");
+        check(std::abs(cfg.dspParams.bassFocusHz - 0.0f) < 1e-4f,
+              "DSP appliedConfig has bassFocusHz 0.0 for factory preset");
+    }
+}
+
+// 56. Phase 1.1 Scenario D: A/B slot switching, copy, and integrity
+void test_phase11_scenario_d_ab_state_integrity() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Slot A: Mode II, Stereo Width = 1.75, Bass Focus = 120 Hz
+    proc.selectCompareSlot(0);
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    setParamHostValue(proc, "stereoWidth", 1.75f);
+    setParamHostValue(proc, "bassFocusHz", 120.0f);
+    processStereoTestSignal(proc);
+
+    // Slot B: Mode IV, Stereo Width = 0.65, Bass Focus = 200 Hz
+    proc.selectCompareSlot(1);
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_IV);
+    setParamHostValue(proc, "stereoWidth", 0.65f);
+    setParamHostValue(proc, "bassFocusHz", 200.0f);
+    processStereoTestSignal(proc);
+
+    // Toggle back and forth 10 times
+    for (int it = 0; it < 10; ++it) {
+        proc.selectCompareSlot(0);
+        processStereoTestSignal(proc);
+        Dimension5AudioProcessor::PluginConfig cfgA;
+        proc.getLastAppliedConfig(cfgA);
+        check(cfgA.dspParams.mode == DIMENSION_MODE_II, "Slot A mode remains Mode II");
+        check(std::abs(cfgA.dspParams.stereoWidth - 1.75f) < 1e-4f, "Slot A stereoWidth remains 1.75");
+        check(std::abs(cfgA.dspParams.bassFocusHz - 120.0f) < 1e-4f, "Slot A bassFocusHz remains 120.0");
+
+        proc.selectCompareSlot(1);
+        processStereoTestSignal(proc);
+        Dimension5AudioProcessor::PluginConfig cfgB;
+        proc.getLastAppliedConfig(cfgB);
+        check(cfgB.dspParams.mode == DIMENSION_MODE_IV, "Slot B mode remains Mode IV");
+        check(std::abs(cfgB.dspParams.stereoWidth - 0.65f) < 1e-4f, "Slot B stereoWidth remains 0.65");
+        check(std::abs(cfgB.dspParams.bassFocusHz - 200.0f) < 1e-4f, "Slot B bassFocusHz remains 200.0");
+    }
+
+    // Advanced edit in Slot A before switching to Slot B
+    proc.selectCompareSlot(0);
+    processStereoTestSignal(proc);
+    setParamHostValue(proc, "depthMs", 2.3f);
+    processStereoTestSignal(proc);
+
+    proc.selectCompareSlot(1);
+    processStereoTestSignal(proc);
+
+    proc.selectCompareSlot(0);
+    processStereoTestSignal(proc);
+    Dimension5AudioProcessor::PluginConfig cfgAAfterEdit;
+    proc.getLastAppliedConfig(cfgAAfterEdit);
+    check(cfgAAfterEdit.dspParams.mode == DIMENSION_MODE_CUSTOM, "Slot A retained Custom mode");
+    check(std::abs(cfgAAfterEdit.dspParams.depthMs - 2.3f) < 1e-4f, "Slot A retained depthMs 2.3");
+    check(std::abs(cfgAAfterEdit.dspParams.stereoWidth - 1.75f) < 1e-4f, "Slot A retained stereoWidth 1.75");
+    check(std::abs(cfgAAfterEdit.dspParams.bassFocusHz - 120.0f) < 1e-4f, "Slot A retained bassFocusHz 120.0");
+
+    // Test COPY A -> B
+    proc.copyCompareToOtherSlot();
+    proc.selectCompareSlot(1);
+    processStereoTestSignal(proc);
+    Dimension5AudioProcessor::PluginConfig cfgBCopied;
+    proc.getLastAppliedConfig(cfgBCopied);
+    check(cfgBCopied.dspParams.mode == DIMENSION_MODE_CUSTOM, "Copied Slot B has Custom mode");
+    check(std::abs(cfgBCopied.dspParams.depthMs - 2.3f) < 1e-4f, "Copied Slot B has depthMs 2.3");
+    check(std::abs(cfgBCopied.dspParams.stereoWidth - 1.75f) < 1e-4f, "Copied Slot B has stereoWidth 1.75");
+    check(std::abs(cfgBCopied.dspParams.bassFocusHz - 120.0f) < 1e-4f, "Copied Slot B has bassFocusHz 120.0");
+}
+
+// 57. Phase 1.1 Scenario E: Save and load project v2 (exact roundtrip)
+void test_phase11_scenario_e_save_recall_v2_exact() {
+    juce::MemoryBlock v2Data;
+    {
+        Dimension5AudioProcessor proc1;
+        proc1.prepareToPlay(48000.0, 32);
+
+        setParamHostValue(proc1, "mode", (float)DIMENSION_MODE_III);
+        setParamHostValue(proc1, "stereoWidth", 1.82f);
+        setParamHostValue(proc1, "bassFocusHz", 165.0f);
+        setParamHostValue(proc1, "mix", 0.88f);
+        processStereoTestSignal(proc1);
+
+        proc1.getStateInformation(v2Data);
+    }
+
+    {
+        Dimension5AudioProcessor proc2;
+        proc2.prepareToPlay(48000.0, 32);
+
+        proc2.setStateInformation(v2Data.getData(), (int)v2Data.getSize());
+        processStereoTestSignal(proc2);
+
+        Dimension5AudioProcessor::PluginConfig cfg;
+        proc2.getLastAppliedConfig(cfg);
+        check(cfg.dspParams.mode == DIMENSION_MODE_III, "Recalled v2 mode is Mode III");
+        check(std::abs(cfg.dspParams.stereoWidth - 1.82f) < 1e-4f, "Recalled v2 stereoWidth is 1.82");
+        check(std::abs(cfg.dspParams.bassFocusHz - 165.0f) < 1e-4f, "Recalled v2 bassFocusHz is 165.0");
+        check(std::abs(cfg.mix - 0.88f) < 1e-4f, "Recalled v2 mix is 0.88");
+    }
+}
+
+// 58. Phase 1.1 Scenario F: Load authentic legacy v1 session without parameter contamination
+void test_phase11_scenario_f_load_v1_legacy_no_contamination() {
+    // Construct authentic v1 XML (schema 1, no stereoWidth or bassFocusHz)
+    juce::XmlElement v1Root("PARAMETERS");
+    auto addParam = [&](const char* id, double val) {
+        auto* child = v1Root.createNewChildElement("PARAM");
+        child->setAttribute("id", id);
+        child->setAttribute("value", val);
+    };
+    addParam("mode", 1.0); // Mode II
+    addParam("dryGain", 0.83);
+    addParam("wetDirectGain", 0.475);
+    addParam("wetCrossGain", 0.3325);
+    addParam("baseDelayMs", 8.5);
+    addParam("depthMs", 1.4);
+    addParam("rateHz", 0.25);
+    addParam("hpfHz", 120.0);
+    addParam("lpfHz", 7500.0);
+    addParam("analogAmount", 0.45);
+    addParam("companderAmount", 0.45);
+    addParam("inputGain", 1.0);
+    addParam("outputGain", 0.95);
+    addParam("width", 1.15);
+    addParam("mix", 0.75);
+    addParam("bypass", 0.0);
+
+    // Also add CompareA and CompareB in legacy format (no spatial params)
+    auto* compA = v1Root.createNewChildElement("CompareA");
+    auto* compB = v1Root.createNewChildElement("CompareB");
+    for (auto* ch : v1Root.getChildIterator()) {
+        if (ch->hasTagName("PARAM")) {
+            compA->addChildElement(new juce::XmlElement(*ch));
+            compB->addChildElement(new juce::XmlElement(*ch));
+        }
+    }
+
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Pre-contaminate instance with extreme non-neutral values
+    setParamHostValue(proc, "stereoWidth", 1.95f);
+    setParamHostValue(proc, "bassFocusHz", 240.0f);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig preCfg;
+    proc.getLastAppliedConfig(preCfg);
+    check(std::abs(preCfg.dspParams.stereoWidth - 1.95f) < 1e-4f, "Pre-contamination stereoWidth set");
+    check(std::abs(preCfg.dspParams.bassFocusHz - 240.0f) < 1e-4f, "Pre-contamination bassFocusHz set");
+
+    // Restore legacy v1 state
+    juce::MemoryBlock v1Mb;
+    proc.copyXmlToBinary(v1Root, v1Mb);
+    proc.setStateInformation(v1Mb.getData(), (int)v1Mb.getSize());
+    processStereoTestSignal(proc);
+
+    // Verify clean defaults with NO contamination
+    check(std::abs(proc.getFloatParam("stereoWidth") - 1.0f) < 1e-4f,
+          "APVTS stereoWidth safely defaulted to 1.0 with no contamination");
+    check(std::abs(proc.getFloatParam("bassFocusHz") - 0.0f) < 1e-4f,
+          "APVTS bassFocusHz safely defaulted to 0.0 with no contamination");
+
+    Dimension5AudioProcessor::PluginConfig postCfg;
+    proc.getLastAppliedConfig(postCfg);
+    check(std::abs(postCfg.dspParams.stereoWidth - 1.0f) < 1e-4f,
+          "DSP appliedConfig stereoWidth defaulted to 1.0");
+    check(std::abs(postCfg.dspParams.bassFocusHz - 0.0f) < 1e-4f,
+          "DSP appliedConfig bassFocusHz defaulted to 0.0");
+    check(postCfg.dspParams.mode == DIMENSION_MODE_II,
+          "Legacy session Mode II correctly restored");
+    check(std::abs(postCfg.dspParams.outputGain - 0.95f) < 1e-4f,
+          "Legacy outputGain 0.95 correctly restored");
+
+    // Switching to CompareA or CompareB must also default to neutral
+    proc.selectCompareSlot(0);
+    processStereoTestSignal(proc);
+    proc.getLastAppliedConfig(postCfg);
+    check(std::abs(postCfg.dspParams.stereoWidth - 1.0f) < 1e-4f,
+          "CompareA slot has neutral stereoWidth 1.0");
+    check(std::abs(postCfg.dspParams.bassFocusHz - 0.0f) < 1e-4f,
+          "CompareA slot has neutral bassFocusHz 0.0");
+}
+
+// 59. Phase 1.1 Scenario G: Host automation without editor open
+void test_phase11_scenario_g_host_automation_without_editor() {
+    Dimension5AudioProcessor proc;
+    check(proc.getActiveEditor() == nullptr, "Editor is not opened");
+    proc.prepareToPlay(48000.0, 32);
+
+    for (int frame = 0; frame < 32; ++frame) {
+        const float targetWidth = 0.5f + (float)frame * (1.5f / 32.0f);
+        const float targetBf = (float)frame * (250.0f / 32.0f);
+        setParamHostValue(proc, "stereoWidth", targetWidth);
+        setParamHostValue(proc, "bassFocusHz", targetBf);
+        processStereoTestSignal(proc);
+
+        Dimension5AudioProcessor::PluginConfig cfg;
+        proc.getLastAppliedConfig(cfg);
+        check(std::abs(cfg.dspParams.stereoWidth - targetWidth) < 1e-3f,
+              "Applied stereoWidth matches automation point");
+        check(std::abs(cfg.dspParams.bassFocusHz - targetBf) < 1e-3f,
+              "Applied bassFocusHz matches automation point");
+    }
+}
+
+// 60. Phase 1.1 Scenario H: Concurrent automation and mode transitions
+void test_phase11_scenario_h_concurrent_automation_and_mode_transitions() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    std::atomic<bool> keepRunning { true };
+    std::atomic<int> errors { 0 };
+
+    // Background thread firing automation events
+    std::thread producerThread([&]() {
+        int step = 0;
+        while (keepRunning.load(std::memory_order_relaxed)) {
+            const int mode = (step % 4);
+            const float w = 0.5f + (float)(step % 15) * 0.1f;
+            const float bf = (float)(step % 10) * 20.0f;
+            setParamHostValue(proc, "mode", (float)mode);
+            setParamHostValue(proc, "stereoWidth", w);
+            setParamHostValue(proc, "bassFocusHz", bf);
+            ++step;
+            std::this_thread::yield();
+        }
+    });
+
+    // Audio thread processing blocks concurrently
+    for (int b = 0; b < 100; ++b) {
+        processStereoTestSignal(proc);
+        Dimension5AudioProcessor::PluginConfig cfg;
+        proc.getLastAppliedConfig(cfg);
+        if (cfg.dspParams.stereoWidth < 0.0f || cfg.dspParams.stereoWidth > 2.5f ||
+            cfg.dspParams.bassFocusHz < 0.0f || cfg.dspParams.bassFocusHz > 500.0f) {
+            errors.fetch_add(1);
+        }
+    }
+
+    keepRunning.store(false, std::memory_order_relaxed);
+    producerThread.join();
+
+    check(errors.load() == 0, "Zero tearing or corruptions under concurrent automation");
+}
+
+// 61. Phase 1.1 Scenario I: Immediate persistence after automated change before timer dispatch
+void test_phase11_scenario_i_immediate_persistence_after_automation() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Host automates changes
+    setParamHostValue(proc, "stereoWidth", 1.45f);
+    setParamHostValue(proc, "bassFocusHz", 110.0f);
+
+    // Immediately save before any timer or visual presentation dispatch
+    juce::MemoryBlock destData;
+    proc.getStateInformation(destData);
+
+    std::unique_ptr<juce::XmlElement> xml(proc.getXmlFromBinary(destData.getData(), (int)destData.getSize()));
+    check(xml != nullptr, "valid xml immediately after automation");
+    auto* wElem = xml->getChildByAttribute("id", "stereoWidth");
+    auto* bfElem = xml->getChildByAttribute("id", "bassFocusHz");
+    check(wElem != nullptr, "stereoWidth element exists in immediate state");
+    check(bfElem != nullptr, "bassFocusHz element exists in immediate state");
+    check(std::abs((float)wElem->getDoubleAttribute("value") - 1.45f) < 1e-4f,
+          "Immediate state persisted stereoWidth = 1.45");
+    check(std::abs((float)bfElem->getDoubleAttribute("value") - 110.0f) < 1e-4f,
+          "Immediate state persisted bassFocusHz = 110.0");
+}
+
 int main() {
     juce::ScopedJuceInitialiser_GUI initialiser;
 
@@ -2262,6 +2711,33 @@ int main() {
 
         std::cout << "[JUCE Tests] 52. test_spatial_engine_juce_parameters_and_legacy_xml_recall...\n";
         test_spatial_engine_juce_parameters_and_legacy_xml_recall();
+
+        std::cout << "[JUCE Tests] 53. test_phase11_scenario_a_mode_switching_preserves_spatial_params...\n";
+        test_phase11_scenario_a_mode_switching_preserves_spatial_params();
+
+        std::cout << "[JUCE Tests] 54. test_phase11_scenario_b_mode_to_custom_preserves_spatial_params...\n";
+        test_phase11_scenario_b_mode_to_custom_preserves_spatial_params();
+
+        std::cout << "[JUCE Tests] 55. test_phase11_scenario_c_factory_presets_policy...\n";
+        test_phase11_scenario_c_factory_presets_policy();
+
+        std::cout << "[JUCE Tests] 56. test_phase11_scenario_d_ab_state_integrity...\n";
+        test_phase11_scenario_d_ab_state_integrity();
+
+        std::cout << "[JUCE Tests] 57. test_phase11_scenario_e_save_recall_v2_exact...\n";
+        test_phase11_scenario_e_save_recall_v2_exact();
+
+        std::cout << "[JUCE Tests] 58. test_phase11_scenario_f_load_v1_legacy_no_contamination...\n";
+        test_phase11_scenario_f_load_v1_legacy_no_contamination();
+
+        std::cout << "[JUCE Tests] 59. test_phase11_scenario_g_host_automation_without_editor...\n";
+        test_phase11_scenario_g_host_automation_without_editor();
+
+        std::cout << "[JUCE Tests] 60. test_phase11_scenario_h_concurrent_automation_and_mode_transitions...\n";
+        test_phase11_scenario_h_concurrent_automation_and_mode_transitions();
+
+        std::cout << "[JUCE Tests] 61. test_phase11_scenario_i_immediate_persistence_after_automation...\n";
+        test_phase11_scenario_i_immediate_persistence_after_automation();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;
