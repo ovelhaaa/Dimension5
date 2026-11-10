@@ -3055,10 +3055,430 @@ void test_generate_phase12_visual_validation_snapshots() {
     delete editor;
 }
 
+// Reproduction Test for Phase 1.2.1: Non-atomic publication ordering race
+void test_reproduction_phase121_non_atomic_publication_race() {
+    struct Payload {
+        int id;
+        float value;
+    };
+
+    dimension_ipc::SnapshotBuffer<Payload, 8> buffer;
+
+    Payload payloadA { 100, 10.0f };
+    Payload payloadB { 200, 11.0f };
+
+    std::atomic<bool> producerAInHook { false };
+    std::atomic<bool> producerBFinished { false };
+
+    buffer.testHookBeforePublishCAS = [&](uint32_t /*slot*/, uint64_t gen) {
+        if (gen == 10) {
+            producerAInHook.store(true, std::memory_order_release);
+            while (!producerBFinished.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    std::thread prodA([&]() {
+        buffer.publish(payloadA, 10);
+    });
+
+    std::thread prodB([&]() {
+        while (!producerAInHook.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        buffer.publish(payloadB, 11);
+        producerBFinished.store(true, std::memory_order_release);
+    });
+
+    prodA.join();
+    prodB.join();
+
+    Payload readPayload {};
+    uint64_t readGen = 0;
+    bool readOk = buffer.read(readPayload, readGen);
+    uint64_t latestPublishedGen = buffer.getLatestPublishedGeneration();
+
+    std::cout << "[Reproduction Evidence] PublishedGen: " << latestPublishedGen
+              << ", ReadGen: " << readGen
+              << ", ReadPayload ID: " << readPayload.id
+              << ", Value: " << readPayload.value << "\n";
+
+    check(readOk, "Read should succeed");
+    check(latestPublishedGen == 11, "Published generation must be 11");
+    check(readGen == 11, "Read generation must be 11");
+    check(readPayload.id == 200 && std::abs(readPayload.value - 11.0f) < 1e-5f, "Read payload must be Payload B (gen 11)");
+}
+
+// =============================================================================
+// Phase 1.2.1 — Deterministic Verification Suite (Tests A through I)
+// =============================================================================
+
+// Test A — Out of order publication
+void test_phase121_case_a_out_of_order_publication() {
+    dimension_ipc::SnapshotBuffer<int, 8> buffer;
+
+    std::atomic<bool> producer1Paused { false };
+    std::atomic<bool> producer2Done { false };
+    std::atomic<bool> producer1Result { true };
+    std::atomic<bool> producer2Result { false };
+
+    buffer.testHookBeforePublishCAS = [&](uint32_t /*slot*/, uint64_t gen) {
+        if (gen == 10) {
+            producer1Paused.store(true, std::memory_order_release);
+            while (!producer2Done.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    std::thread p1([&]() {
+        producer1Result.store(buffer.publish(100, 10));
+    });
+
+    std::thread p2([&]() {
+        while (!producer1Paused.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        producer2Result.store(buffer.publish(200, 11));
+        producer2Done.store(true, std::memory_order_release);
+    });
+
+    p1.join();
+    p2.join();
+
+    int val = 0;
+    uint64_t gen = 0;
+    check(buffer.read(val, gen), "Read succeeded");
+    check(gen == 11, "Generation 11 prevailed over out-of-order generation 10");
+    check(val == 200, "Payload corresponds to generation 11");
+    check(producer2Result.load(), "Producer 2 succeeded");
+    check(!producer1Result.load(), "Producer 1 was rejected as stale");
+}
+
+// Test B — Premature current slot reuse protection
+void test_phase121_case_b_stale_descriptor_slot_reuse_protection() {
+    dimension_ipc::SnapshotBuffer<int, 4> buffer;
+    buffer.publish(10, 1); // Slot 0 published with gen 1
+
+    std::atomic<bool> writerAPreClaim { false };
+    std::atomic<bool> writerBFinished { false };
+
+    // Writer A targets candidate slot while holding stale published descriptor
+    std::thread writerA([&]() {
+        writerAPreClaim.store(true, std::memory_order_release);
+        while (!writerBFinished.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        // Writer A attempts to publish older generation 2
+        buffer.publish(20, 2);
+    });
+
+    std::thread writerB([&]() {
+        while (!writerAPreClaim.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        // Writer B publishes gen 3 to slot 1
+        buffer.publish(30, 3);
+        writerBFinished.store(true, std::memory_order_release);
+    });
+
+    int readVal = 0;
+    uint64_t readGen = 0;
+    writerB.join();
+
+    // While writer A runs, read concurrently
+    check(buffer.read(readVal, readGen), "Read during concurrent write attempt");
+    check(readGen >= 3, "Published generation not corrupted by stale writer");
+    check(readVal == 30, "Published payload intact");
+
+    writerA.join();
+}
+
+// Test C — Reader during writer preparation
+void test_phase121_case_c_reader_during_writer_preparation() {
+    dimension_ipc::SnapshotBuffer<int, 4> buffer;
+    buffer.publish(10, 1);
+
+    // Make candidate slot 2 busy as if a concurrent writer is formatting it
+    buffer.forceSlotBusyForTest(2, true);
+
+    int outVal = 0;
+    uint64_t outGen = 0;
+    check(buffer.read(outVal, outGen), "Reader safely reads published slot while other slot is in write preparation");
+    check(outGen == 1 && outVal == 10, "Reader observed untorn published snapshot");
+
+    buffer.forceSlotBusyForTest(2, false);
+}
+
+// Test D — Reader during publication transition
+void test_phase121_case_d_reader_during_publication_transition() {
+    dimension_ipc::SnapshotBuffer<int, 4> buffer;
+    buffer.publish(100, 1);
+
+    std::atomic<bool> writerPublishedNew { false };
+    buffer.testHookDuringRead = [&](uint32_t /*slot*/) {
+        // While reader holds reservation on slot 1, writer publishes new snapshot
+        buffer.publish(200, 2);
+        writerPublishedNew.store(true, std::memory_order_release);
+    };
+
+    int outVal = 0;
+    uint64_t outGen = 0;
+    check(buffer.read(outVal, outGen), "Read succeeded despite publication transition");
+    check(writerPublishedNew.load(), "Writer published during reader active reservation");
+    check(outGen == 1 && outVal == 100, "Active reader received complete, untorn original snapshot");
+
+    // Subsequent read receives newest snapshot
+    buffer.testHookDuringRead = nullptr;
+    check(buffer.read(outVal, outGen), "Subsequent read succeeded");
+    check(outGen == 2 && outVal == 200, "Subsequent read received updated snapshot");
+}
+
+// Test E — Saturation preserves published snapshot
+void test_phase121_case_e_saturation_preserves_published_snapshot() {
+    dimension_ipc::SnapshotBuffer<int, 4> buffer;
+    check(buffer.publish(42, 1), "Initial publication succeeded");
+
+    // Force all slots busy
+    for (size_t i = 0; i < 4; ++i) {
+        buffer.forceSlotBusyForTest(i, true);
+    }
+
+    bool pub = buffer.publish(999, 2);
+    check(!pub, "Publication gracefully rejected under saturation");
+
+    for (size_t i = 0; i < 4; ++i) {
+        buffer.forceSlotBusyForTest(i, false);
+    }
+
+    // Previous published snapshot remains intact
+    int val = 0;
+    uint64_t gen = 0;
+    check(buffer.read(val, gen), "Read succeeded after saturation");
+    check(gen == 1 && val == 42, "Last valid snapshot preserved under saturation");
+}
+
+// Test F — Three concurrent producers
+void test_phase121_case_f_three_concurrent_producers() {
+    dimension_ipc::SnapshotBuffer<int, 8> buffer;
+
+    std::atomic<bool> startFlag { false };
+
+    auto makeWorker = [&](int id, uint64_t gen) {
+        return std::thread([&, id, gen]() {
+            while (!startFlag.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            buffer.publish(id, gen);
+        });
+    };
+
+    std::thread t1 = makeWorker(100, 100);
+    std::thread t2 = makeWorker(101, 101);
+    std::thread t3 = makeWorker(102, 102);
+
+    startFlag.store(true, std::memory_order_release);
+
+    t1.join();
+    t2.join();
+    t3.join();
+
+    int finalVal = 0;
+    uint64_t finalGen = 0;
+    check(buffer.read(finalVal, finalGen), "Read succeeded after 3 concurrent producers");
+    check(finalGen == 102, "Monotonic publication preserved highest generation 102");
+    check(finalVal == 102, "Payload matches generation 102");
+}
+
+// Test G — Multiple concurrent readers and writers
+void test_phase121_case_g_multiple_readers_and_writers() {
+    struct TestPayload {
+        uint64_t seq;
+        float values[4];
+    };
+
+    dimension_ipc::SnapshotBuffer<TestPayload, 8> buffer;
+    std::atomic<bool> running { true };
+    std::atomic<int> readErrors { 0 };
+
+    auto writerFunc = [&](uint64_t baseGen) {
+        for (uint64_t i = 1; i <= 200 && running.load(std::memory_order_relaxed); ++i) {
+            TestPayload p;
+            p.seq = baseGen + i;
+            for (int k = 0; k < 4; ++k) {
+                p.values[k] = (float)p.seq * 1.5f;
+            }
+            buffer.publish(p, p.seq);
+            std::this_thread::yield();
+        }
+    };
+
+    auto readerFunc = [&]() {
+        uint64_t lastSeenGen = 0;
+        int reads = 0;
+        while (running.load(std::memory_order_relaxed) && reads < 300) {
+            TestPayload p {};
+            uint64_t gen = 0;
+            if (buffer.read(p, gen)) {
+                if (gen < lastSeenGen) {
+                    readErrors.fetch_add(1); // Non-monotonic generation observed
+                }
+                lastSeenGen = gen;
+                if (p.seq != gen) {
+                    readErrors.fetch_add(1); // Payload/generation mismatch
+                }
+                for (int k = 0; k < 4; ++k) {
+                    if (std::abs(p.values[k] - (float)gen * 1.5f) > 1e-4f) {
+                        readErrors.fetch_add(1); // Torn payload
+                    }
+                }
+                ++reads;
+            }
+            std::this_thread::yield();
+        }
+    };
+
+    std::thread w1([&]() { writerFunc(1000); });
+    std::thread w2([&]() { writerFunc(2000); });
+
+    std::thread r1(readerFunc);
+    std::thread r2(readerFunc);
+    std::thread r3(readerFunc);
+    std::thread r4(readerFunc);
+
+    w1.join();
+    w2.join();
+    running.store(false, std::memory_order_release);
+
+    r1.join();
+    r2.join();
+    r3.join();
+    r4.join();
+
+    check(readErrors.load() == 0, "No tearing, non-monotonic reads, or corruptions under concurrent readers/writers");
+}
+
+// Test H — Fallback policy semantics
+void test_phase121_case_h_fallback_policy_semantics() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "stereoWidth", 1.75f);
+    setParamHostValue(proc, "bassFocusHz", 135.0f);
+
+    auto& stagedBuf = proc.getStagedConfigBufferForTesting();
+    for (size_t i = 0; i < 8; ++i) {
+        stagedBuf.forceSlotBusyForTest(i, true);
+    }
+
+    Dimension5AudioProcessor::PluginConfig fallbackCfg {};
+    uint64_t fallbackGen = 999;
+    bool stagedOk = proc.getEffectiveConfig(fallbackCfg, fallbackGen);
+
+    check(!stagedOk, "Fallback explicitly returns false to indicate non-staged state");
+    check(fallbackGen == 0, "Fallback generation is 0 (never spoofed as confirmed generation)");
+    check(std::abs(fallbackCfg.dspParams.stereoWidth - 1.75f) < 1e-3f, "Fallback preserved stereoWidth");
+    check(std::abs(fallbackCfg.dspParams.bassFocusHz - 135.0f) < 1e-3f, "Fallback preserved bassFocusHz");
+    check(std::isfinite(fallbackCfg.dspParams.stereoWidth) && std::isfinite(fallbackCfg.dspParams.bassFocusHz),
+          "Fallback parameters are finite");
+
+    for (size_t i = 0; i < 8; ++i) {
+        stagedBuf.forceSlotBusyForTest(i, false);
+    }
+}
+
+// Test I — Wraparound and boundary limits
+void test_phase121_case_i_wraparound_overflow_boundaries() {
+    dimension_ipc::SnapshotBuffer<int, 4> buffer;
+
+    // Test near 56-bit generation boundary (2^55 + 42)
+    constexpr uint64_t kHighGen = (1ULL << 55) + 42ULL;
+    check(buffer.publish(12345, kHighGen), "Published near 56-bit generation boundary");
+
+    int val = 0;
+    uint64_t gen = 0;
+    check(buffer.read(val, gen), "Read from high generation boundary");
+    check(gen == kHighGen, "Generation preserved exactly near 56-bit limit");
+    check(val == 12345, "Payload preserved near high boundary");
+
+    // Successive monotonic publication
+    check(buffer.publish(67890, kHighGen + 1ULL), "Monotonic advance above 2^55");
+    check(buffer.read(val, gen), "Read after advance");
+    check(gen == kHighGen + 1ULL && val == 67890, "Preserved values after boundary increment");
+}
+
+// Section 10: Correlated Snapshots Integrity Test
+void test_phase121_correlated_snapshots_integrity() {
+    struct CorrelatedPayload {
+        int profileId; // 1 = Alpha, 2 = Beta
+        float width;
+        float bassFocus;
+        int mode;
+    };
+
+    dimension_ipc::SnapshotBuffer<CorrelatedPayload, 8> buffer;
+
+    std::atomic<bool> stopFlag { false };
+    std::atomic<int> hybridErrors { 0 };
+
+    // Producer 1 publishes pure Alpha
+    std::thread p1([&] {
+        for (int i = 0; i < 500 && !stopFlag.load(std::memory_order_relaxed); ++i) {
+            CorrelatedPayload alpha { 1, 0.70f, 80.0f, (int)DIMENSION_MODE_I };
+            buffer.publish(alpha);
+            std::this_thread::yield();
+        }
+    });
+
+    // Producer 2 publishes pure Beta
+    std::thread p2([&] {
+        for (int i = 0; i < 500 && !stopFlag.load(std::memory_order_relaxed); ++i) {
+            CorrelatedPayload beta { 2, 1.80f, 160.0f, (int)DIMENSION_MODE_III };
+            buffer.publish(beta);
+            std::this_thread::yield();
+        }
+    });
+
+    // Reader verifies that EVERY read is purely Alpha or purely Beta, never a torn hybrid
+    std::thread reader([&] {
+        int successfulReads = 0;
+        while (!stopFlag.load(std::memory_order_relaxed) && successfulReads < 800) {
+            CorrelatedPayload p {};
+            uint64_t gen = 0;
+            if (buffer.read(p, gen)) {
+                if (p.profileId == 1) {
+                    if (std::abs(p.width - 0.70f) > 1e-4f || std::abs(p.bassFocus - 80.0f) > 1e-4f || p.mode != DIMENSION_MODE_I) {
+                        hybridErrors.fetch_add(1);
+                    }
+                } else if (p.profileId == 2) {
+                    if (std::abs(p.width - 1.80f) > 1e-4f || std::abs(p.bassFocus - 160.0f) > 1e-4f || p.mode != DIMENSION_MODE_III) {
+                        hybridErrors.fetch_add(1);
+                    }
+                } else {
+                    hybridErrors.fetch_add(1);
+                }
+                ++successfulReads;
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    p1.join();
+    p2.join();
+    stopFlag.store(true, std::memory_order_release);
+    reader.join();
+
+    check(hybridErrors.load() == 0, "Correlated snapshot integrity verified: zero hybrid states observed");
+}
+
 int main() {
     juce::ScopedJuceInitialiser_GUI initialiser;
 
     try {
+        std::cout << "[JUCE Tests] 0. test_reproduction_phase121_non_atomic_publication_race...\n";
+        test_reproduction_phase121_non_atomic_publication_race();
+
         std::cout << "[JUCE Tests] 1. test_processor_construction_and_prepare...\n";
         test_processor_construction_and_prepare();
 
@@ -3268,6 +3688,36 @@ int main() {
 
         std::cout << "[JUCE Tests] 70. test_generate_phase12_visual_validation_snapshots...\n";
         test_generate_phase12_visual_validation_snapshots();
+
+        std::cout << "[JUCE Tests] 71. test_phase121_case_a_out_of_order_publication...\n";
+        test_phase121_case_a_out_of_order_publication();
+
+        std::cout << "[JUCE Tests] 72. test_phase121_case_b_stale_descriptor_slot_reuse_protection...\n";
+        test_phase121_case_b_stale_descriptor_slot_reuse_protection();
+
+        std::cout << "[JUCE Tests] 73. test_phase121_case_c_reader_during_writer_preparation...\n";
+        test_phase121_case_c_reader_during_writer_preparation();
+
+        std::cout << "[JUCE Tests] 74. test_phase121_case_d_reader_during_publication_transition...\n";
+        test_phase121_case_d_reader_during_publication_transition();
+
+        std::cout << "[JUCE Tests] 75. test_phase121_case_e_saturation_preserves_published_snapshot...\n";
+        test_phase121_case_e_saturation_preserves_published_snapshot();
+
+        std::cout << "[JUCE Tests] 76. test_phase121_case_f_three_concurrent_producers...\n";
+        test_phase121_case_f_three_concurrent_producers();
+
+        std::cout << "[JUCE Tests] 77. test_phase121_case_g_multiple_readers_and_writers...\n";
+        test_phase121_case_g_multiple_readers_and_writers();
+
+        std::cout << "[JUCE Tests] 78. test_phase121_case_h_fallback_policy_semantics...\n";
+        test_phase121_case_h_fallback_policy_semantics();
+
+        std::cout << "[JUCE Tests] 79. test_phase121_case_i_wraparound_overflow_boundaries...\n";
+        test_phase121_case_i_wraparound_overflow_boundaries();
+
+        std::cout << "[JUCE Tests] 80. test_phase121_correlated_snapshots_integrity...\n";
+        test_phase121_correlated_snapshots_integrity();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;

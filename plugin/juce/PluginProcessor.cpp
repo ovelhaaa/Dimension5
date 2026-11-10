@@ -1018,9 +1018,11 @@ bool Dimension5AudioProcessor::getEffectiveConfig(PluginConfig& outConfig, uint6
             return true;
         }
     }
-    // Fallback: construct safe, coherent configuration from atomic parameters
+    // Fallback: When stagedConfigBuffer is unavailable (slots saturated or under contention),
+    // construct a safe, coherent configuration directly from atomic parameters.
+    // This preserves latest host automation (including stereoWidth and bassFocusHz).
     constructConfigFromParameters(outConfig);
-    outGen = stateGeneration.load(std::memory_order_acquire);
+    outGen = 0; // Explicitly indicates an unconfirmed/reconstructed fallback (never masquerading as a confirmed generation)
     return false;
 }
 

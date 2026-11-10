@@ -69,3 +69,17 @@ target_compile_definitions(dimension5_juce_tests
 
 add_test(NAME dimension5_juce_tests COMMAND dimension5_juce_tests)
 
+find_package(Threads REQUIRED)
+add_executable(dimension5_snapshot_standalone_tests
+  ${CMAKE_SOURCE_DIR}/tests/test_snapshot_buffer_standalone.cpp)
+
+target_include_directories(dimension5_snapshot_standalone_tests
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+
+target_link_libraries(dimension5_snapshot_standalone_tests
+  PRIVATE
+    Threads::Threads)
+
+add_test(NAME dimension5_snapshot_standalone_tests COMMAND dimension5_snapshot_standalone_tests)
+
