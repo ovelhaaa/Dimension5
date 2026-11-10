@@ -49,6 +49,8 @@ DIM_WASM_EXPORT void DimensionWasm_SetParam(int paramId, float value) {
         case DIMENSION_PARAM_ANALOG_AMOUNT: p.analogAmount = value; p.mode = DIMENSION_MODE_CUSTOM; break;
         case DIMENSION_PARAM_COMPANDER_AMOUNT: p.companderAmount = value; p.mode = DIMENSION_MODE_CUSTOM; break;
         case DIMENSION_PARAM_WIDTH: p.width = value; break;
+        case DIMENSION_PARAM_STEREO_WIDTH: p.stereoWidth = value; break;
+        case DIMENSION_PARAM_BASS_FOCUS_HZ: p.bassFocusHz = value; break;
         default: return;
     }
     Dimension_SetParams(&g_dsp, &p);

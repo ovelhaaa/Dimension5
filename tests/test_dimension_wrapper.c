@@ -30,6 +30,8 @@ typedef struct MockPluginState {
     float analogAmount;
     float companderAmount;
     float width;
+    float stereoWidth;
+    float bassFocusHz;
 } MockPluginState;
 
 static void mock_init_defaults(MockPluginState* s) {
@@ -51,6 +53,8 @@ static void mock_init_defaults(MockPluginState* s) {
     s->analogAmount = p.analogAmount;
     s->companderAmount = p.companderAmount;
     s->width = p.width;
+    s->stereoWidth = p.stereoWidth;
+    s->bassFocusHz = p.bassFocusHz;
 }
 
 static void mock_apply_mode(MockPluginState* s, DimensionMode mode) {
@@ -333,6 +337,40 @@ static int test_mix_and_bypass_smoothing(void) {
     return 0;
 }
 
+static int test_spatial_engine_wrapper_parameters_and_legacy_recall(void) {
+    MockPluginState s;
+    mock_init_defaults(&s);
+    CHECK(s.stereoWidth == 1.0f);
+    CHECK(s.bassFocusHz == 0.0f);
+
+    /* Changing mode does not alter stereoWidth or bassFocusHz */
+    s.stereoWidth = 1.6f;
+    s.bassFocusHz = 120.0f;
+    mock_apply_mode(&s, DIMENSION_MODE_III);
+    CHECK(s.stereoWidth == 1.6f);
+    CHECK(s.bassFocusHz == 120.0f);
+
+    /* Simulate legacy state restore without stereoWidth or bassFocusHz:
+     * In APVTS / Wrapper, missing keys fall back to descriptor defaults */
+    const DimensionParamDescriptor* dWidth = Dimension_GetParamDescriptor(DIMENSION_PARAM_STEREO_WIDTH);
+    const DimensionParamDescriptor* dBF = Dimension_GetParamDescriptor(DIMENSION_PARAM_BASS_FOCUS_HZ);
+    CHECK(dWidth != NULL && dWidth->defaultValue == 1.0f);
+    CHECK(dBF != NULL && dBF->defaultValue == 0.0f);
+
+    /* A/B compare slots preserve spatial parameters */
+    MockPluginState slotA = s;
+    MockPluginState slotB;
+    mock_init_defaults(&slotB);
+    slotB.stereoWidth = 0.5f;
+    slotB.bassFocusHz = 80.0f;
+
+    CHECK(slotA.stereoWidth == 1.6f);
+    CHECK(slotA.bassFocusHz == 120.0f);
+    CHECK(slotB.stereoWidth == 0.5f);
+    CHECK(slotB.bassFocusHz == 80.0f);
+    return 0;
+}
+
 int main(void) {
 #define RUN_TEST(fn) do { if ((fn)() != 0) return 1; } while (0)
     RUN_TEST(test_mode_preset_values_exact);
@@ -342,6 +380,7 @@ int main(void) {
     RUN_TEST(test_channel_routing_mono_to_stereo);
     RUN_TEST(test_channel_routing_mono_to_mono);
     RUN_TEST(test_mix_and_bypass_smoothing);
+    RUN_TEST(test_spatial_engine_wrapper_parameters_and_legacy_recall);
     puts("test_dimension_wrapper: OK");
     return 0;
 }

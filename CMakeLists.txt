@@ -60,6 +60,10 @@ add_executable(dimension5_offline_render tools/dimension5_offline_render.c)
 target_link_libraries(dimension5_offline_render PRIVATE dimension5_core)
 dimension5_apply_host_options(dimension5_offline_render)
 
+add_executable(dimension5_spatial_engine_validation tools/spatial_engine_validation.c)
+target_link_libraries(dimension5_spatial_engine_validation PRIVATE dimension5_core)
+dimension5_apply_host_options(dimension5_spatial_engine_validation)
+
 if(DIMENSION5_BUILD_JUCE_PLUGIN)
   enable_language(CXX)
   set(CMAKE_CXX_STANDARD 17)

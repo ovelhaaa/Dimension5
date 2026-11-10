@@ -69,6 +69,8 @@ void applySingleParamToDspParams(DimensionParams& p, const juce::String& id, flo
     else if (id == "lpfHz")             p.lpfHz = value;
     else if (id == "analogAmount")      p.analogAmount = value;
     else if (id == "companderAmount")   p.companderAmount = value;
+    else if (id == "stereoWidth")       p.stereoWidth = value;
+    else if (id == "bassFocusHz")       p.bassFocusHz = value;
 }
 void updateValueTreeWithConfig(juce::ValueTree& state, const Dimension5AudioProcessor::PluginConfig& cfg) {
     auto setVal = [&](const char* id, float val) {
@@ -91,6 +93,8 @@ void updateValueTreeWithConfig(juce::ValueTree& state, const Dimension5AudioProc
     setVal("inputGain", cfg.dspParams.inputGain);
     setVal("outputGain", cfg.dspParams.outputGain);
     setVal("width", cfg.dspParams.width);
+    setVal("stereoWidth", cfg.dspParams.stereoWidth);
+    setVal("bassFocusHz", cfg.dspParams.bassFocusHz);
     setVal(kMixParamId, cfg.mix);
     setVal(kBypassParamId, cfg.bypassTarget <= 0.5f ? 1.0f : 0.0f);
 }
@@ -111,6 +115,8 @@ Dimension5AudioProcessor::Dimension5AudioProcessor()
     stagedConfig.dspParams.inputGain = getFloatParam("inputGain");
     stagedConfig.dspParams.outputGain = getFloatParam("outputGain");
     stagedConfig.dspParams.width = getFloatParam("width");
+    stagedConfig.dspParams.stereoWidth = getFloatParam("stereoWidth");
+    stagedConfig.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
     stagedConfig.mix = getMix();
     stagedConfig.bypassTarget = getBypassTarget();
 
@@ -128,6 +134,8 @@ Dimension5AudioProcessor::Dimension5AudioProcessor()
     parameters.addParameterListener("inputGain", this);
     parameters.addParameterListener("outputGain", this);
     parameters.addParameterListener("width", this);
+    parameters.addParameterListener("stereoWidth", this);
+    parameters.addParameterListener("bassFocusHz", this);
     for (const char* id : kAdvancedParamIds) {
         parameters.addParameterListener(id, this);
     }
@@ -143,6 +151,8 @@ Dimension5AudioProcessor::~Dimension5AudioProcessor() {
     parameters.removeParameterListener("inputGain", this);
     parameters.removeParameterListener("outputGain", this);
     parameters.removeParameterListener("width", this);
+    parameters.removeParameterListener("stereoWidth", this);
+    parameters.removeParameterListener("bassFocusHz", this);
     for (const char* id : kAdvancedParamIds) {
         parameters.removeParameterListener(id, this);
     }
@@ -453,6 +463,10 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
         cfg.dspParams.outputGain = newValue;
     } else if (parameterID == "width") {
         cfg.dspParams.width = newValue;
+    } else if (parameterID == "stereoWidth") {
+        cfg.dspParams.stereoWidth = newValue;
+    } else if (parameterID == "bassFocusHz") {
+        cfg.dspParams.bassFocusHz = newValue;
     }
     stagedConfigBuffer.publish(cfg);
     publishConfigToAudio(cfg, newGen);
@@ -689,6 +703,10 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             p.inputGain = getFloatParam("inputGain");
             p.outputGain = getFloatParam("outputGain");
             p.width = getFloatParam("width");
+        p.stereoWidth = getFloatParam("stereoWidth");
+        p.bassFocusHz = getFloatParam("bassFocusHz");
+            p.stereoWidth = getFloatParam("stereoWidth");
+            p.bassFocusHz = getFloatParam("bassFocusHz");
 
             stagedConfig.dspParams = p;
             stagedConfig.mix = getMix();
@@ -716,6 +734,8 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             stagedConfig.dspParams.companderAmount = getFloatParam("companderAmount");
             stagedConfig.dspParams.noiseAmount = 0.0f;
             stagedConfig.dspParams.width = getFloatParam("width");
+    stagedConfig.dspParams.stereoWidth = getFloatParam("stereoWidth");
+    stagedConfig.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
             stagedConfig.mix = getMix();
             stagedConfig.bypassTarget = getBypassTarget();
 
@@ -872,6 +892,8 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
         p.inputGain = getFloatParam("inputGain");
         p.outputGain = getFloatParam("outputGain");
         p.width = getFloatParam("width");
+        p.stereoWidth = getFloatParam("stereoWidth");
+        p.bassFocusHz = getFloatParam("bassFocusHz");
 
         stagedConfig.dspParams = p;
         stagedConfig.mix = getMix();
@@ -899,6 +921,8 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
         stagedConfig.dspParams.companderAmount = getFloatParam("companderAmount");
         stagedConfig.dspParams.noiseAmount = 0.0f;
         stagedConfig.dspParams.width = getFloatParam("width");
+    stagedConfig.dspParams.stereoWidth = getFloatParam("stereoWidth");
+    stagedConfig.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
         stagedConfig.mix = getMix();
         stagedConfig.bypassTarget = getBypassTarget();
 
@@ -963,6 +987,8 @@ void Dimension5AudioProcessor::applyFactoryPreset(int index) {
     setFloatParamHost("inputGain", preset.inputGain);
     setFloatParamHost("outputGain", preset.outputGain);
     setFloatParamHost("width", preset.width);
+    setFloatParamHost("stereoWidth", 1.0f);
+    setFloatParamHost("bassFocusHz", 0.0f);
     setFloatParamHost(kMixParamId, preset.mix);
     setFloatParamHost(kBypassParamId, 0.0f);
     isPresentationSyncActive.store(false, std::memory_order_release);
@@ -977,6 +1003,8 @@ void Dimension5AudioProcessor::applyFactoryPreset(int index) {
     p.inputGain = preset.inputGain;
     p.outputGain = preset.outputGain;
     p.width = preset.width;
+    p.stereoWidth = 1.0f;
+    p.bassFocusHz = 0.0f;
 
     stagedConfig.dspParams = p;
     stagedConfig.mix = preset.mix;

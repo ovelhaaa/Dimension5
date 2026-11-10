@@ -53,6 +53,8 @@ typedef struct DimensionParams {
     float companderAmount;
     float noiseAmount;
     float width;
+    float stereoWidth;
+    float bassFocusHz;
 } DimensionParams;
 
 typedef struct DimensionDSP {
@@ -73,6 +75,7 @@ typedef struct DimensionDSP {
     float expEnvR;
     float bbdStateL;
     float bbdStateR;
+    float bassFocusState;
     float smoothRateHz;
     float smoothDepthMs;
     float smoothBaseDelayMs;
@@ -82,10 +85,13 @@ typedef struct DimensionDSP {
     float smoothInputGain;
     float smoothOutputGain;
     float smoothWidth;
+    float smoothStereoWidth;
     float smoothHpfHz;
     float smoothLpfHz;
     float smoothAnalogAmount;
     float smoothCompanderAmount;
+    float smoothBassFocusHz;
+    float smoothBassFocusAmount;
     float smoothCoeff;
 } DimensionDSP;
 

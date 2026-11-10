@@ -68,3 +68,4 @@ CMakeCache.txt
 compile_commands.json
 out/
 external/
+docs/audio/
