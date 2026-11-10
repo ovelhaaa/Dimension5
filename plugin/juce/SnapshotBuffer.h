@@ -48,8 +48,11 @@ public:
     enum class PublishResult {
         Success = 0,
         StaleGeneration,
-        SlotsUnavailable
+        SlotsUnavailable,
+        ContentionLimitReached
     };
+
+    static constexpr int kMaxPublishCasAttempts = 8;
 
     SnapshotBuffer() {
         publishedDescriptor.store(0, std::memory_order_relaxed);
@@ -65,9 +68,38 @@ public:
     std::function<void(uint32_t slot)> testHookDuringRead { nullptr };
     std::function<void(uint32_t cand, uint64_t gen)> testHookPostGenCAS { nullptr };
     std::function<void(uint32_t cand, uint64_t gen)> testHookBeforePublishCAS { nullptr };
+    std::function<void(uint32_t cand, uint64_t gen)> testHookPreSlotClaim { nullptr };
 
     PublishResult publishDetailed(const T& val, uint64_t gen = 0) {
-        const uint64_t effectiveGen = (gen != 0) ? gen : (autoGen.fetch_add(1, std::memory_order_relaxed) + 1);
+        uint64_t effectiveGen = 0;
+        if (gen != 0) {
+            effectiveGen = gen;
+            // Advance autoGen so subsequent automatic publications stay strictly ahead of explicit generations
+            uint64_t curAuto = autoGen.load(std::memory_order_relaxed);
+            while (effectiveGen > curAuto &&
+                   !autoGen.compare_exchange_weak(curAuto, effectiveGen,
+                                                  std::memory_order_relaxed,
+                                                  std::memory_order_relaxed)) {
+            }
+        } else {
+            // Automatic monotonic generation: must be strictly greater than both autoGen
+            // and the currently published generation.
+            const uint64_t curDescSnapshot = publishedDescriptor.load(std::memory_order_acquire);
+            const uint64_t lastPubGen = (curDescSnapshot != 0) ? extractGen(curDescSnapshot) : 0;
+            uint64_t curAuto = autoGen.load(std::memory_order_relaxed);
+            uint64_t nextGen = (curAuto > lastPubGen ? curAuto : lastPubGen) + 1;
+            while (true) {
+                if (nextGen <= curAuto) {
+                    nextGen = curAuto + 1;
+                }
+                if (autoGen.compare_exchange_weak(curAuto, nextGen,
+                                                  std::memory_order_relaxed,
+                                                  std::memory_order_relaxed)) {
+                    effectiveGen = nextGen;
+                    break;
+                }
+            }
+        }
 
         // Fast reject if incoming generation is already stale
         uint64_t curDesc = publishedDescriptor.load(std::memory_order_acquire);
@@ -86,6 +118,11 @@ public:
                 continue;
             }
 
+            // Test hook: called after candidate slot is selected but before attempting claim
+            if (testHookPreSlotClaim) {
+                testHookPreSlotClaim(cand, effectiveGen);
+            }
+
             // A candidate slot can ONLY be claimed if state == 0 (FREE).
             // Published slots have kPublishedBit; reading slots have readerCount > 0;
             // writing slots have kBusyWriteBit. All non-zero states fail here.
@@ -99,7 +136,7 @@ public:
             // Post-claim validation: verify cand didn't become published while we claimed it
             curDesc = publishedDescriptor.load(std::memory_order_acquire);
             if (curDesc != 0 && cand == extractSlot(curDesc)) {
-                slots[cand].state.store(0, std::memory_order_release);
+                slots[cand].state.store(kPublishedBit, std::memory_order_release);
                 continue;
             }
 
@@ -111,8 +148,8 @@ public:
             // Readers cannot read it yet because publishedDescriptor does not point to it.
             slots[cand].state.store(kPublishedBit, std::memory_order_release);
 
-            // Monotonic CAS loop to update publishedDescriptor
-            while (true) {
+            // Bounded monotonic CAS loop to update publishedDescriptor
+            for (int attempt = 0; attempt < kMaxPublishCasAttempts; ++attempt) {
                 if (curDesc != 0 && effectiveGen <= extractGen(curDesc)) {
                     // Stale generation: another writer published a newer or equal generation
                     // Revert candidate slot back to FREE
@@ -146,6 +183,10 @@ public:
                 }
                 // compare_exchange_weak updated curDesc with the freshest publishedDescriptor
             }
+
+            // CAS attempts exhausted under contention: revert candidate slot back to FREE
+            slots[cand].state.store(0, std::memory_order_release);
+            return PublishResult::ContentionLimitReached;
         }
 
         // All candidate slots were unavailable (saturation)
@@ -230,6 +271,19 @@ public:
         slots[slot % NumSlots].state.store(val, std::memory_order_release);
     }
 
+    void forcePublishedDescriptorForTest(uint64_t gen, uint32_t slot) {
+        publishedDescriptor.store(makeDescriptor(gen, slot % NumSlots), std::memory_order_release);
+    }
+
+    /**
+     * Resets the buffer to its empty initial state.
+     *
+     * CONCURRENCY CONTRACT / PRECONDITION:
+     * reset() is NOT thread-safe with respect to concurrent calls to publish() or read().
+     * Callers must ensure external mutual exclusion or invoke reset() only during
+     * lifecycle transitions (e.g. processor construction, destruction, or offline prepareToPlay)
+     * when no producers or consumers are actively calling publish() or read().
+     */
     void reset() {
         publishedDescriptor.store(0, std::memory_order_release);
         for (size_t i = 0; i < NumSlots; ++i) {

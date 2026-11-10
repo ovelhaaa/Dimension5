@@ -3159,40 +3159,47 @@ void test_phase121_case_a_out_of_order_publication() {
 // Test B — Premature current slot reuse protection
 void test_phase121_case_b_stale_descriptor_slot_reuse_protection() {
     dimension_ipc::SnapshotBuffer<int, 4> buffer;
-    buffer.publish(10, 1); // Slot 0 published with gen 1
+    buffer.publish(10, 1); // Published with gen 1
 
-    std::atomic<bool> writerAPreClaim { false };
+    std::atomic<bool> writerAInHook { false };
     std::atomic<bool> writerBFinished { false };
+    std::atomic<dimension_ipc::SnapshotBuffer<int, 4>::PublishResult> resultA {};
+
+    // Hook: called after Writer A selected candidate slot, but before claiming it!
+    buffer.testHookPreSlotClaim = [&](uint32_t /*cand*/, uint64_t gen) {
+        if (gen == 2) {
+            writerAInHook.store(true, std::memory_order_release);
+            while (!writerBFinished.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        }
+    };
 
     // Writer A targets candidate slot while holding stale published descriptor
     std::thread writerA([&]() {
-        writerAPreClaim.store(true, std::memory_order_release);
-        while (!writerBFinished.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-        }
-        // Writer A attempts to publish older generation 2
-        buffer.publish(20, 2);
+        resultA.store(buffer.publishDetailed(20, 2));
     });
 
     std::thread writerB([&]() {
-        while (!writerAPreClaim.load(std::memory_order_acquire)) {
+        while (!writerAInHook.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
-        // Writer B publishes gen 3 to slot 1
-        buffer.publish(30, 3);
+        // Writer B publishes gen 3 to the slot targeted by A
+        check(buffer.publish(30, 3), "Writer B publishes gen 3");
         writerBFinished.store(true, std::memory_order_release);
     });
 
+    writerB.join();
+    writerA.join();
+
+    check(resultA.load() == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::StaleGeneration,
+          "Writer A was rejected as StaleGeneration");
+
     int readVal = 0;
     uint64_t readGen = 0;
-    writerB.join();
-
-    // While writer A runs, read concurrently
-    check(buffer.read(readVal, readGen), "Read during concurrent write attempt");
-    check(readGen >= 3, "Published generation not corrupted by stale writer");
+    check(buffer.read(readVal, readGen), "Read succeeded after concurrent collision");
+    check(readGen == 3, "Published generation not corrupted by stale writer");
     check(readVal == 30, "Published payload intact");
-
-    writerA.join();
 }
 
 // Test C — Reader during writer preparation
@@ -3472,6 +3479,134 @@ void test_phase121_correlated_snapshots_integrity() {
     check(hybridErrors.load() == 0, "Correlated snapshot integrity verified: zero hybrid states observed");
 }
 
+// =============================================================================
+// Phase 1.2.2 — Hardening & Verification Suite (Tests 81 through 85)
+// =============================================================================
+
+// 81. Phase 1.2.2 Scenario C: Realtime Lifecycle, Automation, and Save/Recall Integrity
+void test_phase122_scenario_c_realtime_lifecycle_and_automation() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    Dimension5AudioProcessor::PluginConfig cfgInit {};
+    proc.getLastAppliedConfig(cfgInit);
+    check(std::abs(cfgInit.dspParams.sampleRate - 48000.0f) < 1.0e-3f, "Applied sample rate is 48 kHz");
+
+    juce::AudioBuffer<float> buffer(2, 32);
+    buffer.clear();
+    juce::MidiBuffer midi;
+    proc.processBlock(buffer, midi);
+
+    if (auto* swParam = proc.parameters.getParameter("stereoWidth")) {
+        swParam->setValueNotifyingHost(swParam->convertTo0to1(1.65f));
+    }
+    if (auto* bfParam = proc.parameters.getParameter("bassFocusHz")) {
+        bfParam->setValueNotifyingHost(bfParam->convertTo0to1(150.0f));
+    }
+
+    proc.processBlock(buffer, midi);
+
+    Dimension5AudioProcessor::PluginConfig appliedCfg {};
+    proc.getLastAppliedConfig(appliedCfg);
+    check(std::abs(appliedCfg.dspParams.stereoWidth - 1.65f) < 1e-4f,
+          "Applied config has updated stereoWidth (1.65)");
+    check(std::abs(appliedCfg.dspParams.bassFocusHz - 150.0f) < 1e-4f,
+          "Applied config has updated bassFocusHz (150 Hz)");
+
+    juce::MemoryBlock stateData;
+    proc.getStateInformation(stateData);
+
+    Dimension5AudioProcessor procRestored;
+    procRestored.setStateInformation(stateData.getData(), (int)stateData.getSize());
+    procRestored.prepareToPlay(48000.0, 32);
+    procRestored.processBlock(buffer, midi);
+
+    Dimension5AudioProcessor::PluginConfig restoredCfg {};
+    procRestored.getLastAppliedConfig(restoredCfg);
+    check(std::abs(restoredCfg.dspParams.stereoWidth - 1.65f) < 1e-4f,
+          "Restored processor applied stereoWidth 1.65");
+    check(std::abs(restoredCfg.dspParams.bassFocusHz - 150.0f) < 1e-4f,
+          "Restored processor applied bassFocusHz 150 Hz");
+}
+
+// 82. Phase 1.2.2 Scenario D: Multiple prepareToPlay Calls with Sample Rate Transitions
+void test_phase122_scenario_d_multi_prepare_sample_rate_changes() {
+    Dimension5AudioProcessor proc;
+    juce::AudioBuffer<float> buffer(2, 64);
+    buffer.clear();
+    juce::MidiBuffer midi;
+
+    proc.prepareToPlay(44100.0, 32);
+    proc.processBlock(buffer, midi);
+    Dimension5AudioProcessor::PluginConfig cfg1 {};
+    proc.getLastAppliedConfig(cfg1);
+    check(std::abs(cfg1.dspParams.sampleRate - 44100.0f) < 1.0e-3f, "Sample rate 44.1 kHz correctly applied");
+
+    proc.prepareToPlay(48000.0, 64);
+    proc.processBlock(buffer, midi);
+    Dimension5AudioProcessor::PluginConfig cfg2 {};
+    proc.getLastAppliedConfig(cfg2);
+    check(std::abs(cfg2.dspParams.sampleRate - 48000.0f) < 1.0e-3f, "Sample rate 48.0 kHz correctly applied");
+
+    proc.prepareToPlay(96000.0, 32);
+    proc.processBlock(buffer, midi);
+    Dimension5AudioProcessor::PluginConfig cfg3 {};
+    proc.getLastAppliedConfig(cfg3);
+    check(std::abs(cfg3.dspParams.sampleRate - 96000.0f) < 1.0e-3f, "Sample rate 96.0 kHz correctly applied");
+
+    proc.prepareToPlay(48000.0, 32);
+    proc.processBlock(buffer, midi);
+    Dimension5AudioProcessor::PluginConfig cfg4 {};
+    proc.getLastAppliedConfig(cfg4);
+    check(std::abs(cfg4.dspParams.sampleRate - 48000.0f) < 1.0e-3f, "Sample rate 48.0 kHz correctly restored");
+}
+
+// 83. Phase 1.2.2 Bounded CAS Loop and Contention Limit
+void test_phase122_bounded_cas_contention_limit() {
+    dimension_ipc::SnapshotBuffer<int, 4> buf;
+    check(buf.publish(10, 1), "Initial publish");
+
+    int attempts = 0;
+    buf.testHookBeforePublishCAS = [&](uint32_t cand, uint64_t /*gen*/) {
+        attempts++;
+        buf.forcePublishedDescriptorForTest((uint64_t)attempts, (cand + 1) % 4);
+    };
+
+    auto res = buf.publishDetailed(99, 100);
+    check(res == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::ContentionLimitReached,
+          "Returns ContentionLimitReached under forced contention");
+    check(attempts == 8, "Exactly 8 CAS attempts executed");
+
+    buf.testHookBeforePublishCAS = nullptr;
+    auto res2 = buf.publishDetailed(101, 101);
+    check(res2 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::Success,
+          "Candidate slot was properly released and subsequent publish succeeds");
+}
+
+// 84. Phase 1.2.2 Mixed Generations Scenario A
+void test_phase122_mixed_generations_scenario_a() {
+    dimension_ipc::SnapshotBuffer<int, 4> buf;
+    check(buf.publish(10, 1), "Explicit publish gen 1");
+    check(buf.publish(20), "Automatic publish after explicit gen 1");
+
+    int val = 0;
+    uint64_t g = 0;
+    check(buf.read(val, g), "Read succeeded");
+    check(val == 20 && g == 2, "Automatic generation monotonic from 1 -> 2");
+}
+
+// 85. Phase 1.2.2 Mixed Generations Scenario B
+void test_phase122_mixed_generations_scenario_b() {
+    dimension_ipc::SnapshotBuffer<int, 4> buf;
+    check(buf.publish(100, 100), "Explicit publish gen 100");
+    check(buf.publish(200), "Automatic publish after explicit gen 100");
+
+    int val = 0;
+    uint64_t g = 0;
+    check(buf.read(val, g), "Read succeeded");
+    check(val == 200 && g == 101, "Automatic generation monotonic from 100 -> 101");
+}
+
 int main() {
     juce::ScopedJuceInitialiser_GUI initialiser;
 
@@ -3718,6 +3853,21 @@ int main() {
 
         std::cout << "[JUCE Tests] 80. test_phase121_correlated_snapshots_integrity...\n";
         test_phase121_correlated_snapshots_integrity();
+
+        std::cout << "[JUCE Tests] 81. test_phase122_scenario_c_realtime_lifecycle_and_automation...\n";
+        test_phase122_scenario_c_realtime_lifecycle_and_automation();
+
+        std::cout << "[JUCE Tests] 82. test_phase122_scenario_d_multi_prepare_sample_rate_changes...\n";
+        test_phase122_scenario_d_multi_prepare_sample_rate_changes();
+
+        std::cout << "[JUCE Tests] 83. test_phase122_bounded_cas_contention_limit...\n";
+        test_phase122_bounded_cas_contention_limit();
+
+        std::cout << "[JUCE Tests] 84. test_phase122_mixed_generations_scenario_a...\n";
+        test_phase122_mixed_generations_scenario_a();
+
+        std::cout << "[JUCE Tests] 85. test_phase122_mixed_generations_scenario_b...\n";
+        test_phase122_mixed_generations_scenario_b();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;
