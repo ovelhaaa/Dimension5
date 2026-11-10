@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <numeric>
 #include <thread>
 #include <vector>
@@ -404,7 +405,232 @@ void test_standalone_stress_mpmc() {
     check(errors.load() == 0, "No tearing, corruption, or non-monotonic ordering in MPMC stress");
 }
 
-// 11. Performance Benchmarks (Section 11)
+// =============================================================================
+// Phase 1.2.3 — Deterministic Generation Hardening Suite (Section 4 Tests A..F)
+// =============================================================================
+
+// 11. Test A — Explicit Generation under Contention
+void test_phase123_test_a_explicit_gen_contention() {
+    dimension_ipc::SnapshotBuffer<int, 8> buf;
+    std::atomic<bool> start { false };
+    std::atomic<int> completed { 0 };
+
+    auto worker = [&](uint64_t baseGen) {
+        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (int i = 0; i < 200; ++i) {
+            buf.publish(i, baseGen + (uint64_t)i);
+        }
+        completed.fetch_add(1, std::memory_order_release);
+    };
+
+    std::thread t1(worker, 1000);
+    std::thread t2(worker, 2000);
+    std::thread t3(worker, 3000);
+    std::thread t4(worker, 4000);
+
+    start.store(true, std::memory_order_release);
+    t1.join();
+    t2.join();
+    t3.join();
+    t4.join();
+
+    check(completed.load() == 4, "All 4 explicit generation producers completed without unbounded loops");
+    int val = 0;
+    uint64_t g = 0;
+    check(buf.read(val, g), "Read succeeded");
+    check(g >= 4000, "Published generation monotonically advanced to at least 4000");
+}
+
+// 12. Test B — Automatic Generation under Contention
+void test_phase123_test_b_auto_gen_contention() {
+    dimension_ipc::SnapshotBuffer<int, 8> buf;
+    std::atomic<bool> start { false };
+    std::vector<uint64_t> acceptedGenerations[4];
+    std::mutex genMutex;
+
+    auto worker = [&](int threadId) {
+        std::vector<uint64_t> threadGens;
+        threadGens.reserve(200);
+        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (int i = 0; i < 200; ++i) {
+            if (buf.publish(threadId * 1000 + i)) {
+                uint64_t curPub = buf.getLatestPublishedGeneration();
+                if (curPub > 0) {
+                    threadGens.push_back(curPub);
+                }
+            }
+        }
+        std::lock_guard<std::mutex> lock(genMutex);
+        acceptedGenerations[threadId] = std::move(threadGens);
+    };
+
+    std::thread t0(worker, 0);
+    std::thread t1(worker, 1);
+    std::thread t2(worker, 2);
+    std::thread t3(worker, 3);
+
+    start.store(true, std::memory_order_release);
+    t0.join();
+    t1.join();
+    t2.join();
+    t3.join();
+
+    std::vector<uint64_t> allGens;
+    for (int i = 0; i < 4; ++i) {
+        allGens.insert(allGens.end(), acceptedGenerations[i].begin(), acceptedGenerations[i].end());
+    }
+    check(!allGens.empty(), "Automatic publications were accepted");
+    std::sort(allGens.begin(), allGens.end());
+    auto it = std::adjacent_find(allGens.begin(), allGens.end());
+    check(it == allGens.end(), "Zero duplicate generations accepted under concurrent automatic publication");
+}
+
+// 13. Test C — Mixed Generations Sequence (Section 4 Scenario C)
+// Sequence: Explicit 1 -> Auto -> Explicit 100 -> Auto -> Explicit 99 -> Auto
+void test_phase123_test_c_mixed_generations_sequence() {
+    dimension_ipc::SnapshotBuffer<int, 4> buf;
+    int readVal = 0;
+    uint64_t readGen = 0;
+
+    // 1. Explicit 1
+    auto r1 = buf.publishDetailed(10, 1);
+    check(r1 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::Success, "Explicit 1 succeeded");
+    check(buf.read(readVal, readGen) && readGen == 1 && readVal == 10, "Read gen 1 with val 10");
+
+    // 2. Auto -> expected gen 2
+    auto r2 = buf.publishDetailed(20);
+    check(r2 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::Success, "Auto after 1 succeeded");
+    check(buf.read(readVal, readGen) && readGen == 2 && readVal == 20, "Read gen 2 with val 20");
+
+    // 3. Explicit 100 -> expected gen 100
+    auto r3 = buf.publishDetailed(100, 100);
+    check(r3 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::Success, "Explicit 100 succeeded");
+    check(buf.read(readVal, readGen) && readGen == 100 && readVal == 100, "Read gen 100 with val 100");
+
+    // 4. Auto -> expected gen 101
+    auto r4 = buf.publishDetailed(101);
+    check(r4 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::Success, "Auto after 100 succeeded");
+    check(buf.read(readVal, readGen) && readGen == 101 && readVal == 101, "Read gen 101 with val 101");
+
+    // 5. Explicit 99 -> expected REJECTION (StaleGeneration) because 99 <= 101!
+    auto r5 = buf.publishDetailed(99, 99);
+    check(r5 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::StaleGeneration, "Explicit 99 rejected as StaleGeneration");
+    // Ensure published state was NOT overwritten by stale generation
+    check(buf.read(readVal, readGen) && readGen == 101 && readVal == 101, "State preserved at gen 101");
+
+    // 6. Auto -> expected gen 102
+    auto r6 = buf.publishDetailed(102);
+    check(r6 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::Success, "Auto after rejected 99 succeeded");
+    check(buf.read(readVal, readGen) && readGen == 102 && readVal == 102, "Read gen 102 with val 102");
+}
+
+// 14. Test D — Generation Reservation Contention Limit (Section 4 Scenario D)
+void test_phase123_test_d_gen_reservation_contention_limit() {
+    // 1. Explicit generation reservation forced contention limit
+    {
+        dimension_ipc::SnapshotBuffer<int, 4> buf;
+        int hookCalls = 0;
+        buf.testHookBeforeGenCAS = [&](int attempt) {
+            hookCalls++;
+            // Modify autoGen before each CAS attempt so expected value never matches
+            buf.forceAutoGenForTest((uint64_t)(attempt + 1));
+        };
+
+        auto res = buf.publishDetailed(42, 1000);
+        check(res == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::ContentionLimitReached,
+              "Explicit gen reservation returns ContentionLimitReached under forced contention");
+        check(hookCalls == dimension_ipc::SnapshotBuffer<int, 4>::kMaxGenCasAttempts,
+              "Exactly kMaxGenCasAttempts (8) reservation attempts were executed");
+    }
+
+    // 2. Automatic generation reservation forced contention limit
+    {
+        dimension_ipc::SnapshotBuffer<int, 4> buf;
+        int hookCalls = 0;
+        buf.testHookBeforeGenCAS = [&](int attempt) {
+            hookCalls++;
+            // Invalidate expected curAuto on each attempt
+            buf.forceAutoGenForTest((uint64_t)(attempt + 50));
+        };
+
+        auto res = buf.publishDetailed(99);
+        check(res == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::ContentionLimitReached,
+              "Auto gen reservation returns ContentionLimitReached under forced contention");
+        check(hookCalls == dimension_ipc::SnapshotBuffer<int, 4>::kMaxGenCasAttempts,
+              "Exactly kMaxGenCasAttempts (8) auto reservation attempts were executed");
+    }
+}
+
+// 15. Test E — Numerical Limits (56-bit capacity, overflow boundary, no silent wraparound)
+void test_phase123_test_e_numerical_limits_56bit_capacity() {
+    dimension_ipc::SnapshotBuffer<int, 4> buf;
+    constexpr uint64_t kMaxGen = 0x00FFFFFFFFFFFFFFULL;
+
+    // Explicit generation exceeding 56 bits must be rejected as StaleGeneration/overflow
+    auto r1 = buf.publishDetailed(1, kMaxGen + 1ULL);
+    check(r1 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::StaleGeneration,
+          "Explicit gen > 2^56 - 1 is rejected");
+
+    // Force autoGen to kMaxGen and attempt automatic publication
+    buf.forceAutoGenForTest(kMaxGen);
+    auto r2 = buf.publishDetailed(2);
+    check(r2 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::StaleGeneration,
+          "Auto gen at 56-bit capacity is safely rejected without silent wraparound");
+
+    // Verify valid generation at kMaxGen - 1 succeeds
+    buf.reset();
+    auto r3 = buf.publishDetailed(3, kMaxGen - 1ULL);
+    check(r3 == dimension_ipc::SnapshotBuffer<int, 4>::PublishResult::Success,
+          "Publication at boundary (kMaxGen - 1) succeeds");
+    int outVal = 0;
+    uint64_t outGen = 0;
+    check(buf.read(outVal, outGen), "Read at boundary succeeded");
+    check(outGen == kMaxGen - 1ULL, "Boundary generation retrieved accurately");
+}
+
+// 16. Test F — Slot Preservation Suite
+void test_phase123_test_f_slot_preservation_suite() {
+    dimension_ipc::SnapshotBuffer<int, 4> buf;
+    // Step 1: Initial publish to slot 0
+    check(buf.publish(10, 1), "Publish gen 1");
+
+    // Step 2: Simulate active reader reserving slot 0
+    std::atomic<bool> readerInSlot { false };
+    std::atomic<bool> writerFinished { false };
+
+    buf.testHookDuringRead = [&](uint32_t /*slot*/) {
+        readerInSlot.store(true, std::memory_order_release);
+        while (!writerFinished.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    };
+
+    std::thread readerThread([&]() {
+        int v = 0;
+        uint64_t g = 0;
+        check(buf.read(v, g), "Reader read gen 1");
+        check(v == 10 && g == 1, "Reader payload matches gen 1");
+    });
+
+    std::thread writerThread([&]() {
+        while (!readerInSlot.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        // Slot 0 is protected by active reader count. Writer must use slot 1!
+        check(buf.publish(20, 2), "Writer publish gen 2 to available slot");
+        writerFinished.store(true, std::memory_order_release);
+    });
+
+    readerThread.join();
+    writerThread.join();
+
+    int v = 0;
+    uint64_t g = 0;
+    check(buf.read(v, g), "Read gen 2");
+    check(v == 20 && g == 2, "Latest payload is gen 2");
+}
+
+// 17. Performance Benchmarks (Section 11)
 void run_performance_benchmarks() {
     using Clock = std::chrono::high_resolution_clock;
 
@@ -634,6 +860,30 @@ int main() {
     std::cout << "[Running] Test 10: test_standalone_stress_mpmc..." << std::endl;
     test_standalone_stress_mpmc();
     std::cout << "Test 10: MPMC stress test PASSED" << std::endl;
+
+    std::cout << "[Running] Test 11: test_phase123_test_a_explicit_gen_contention..." << std::endl;
+    test_phase123_test_a_explicit_gen_contention();
+    std::cout << "Test 11: Explicit generation under contention PASSED" << std::endl;
+
+    std::cout << "[Running] Test 12: test_phase123_test_b_auto_gen_contention..." << std::endl;
+    test_phase123_test_b_auto_gen_contention();
+    std::cout << "Test 12: Automatic generation under contention PASSED" << std::endl;
+
+    std::cout << "[Running] Test 13: test_phase123_test_c_mixed_generations_sequence..." << std::endl;
+    test_phase123_test_c_mixed_generations_sequence();
+    std::cout << "Test 13: Mixed generations sequence PASSED" << std::endl;
+
+    std::cout << "[Running] Test 14: test_phase123_test_d_gen_reservation_contention_limit..." << std::endl;
+    test_phase123_test_d_gen_reservation_contention_limit();
+    std::cout << "Test 14: Generation reservation contention limit PASSED" << std::endl;
+
+    std::cout << "[Running] Test 15: test_phase123_test_e_numerical_limits_56bit_capacity..." << std::endl;
+    test_phase123_test_e_numerical_limits_56bit_capacity();
+    std::cout << "Test 15: Numerical limits (56-bit capacity) PASSED" << std::endl;
+
+    std::cout << "[Running] Test 16: test_phase123_test_f_slot_preservation_suite..." << std::endl;
+    test_phase123_test_f_slot_preservation_suite();
+    std::cout << "Test 16: Slot preservation suite PASSED" << std::endl;
 
     std::cout << "\n=== Running Performance Benchmarks ===" << std::endl;
     run_performance_benchmarks();

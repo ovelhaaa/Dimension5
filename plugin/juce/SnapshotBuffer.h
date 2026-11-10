@@ -53,6 +53,7 @@ public:
     };
 
     static constexpr int kMaxPublishCasAttempts = 8;
+    static constexpr int kMaxGenCasAttempts = 8;
 
     SnapshotBuffer() {
         publishedDescriptor.store(0, std::memory_order_relaxed);
@@ -69,17 +70,35 @@ public:
     std::function<void(uint32_t cand, uint64_t gen)> testHookPostGenCAS { nullptr };
     std::function<void(uint32_t cand, uint64_t gen)> testHookBeforePublishCAS { nullptr };
     std::function<void(uint32_t cand, uint64_t gen)> testHookPreSlotClaim { nullptr };
+    std::function<void(int attempt)> testHookBeforeGenCAS { nullptr };
 
     PublishResult publishDetailed(const T& val, uint64_t gen = 0) {
         uint64_t effectiveGen = 0;
         if (gen != 0) {
+            if (gen > kMaxGen) {
+                return PublishResult::StaleGeneration;
+            }
             effectiveGen = gen;
             // Advance autoGen so subsequent automatic publications stay strictly ahead of explicit generations
             uint64_t curAuto = autoGen.load(std::memory_order_relaxed);
-            while (effectiveGen > curAuto &&
-                   !autoGen.compare_exchange_weak(curAuto, effectiveGen,
+            bool advancedOk = (curAuto >= effectiveGen);
+            for (int attempt = 0; attempt < kMaxGenCasAttempts && !advancedOk; ++attempt) {
+                if (testHookBeforeGenCAS) {
+                    testHookBeforeGenCAS(attempt);
+                }
+                if (autoGen.compare_exchange_weak(curAuto, effectiveGen,
                                                   std::memory_order_relaxed,
                                                   std::memory_order_relaxed)) {
+                    advancedOk = true;
+                    break;
+                }
+                if (curAuto >= effectiveGen) {
+                    advancedOk = true;
+                    break;
+                }
+            }
+            if (!advancedOk) {
+                return PublishResult::ContentionLimitReached;
             }
         } else {
             // Automatic monotonic generation: must be strictly greater than both autoGen
@@ -87,17 +106,25 @@ public:
             const uint64_t curDescSnapshot = publishedDescriptor.load(std::memory_order_acquire);
             const uint64_t lastPubGen = (curDescSnapshot != 0) ? extractGen(curDescSnapshot) : 0;
             uint64_t curAuto = autoGen.load(std::memory_order_relaxed);
-            uint64_t nextGen = (curAuto > lastPubGen ? curAuto : lastPubGen) + 1;
-            while (true) {
-                if (nextGen <= curAuto) {
-                    nextGen = curAuto + 1;
+
+            for (int attempt = 0; attempt < kMaxGenCasAttempts; ++attempt) {
+                if (testHookBeforeGenCAS) {
+                    testHookBeforeGenCAS(attempt);
                 }
+                const uint64_t baseGen = (curAuto > lastPubGen) ? curAuto : lastPubGen;
+                if (baseGen >= kMaxGen) {
+                    return PublishResult::StaleGeneration; // 56-bit capacity reached, prevent overflow
+                }
+                const uint64_t nextGen = baseGen + 1;
                 if (autoGen.compare_exchange_weak(curAuto, nextGen,
                                                   std::memory_order_relaxed,
                                                   std::memory_order_relaxed)) {
                     effectiveGen = nextGen;
                     break;
                 }
+            }
+            if (effectiveGen == 0) {
+                return PublishResult::ContentionLimitReached;
             }
         }
 
@@ -273,6 +300,10 @@ public:
 
     void forcePublishedDescriptorForTest(uint64_t gen, uint32_t slot) {
         publishedDescriptor.store(makeDescriptor(gen, slot % NumSlots), std::memory_order_release);
+    }
+
+    void forceAutoGenForTest(uint64_t val) {
+        autoGen.store(val, std::memory_order_release);
     }
 
     /**

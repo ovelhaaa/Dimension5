@@ -3607,7 +3607,336 @@ void test_phase122_mixed_generations_scenario_b() {
     check(val == 200 && g == 101, "Automatic generation monotonic from 100 -> 101");
 }
 
+// 86. Phase 1.2.3 Reproduction: Problem B (Lost Update when stagedConfigBuffer.publish fails)
+void test_phase123_reproduction_problem_b_lost_update() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Initial state: Mode II, Stereo Width = 1.00, Bass Focus = 0.0 Hz
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    setParamHostValue(proc, "stereoWidth", 1.00f);
+    setParamHostValue(proc, "bassFocusHz", 0.0f);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfgInit;
+    proc.getLastAppliedConfig(cfgInit);
+    check(cfgInit.dspParams.mode == DIMENSION_MODE_II, "Initial mode is II");
+    check(std::abs(cfgInit.dspParams.stereoWidth - 1.00f) < 1e-4f, "Initial stereoWidth is 1.00");
+    check(std::abs(cfgInit.dspParams.bassFocusHz - 0.0f) < 1e-4f, "Initial bassFocusHz is 0.0");
+
+    // DAW automates:
+    // 1. Stereo Width -> 1.75
+    // Force stagedConfigBuffer.publish() to fail via CAS contention
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = [&](uint32_t cand, uint64_t /*gen*/) {
+        proc.getStagedConfigBufferForTesting().forcePublishedDescriptorForTest(9999, (cand + 1) % 8);
+    };
+
+    setParamHostValue(proc, "stereoWidth", 1.75f);
+    // Remove the failure hook
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = nullptr;
+
+    // 2. Next, before audio thread processes, DAW automates Bass Focus -> 120 Hz
+    setParamHostValue(proc, "bassFocusHz", 120.0f);
+
+    // Now audio thread processes the block
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfgApplied;
+    proc.getLastAppliedConfig(cfgApplied);
+
+    std::cout << "[Reproduction] Applied Mode: " << (int)cfgApplied.dspParams.mode << "\n";
+    std::cout << "[Reproduction] Applied Stereo Width: " << cfgApplied.dspParams.stereoWidth << " (Expected 1.75)\n";
+    std::cout << "[Reproduction] Applied Bass Focus: " << cfgApplied.dspParams.bassFocusHz << " (Expected 120.0)\n";
+
+    check(std::abs(cfgApplied.dspParams.stereoWidth - 1.75f) < 1e-4f,
+          "Stereo Width MUST be 1.75 (NOT lost/reverted to 1.00!)");
+    check(std::abs(cfgApplied.dspParams.bassFocusHz - 120.0f) < 1e-4f,
+          "Bass Focus MUST be 120 Hz");
+}
+
+// =============================================================================
+// Phase 1.2.3 — Deterministic State Consistency Suite (Section 8 Scenarios 1..8)
+// =============================================================================
+
+// 87. Scenario 1: Two parameters, first staged snapshot publish fails
+void test_phase123_scenario_1_two_params_staged_failure() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    setParamHostValue(proc, "stereoWidth", 1.00f);
+    setParamHostValue(proc, "bassFocusHz", 0.0f);
+    processStereoTestSignal(proc);
+
+    // Force staged publish failure for stereoWidth -> 1.75
+    int casAttempts = 0;
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = [&](uint32_t cand, uint64_t /*gen*/) {
+        casAttempts++;
+        proc.getStagedConfigBufferForTesting().forcePublishedDescriptorForTest(1, (cand + (uint32_t)casAttempts) % 8);
+    };
+    setParamHostValue(proc, "stereoWidth", 1.75f);
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = nullptr;
+
+    // Follow-up edit before audio runs: bassFocusHz -> 120
+    setParamHostValue(proc, "bassFocusHz", 120.0f);
+
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_II, "Mode preserved as II");
+    check(std::abs(cfg.dspParams.stereoWidth - 1.75f) < 1e-4f, "Stereo Width is 1.75");
+    check(std::abs(cfg.dspParams.bassFocusHz - 120.0f) < 1e-4f, "Bass Focus is 120 Hz");
+    check(proc.getIpcPublishContentionLimitCount() > 0, "Contention limit recorded on forced failure");
+    check(proc.getIpcStaleStateRecoveredCount() > 0, "Stale state recovery succeeded");
+}
+
+// 88. Scenario 2: Multiple consecutive edits with intermediate staged failure
+void test_phase123_scenario_2_multiple_consecutive_edits_intermediate_failure() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+    setParamHostValue(proc, "stereoWidth", 1.60f);
+
+    // Intermediate failure on bassFocusHz -> 180 via slot unavailability (saturation)
+    for (size_t i = 0; i < 8; ++i) proc.getStagedConfigBufferForTesting().forceSlotBusyForTest(i, true);
+    setParamHostValue(proc, "bassFocusHz", 180.0f);
+    for (size_t i = 0; i < 8; ++i) proc.getStagedConfigBufferForTesting().forceSlotBusyForTest(i, false);
+
+    setParamHostValue(proc, "width", 1.30f);
+    setParamHostValue(proc, "mix", 0.65f);
+
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.stereoWidth - 1.60f) < 1e-4f, "stereoWidth = 1.60 preserved");
+    check(std::abs(cfg.dspParams.bassFocusHz - 180.0f) < 1e-4f, "bassFocusHz = 180 preserved");
+    check(std::abs(cfg.dspParams.width - 1.30f) < 1e-4f, "width = 1.30 preserved");
+    check(std::abs(cfg.mix - 0.65f) < 1e-4f, "mix = 0.65 preserved");
+    check(proc.getIpcPublishSlotsUnavailableCount() > 0, "SlotsUnavailable failure counted");
+}
+
+// 89. Scenario 3: Mode -> Custom with intermediate staged failure
+void test_phase123_scenario_3_mode_to_custom_preserves_spatial() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    setParamHostValue(proc, "stereoWidth", 1.80f);
+    setParamHostValue(proc, "bassFocusHz", 150.0f);
+    processStereoTestSignal(proc);
+
+    // Force snapshot failure during depthMs change
+    int casAttempts3 = 0;
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = [&](uint32_t cand, uint64_t /*gen*/) {
+        casAttempts3++;
+        proc.getStagedConfigBufferForTesting().forcePublishedDescriptorForTest((uint64_t)casAttempts3, (cand + (uint32_t)casAttempts3) % 8);
+    };
+    setParamHostValue(proc, "depthMs", 2.8f);
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = nullptr;
+
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_CUSTOM, "Transitioned to Custom");
+    check(std::abs(cfg.dspParams.depthMs - 2.8f) < 1e-4f, "depthMs = 2.8 ms");
+    check(std::abs(cfg.dspParams.baseDelayMs - 8.5f) < 1e-4f, "baseDelayMs = 8.5 ms (Mode II preset)");
+    check(std::abs(cfg.dspParams.stereoWidth - 1.80f) < 1e-4f, "stereoWidth = 1.80 strictly preserved");
+    check(std::abs(cfg.dspParams.bassFocusHz - 150.0f) < 1e-4f, "bassFocusHz = 150 strictly preserved");
+}
+
+// 90. Scenario 4: Mode switching preserves global properties after failure
+void test_phase123_scenario_4_mode_switching_preserves_global_params() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+    setParamHostValue(proc, "stereoWidth", 1.45f);
+    setParamHostValue(proc, "bassFocusHz", 90.0f);
+
+    int casAttempts4 = 0;
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = [&](uint32_t cand, uint64_t /*gen*/) {
+        casAttempts4++;
+        proc.getStagedConfigBufferForTesting().forcePublishedDescriptorForTest((uint64_t)casAttempts4, (cand + (uint32_t)casAttempts4) % 8);
+    };
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_III);
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = nullptr;
+
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_III, "Switched to Mode III");
+    check(std::abs(cfg.dspParams.baseDelayMs - 10.0f) < 1e-4f, "baseDelayMs = 10.0 ms (Mode III)");
+    check(std::abs(cfg.dspParams.rateHz - 0.50f) < 1e-4f, "rateHz = 0.50 Hz (Mode III)");
+    check(std::abs(cfg.dspParams.stereoWidth - 1.45f) < 1e-4f, "stereoWidth = 1.45 preserved");
+    check(std::abs(cfg.dspParams.bassFocusHz - 90.0f) < 1e-4f, "bassFocusHz = 90 preserved");
+}
+
+// 91. Scenario 5: A/B comparison integrity after staged snapshot failure
+void test_phase123_scenario_5_ab_comparison_state_integrity() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Setup Slot A
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+    int casAttempts5 = 0;
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = [&](uint32_t cand, uint64_t /*gen*/) {
+        casAttempts5++;
+        proc.getStagedConfigBufferForTesting().forcePublishedDescriptorForTest((uint64_t)casAttempts5, (cand + (uint32_t)casAttempts5) % 8);
+    };
+    setParamHostValue(proc, "stereoWidth", 1.35f);
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = nullptr;
+    setParamHostValue(proc, "bassFocusHz", 85.0f);
+
+    // Switch to Slot B (capturing Slot A)
+    proc.selectCompareSlot(1);
+    check(proc.getActiveCompareSlot() == 1, "Active compare slot is B");
+
+    // Setup Slot B with distinct parameters
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_IV);
+    setParamHostValue(proc, "stereoWidth", 0.80f);
+    setParamHostValue(proc, "bassFocusHz", 200.0f);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfgB;
+    proc.getLastAppliedConfig(cfgB);
+    check(cfgB.dspParams.mode == DIMENSION_MODE_IV, "Slot B mode is IV");
+    check(std::abs(cfgB.dspParams.stereoWidth - 0.80f) < 1e-4f, "Slot B stereoWidth is 0.80");
+    check(std::abs(cfgB.dspParams.bassFocusHz - 200.0f) < 1e-4f, "Slot B bassFocusHz is 200");
+
+    // Switch back to Slot A
+    proc.selectCompareSlot(0);
+    check(proc.getActiveCompareSlot() == 0, "Active compare slot is A");
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfgA;
+    proc.getLastAppliedConfig(cfgA);
+    check(cfgA.dspParams.mode == DIMENSION_MODE_I, "Slot A restored mode I");
+    check(std::abs(cfgA.dspParams.stereoWidth - 1.35f) < 1e-4f, "Slot A restored stereoWidth 1.35");
+    check(std::abs(cfgA.dspParams.bassFocusHz - 85.0f) < 1e-4f, "Slot A restored bassFocusHz 85");
+}
+
+// 92. Scenario 6: Save/Recall persistence after staged failure
+void test_phase123_scenario_6_save_recall_persistence() {
+    Dimension5AudioProcessor proc1;
+    proc1.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc1, "mode", (float)DIMENSION_MODE_II);
+    setParamHostValue(proc1, "stereoWidth", 1.65f);
+    setParamHostValue(proc1, "bassFocusHz", 110.0f);
+
+    // Force snapshot failure immediately before getStateInformation
+    int casAttempts6 = 0;
+    proc1.getStagedConfigBufferForTesting().testHookBeforePublishCAS = [&](uint32_t cand, uint64_t /*gen*/) {
+        casAttempts6++;
+        proc1.getStagedConfigBufferForTesting().forcePublishedDescriptorForTest((uint64_t)casAttempts6, (cand + (uint32_t)casAttempts6) % 8);
+    };
+    Dimension5AudioProcessor::PluginConfig dummyCfg {};
+    proc1.getStagedConfigBufferForTesting().publishDetailed(dummyCfg, 100);
+    proc1.getStagedConfigBufferForTesting().testHookBeforePublishCAS = nullptr;
+
+    juce::MemoryBlock mem;
+    proc1.getStateInformation(mem);
+    check(mem.getSize() > 0, "State saved to MemoryBlock");
+
+    // Restore into proc2
+    Dimension5AudioProcessor proc2;
+    proc2.setStateInformation(mem.getData(), (int)mem.getSize());
+    proc2.prepareToPlay(48000.0, 32);
+    processStereoTestSignal(proc2);
+
+    Dimension5AudioProcessor::PluginConfig cfg2;
+    proc2.getLastAppliedConfig(cfg2);
+    check(cfg2.dspParams.mode == DIMENSION_MODE_II, "Restored mode is II");
+    check(std::abs(cfg2.dspParams.stereoWidth - 1.65f) < 1e-4f, "Restored stereoWidth is 1.65");
+    check(std::abs(cfg2.dspParams.bassFocusHz - 110.0f) < 1e-4f, "Restored bassFocusHz is 110 Hz");
+
+    Dimension5AudioProcessor::PluginConfig eff2;
+    proc2.getEffectiveConfig(eff2);
+    check(std::abs(eff2.dspParams.stereoWidth - 1.65f) < 1e-4f, "Effective stereoWidth matches 1.65");
+    check(std::abs(eff2.dspParams.bassFocusHz - 110.0f) < 1e-4f, "Effective bassFocusHz matches 110 Hz");
+}
+
+// 93. Scenario 7: Saturated configQueue and fallbackMailbox recovery
+void test_phase123_scenario_7_saturated_queue_and_fallback_mailbox() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    // Saturate configQueue (capacity 64) with dummy entries
+    Dimension5AudioProcessor::ConfigEnvelope dummyEnv;
+    dummyEnv.generation = 0;
+    for (int i = 0; i < 64; ++i) {
+        proc.getConfigQueueForTesting().tryEnqueue(dummyEnv);
+    }
+
+    // Force stagedConfigBuffer failure
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = [&](uint32_t cand, uint64_t /*gen*/) {
+        proc.getStagedConfigBufferForTesting().forcePublishedDescriptorForTest(9999, (cand + 1) % 8);
+    };
+
+    // Automate parameters - will overflow configQueue and be sent to fallbackMailbox
+    setParamHostValue(proc, "stereoWidth", 1.95f);
+    setParamHostValue(proc, "bassFocusHz", 220.0f);
+
+    proc.getStagedConfigBufferForTesting().testHookBeforePublishCAS = nullptr;
+
+    check(proc.getSaturationCount() > 0, "Queue saturation recorded in saturationCount");
+
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig appliedCfg;
+    proc.getLastAppliedConfig(appliedCfg);
+    check(std::abs(appliedCfg.dspParams.stereoWidth - 1.95f) < 1e-4f,
+          "Effective most recent configuration prevailed from fallbackMailbox (stereoWidth = 1.95)");
+    check(std::abs(appliedCfg.dspParams.bassFocusHz - 220.0f) < 1e-4f,
+          "Effective most recent configuration prevailed from fallbackMailbox (bassFocusHz = 220)");
+}
+
+// 94. Scenario 8: Concurrent automation without data corruption
+void test_phase123_scenario_8_concurrent_automation() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_II);
+    processStereoTestSignal(proc);
+
+    std::atomic<bool> start { false };
+
+    std::thread t1([&]() {
+        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (int i = 0; i < 100; ++i) {
+            setParamHostValue(proc, "stereoWidth", 1.0f + (float)i * 0.007f);
+        }
+    });
+
+    std::thread t2([&]() {
+        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (int i = 0; i < 100; ++i) {
+            setParamHostValue(proc, "bassFocusHz", (float)i * 1.4f);
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    t1.join();
+    t2.join();
+
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_II, "Mode preserved as II under concurrency");
+    check(std::abs(cfg.dspParams.stereoWidth - 1.693f) < 1e-2f, "stereoWidth reached final automated range");
+    check(std::abs(cfg.dspParams.bassFocusHz - 138.6f) < 1.0f, "bassFocusHz reached final automated range");
+    check(std::isfinite(cfg.dspParams.stereoWidth) && std::isfinite(cfg.dspParams.bassFocusHz), "Values are finite and valid");
+}
+
 int main() {
+    std::cout.setf(std::ios::unitbuf);
+    setvbuf(stdout, nullptr, _IONBF, 0);
     juce::ScopedJuceInitialiser_GUI initialiser;
 
     try {
@@ -3868,6 +4197,33 @@ int main() {
 
         std::cout << "[JUCE Tests] 85. test_phase122_mixed_generations_scenario_b...\n";
         test_phase122_mixed_generations_scenario_b();
+
+        std::cout << "[JUCE Tests] 86. test_phase123_reproduction_problem_b_lost_update...\n";
+        test_phase123_reproduction_problem_b_lost_update();
+
+        std::cout << "[JUCE Tests] 87. test_phase123_scenario_1_two_params_staged_failure...\n";
+        test_phase123_scenario_1_two_params_staged_failure();
+
+        std::cout << "[JUCE Tests] 88. test_phase123_scenario_2_multiple_consecutive_edits_intermediate_failure...\n";
+        test_phase123_scenario_2_multiple_consecutive_edits_intermediate_failure();
+
+        std::cout << "[JUCE Tests] 89. test_phase123_scenario_3_mode_to_custom_preserves_spatial...\n";
+        test_phase123_scenario_3_mode_to_custom_preserves_spatial();
+
+        std::cout << "[JUCE Tests] 90. test_phase123_scenario_4_mode_switching_preserves_global_params...\n";
+        test_phase123_scenario_4_mode_switching_preserves_global_params();
+
+        std::cout << "[JUCE Tests] 91. test_phase123_scenario_5_ab_comparison_state_integrity...\n";
+        test_phase123_scenario_5_ab_comparison_state_integrity();
+
+        std::cout << "[JUCE Tests] 92. test_phase123_scenario_6_save_recall_persistence...\n";
+        test_phase123_scenario_6_save_recall_persistence();
+
+        std::cout << "[JUCE Tests] 93. test_phase123_scenario_7_saturated_queue_and_fallback_mailbox...\n";
+        test_phase123_scenario_7_saturated_queue_and_fallback_mailbox();
+
+        std::cout << "[JUCE Tests] 94. test_phase123_scenario_8_concurrent_automation...\n";
+        test_phase123_scenario_8_concurrent_automation();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;
