@@ -128,7 +128,7 @@ Dimension5AudioProcessor::Dimension5AudioProcessor()
 
     activeConfig = initialConfig;
     lastAppliedGeneration = stateGeneration.load(std::memory_order_relaxed);
-    stagedConfigBuffer.publish(initialConfig, 1);
+    publishToStagedBuffer(initialConfig, 1);
     appliedSnapshotBuffer.publish(initialConfig, 1);
 
     compareStates[0] = parameters.copyState();
@@ -181,7 +181,7 @@ void Dimension5AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBl
     cfg.dspParams.sampleRate = safeSampleRate;
 
     const uint64_t gen = stateGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
-    stagedConfigBuffer.publish(cfg, gen);
+    publishToStagedBuffer(cfg, gen);
     publishConfigToAudio(cfg, gen);
 
     ConfigEnvelope incoming;
@@ -376,18 +376,102 @@ void Dimension5AudioProcessor::syncAdvancedParamsInternal(const DimensionParams&
     juce::ignoreUnused(p);
 }
 
+dimension_ipc::SnapshotBuffer<Dimension5AudioProcessor::PluginConfig, 8>::PublishResult
+Dimension5AudioProcessor::publishToStagedBuffer(const PluginConfig& cfg, uint64_t gen) {
+    const auto res = stagedConfigBuffer.publishDetailed(cfg, gen);
+    switch (res) {
+        case dimension_ipc::SnapshotBuffer<PluginConfig, 8>::PublishResult::Success:
+            ipcDiagnostics.publishSuccess.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case dimension_ipc::SnapshotBuffer<PluginConfig, 8>::PublishResult::StaleGeneration:
+            ipcDiagnostics.publishStaleGen.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case dimension_ipc::SnapshotBuffer<PluginConfig, 8>::PublishResult::SlotsUnavailable:
+            ipcDiagnostics.publishSlotsUnavailable.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case dimension_ipc::SnapshotBuffer<PluginConfig, 8>::PublishResult::ContentionLimitReached:
+            ipcDiagnostics.publishContentionLimit.fetch_add(1, std::memory_order_relaxed);
+            break;
+    }
+    return res;
+}
+
+void Dimension5AudioProcessor::reconcileConfigWithAuthoritativeState(PluginConfig& cfg, uint64_t snapshotGen) const {
+    const uint64_t currentGen = stateGeneration.load(std::memory_order_acquire);
+    const int curModeInt = effectiveMode.load(std::memory_order_acquire);
+    const auto curMode = (DimensionMode)juce::jlimit(0, 4, curModeInt);
+
+    // If snapshotGen is stale (older than state generation) or 0 (fallback)
+    if (snapshotGen == 0 || snapshotGen < currentGen) {
+        if (curMode < DIMENSION_MODE_CUSTOM) {
+            // Preset invariants: In Modes I..IV, the 10 BBD core DSP parameters are strictly
+            // defined by the factory preset table.
+            Dimension_GetModeParams(curMode, &cfg.dspParams);
+        } else {
+            // Custom mode: reconcile all 10 advanced parameters from atomic APVTS parameters
+            cfg.dspParams.mode = DIMENSION_MODE_CUSTOM;
+            cfg.dspParams.quality = DIMENSION_QUALITY_BBD_LITE;
+            cfg.dspParams.dryGain = getFloatParam("dryGain");
+            cfg.dspParams.wetDirectGain = getFloatParam("wetDirectGain");
+            cfg.dspParams.wetCrossGain = getFloatParam("wetCrossGain");
+            cfg.dspParams.baseDelayMs = getFloatParam("baseDelayMs");
+            cfg.dspParams.depthMs = getFloatParam("depthMs");
+            cfg.dspParams.rateHz = getFloatParam("rateHz");
+            cfg.dspParams.hpfHz = getFloatParam("hpfHz");
+            cfg.dspParams.lpfHz = getFloatParam("lpfHz");
+            cfg.dspParams.analogAmount = getFloatParam("analogAmount");
+            cfg.dspParams.companderAmount = getFloatParam("companderAmount");
+        }
+    }
+
+    // Global parameters (stereoWidth, bassFocusHz, inputGain, outputGain, width, mix, bypass)
+    // are ALWAYS authoritative from host APVTS, across all modes!
+    cfg.dspParams.sampleRate = currentSampleRate.load(std::memory_order_relaxed);
+    cfg.dspParams.inputGain = getFloatParam("inputGain");
+    cfg.dspParams.outputGain = getFloatParam("outputGain");
+    cfg.dspParams.width = getFloatParam("width");
+    cfg.dspParams.stereoWidth = getFloatParam("stereoWidth");
+    cfg.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
+    cfg.dspParams.noiseAmount = 0.0f;
+    cfg.mix = getMix();
+    cfg.bypassTarget = getBypassTarget();
+}
+
 void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID, float newValue) {
     if (isBatchRestoring.load(std::memory_order_acquire) || t_isInternalPresentationSync) {
         return;
     }
 
-    auto getBaseConfig = [&]() {
-        PluginConfig base;
-        if (!stagedConfigBuffer.read(base)) {
-            if (!appliedSnapshotBuffer.read(base)) {
-                constructConfigFromParameters(base);
-            }
+    auto getBaseConfig = [&]() -> PluginConfig {
+        PluginConfig base {};
+        uint64_t readGen = 0;
+        bool readOk = false;
+
+        if (stagedConfigBuffer.read(base, readGen)) {
+            readOk = true;
+        } else if (appliedSnapshotBuffer.read(base, readGen)) {
+            readOk = true;
         }
+
+        const uint64_t currentGen = stateGeneration.load(std::memory_order_acquire);
+        if (!readOk || readGen < (currentGen > 1 ? currentGen - 1 : 1)) {
+            // Snapshot buffer was either unavailable or stale!
+            // Reconcile authoritatively to prevent any lost parameter updates.
+            ipcDiagnostics.staleStateRecovered.fetch_add(1, std::memory_order_relaxed);
+            reconcileConfigWithAuthoritativeState(base, readGen);
+        } else {
+            // Snapshot was recent, but ensure all global host parameters (e.g. stereoWidth, bassFocusHz)
+            // reflect APVTS so concurrent host automation is never masked.
+            base.dspParams.sampleRate = currentSampleRate.load(std::memory_order_relaxed);
+            base.dspParams.inputGain = getFloatParam("inputGain");
+            base.dspParams.outputGain = getFloatParam("outputGain");
+            base.dspParams.width = getFloatParam("width");
+            base.dspParams.stereoWidth = getFloatParam("stereoWidth");
+            base.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
+            base.mix = getMix();
+            base.bypassTarget = getBypassTarget();
+        }
+
         return base;
     };
 
@@ -416,7 +500,7 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
             cfg.mix = getMix();
             cfg.bypassTarget = getBypassTarget();
 
-            stagedConfigBuffer.publish(cfg, newGen);
+            publishToStagedBuffer(cfg, newGen);
             publishConfigToAudio(cfg, newGen);
 
             pendingPresetSyncGeneration.store(newGen, std::memory_order_release);
@@ -429,7 +513,7 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
             cfg.dspParams.stereoWidth = getFloatParam("stereoWidth");
             cfg.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
 
-            stagedConfigBuffer.publish(cfg, newGen);
+            publishToStagedBuffer(cfg, newGen);
             publishConfigToAudio(cfg, newGen);
 
             pendingPresetSyncGeneration.store(newGen, std::memory_order_release);
@@ -469,7 +553,7 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
         applySingleParamToDspParams(cfg.dspParams, parameterID, newValue);
         cfg.dspParams.mode = DIMENSION_MODE_CUSTOM;
 
-        stagedConfigBuffer.publish(cfg, newGen);
+        publishToStagedBuffer(cfg, newGen);
         publishConfigToAudio(cfg, newGen);
         return;
     }
@@ -491,7 +575,7 @@ void Dimension5AudioProcessor::parameterChanged(const juce::String& parameterID,
     } else if (parameterID == "bassFocusHz") {
         cfg.dspParams.bassFocusHz = newValue;
     }
-    stagedConfigBuffer.publish(cfg, newGen);
+    publishToStagedBuffer(cfg, newGen);
     publishConfigToAudio(cfg, newGen);
 }
 
@@ -753,7 +837,7 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             cfg.mix = getMix();
             cfg.bypassTarget = getBypassTarget();
 
-            stagedConfigBuffer.publish(cfg, newGen);
+            publishToStagedBuffer(cfg, newGen);
             publishConfigToAudio(cfg, newGen);
             syncAdvancedParamsInternal(p);
         } else {
@@ -781,7 +865,7 @@ void Dimension5AudioProcessor::setStateInformation(const void* data, int sizeInB
             cfg.mix = getMix();
             cfg.bypassTarget = getBypassTarget();
 
-            stagedConfigBuffer.publish(cfg, newGen);
+            publishToStagedBuffer(cfg, newGen);
             publishConfigToAudio(cfg, newGen);
         }
 
@@ -877,7 +961,7 @@ void Dimension5AudioProcessor::switchToCustomMode() {
         cfg.bypassTarget = getBypassTarget();
 
         const uint64_t newGen = stateGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
-        stagedConfigBuffer.publish(cfg, newGen);
+        publishToStagedBuffer(cfg, newGen);
         publishConfigToAudio(cfg, newGen);
     }
     t_isInternalPresentationSync = true;
@@ -968,7 +1052,7 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
         cfg.mix = getMix();
         cfg.bypassTarget = getBypassTarget();
 
-        stagedConfigBuffer.publish(cfg, newGen);
+        publishToStagedBuffer(cfg, newGen);
         publishConfigToAudio(cfg, newGen);
         syncAdvancedParamsInternal(p);
     } else {
@@ -996,7 +1080,7 @@ void Dimension5AudioProcessor::recallCompareSlot(int slot) {
         cfg.mix = getMix();
         cfg.bypassTarget = getBypassTarget();
 
-        stagedConfigBuffer.publish(cfg, newGen);
+        publishToStagedBuffer(cfg, newGen);
         publishConfigToAudio(cfg, newGen);
     }
 
@@ -1013,8 +1097,15 @@ bool Dimension5AudioProcessor::getEffectiveConfig(PluginConfig& outConfig) const
 }
 
 bool Dimension5AudioProcessor::getEffectiveConfig(PluginConfig& outConfig, uint64_t& outGen) const {
+    const uint64_t currentGen = stateGeneration.load(std::memory_order_acquire);
     for (int retry = 0; retry < 16; ++retry) {
         if (stagedConfigBuffer.read(outConfig, outGen)) {
+            if (outGen >= currentGen) {
+                return true;
+            }
+            // Snapshot read succeeded but is older than currentGen.
+            // Reconcile with authoritative state to ensure all parameters are up to date!
+            reconcileConfigWithAuthoritativeState(outConfig, outGen);
             return true;
         }
     }
@@ -1027,36 +1118,7 @@ bool Dimension5AudioProcessor::getEffectiveConfig(PluginConfig& outConfig, uint6
 }
 
 void Dimension5AudioProcessor::constructConfigFromParameters(PluginConfig& cfg) const {
-    const float sr = currentSampleRate.load(std::memory_order_relaxed);
-    const int curModeInt = effectiveMode.load(std::memory_order_acquire);
-    const auto curMode = (DimensionMode)juce::jlimit(0, 4, curModeInt);
-
-    if (curMode < DIMENSION_MODE_CUSTOM) {
-        Dimension_GetModeParams(curMode, &cfg.dspParams);
-    } else {
-        cfg.dspParams.mode = DIMENSION_MODE_CUSTOM;
-        cfg.dspParams.quality = DIMENSION_QUALITY_BBD_LITE;
-        cfg.dspParams.dryGain = getFloatParam("dryGain");
-        cfg.dspParams.wetDirectGain = getFloatParam("wetDirectGain");
-        cfg.dspParams.wetCrossGain = getFloatParam("wetCrossGain");
-        cfg.dspParams.baseDelayMs = getFloatParam("baseDelayMs");
-        cfg.dspParams.depthMs = getFloatParam("depthMs");
-        cfg.dspParams.rateHz = getFloatParam("rateHz");
-        cfg.dspParams.hpfHz = getFloatParam("hpfHz");
-        cfg.dspParams.lpfHz = getFloatParam("lpfHz");
-        cfg.dspParams.analogAmount = getFloatParam("analogAmount");
-        cfg.dspParams.companderAmount = getFloatParam("companderAmount");
-    }
-
-    cfg.dspParams.sampleRate = sr;
-    cfg.dspParams.inputGain = getFloatParam("inputGain");
-    cfg.dspParams.outputGain = getFloatParam("outputGain");
-    cfg.dspParams.width = getFloatParam("width");
-    cfg.dspParams.stereoWidth = getFloatParam("stereoWidth");
-    cfg.dspParams.bassFocusHz = getFloatParam("bassFocusHz");
-    cfg.dspParams.noiseAmount = 0.0f;
-    cfg.mix = getMix();
-    cfg.bypassTarget = getBypassTarget();
+    reconcileConfigWithAuthoritativeState(cfg, 0);
 }
 
 void Dimension5AudioProcessor::getLastAppliedConfig(PluginConfig& outConfig) const {
@@ -1126,7 +1188,7 @@ void Dimension5AudioProcessor::applyFactoryPreset(int index) {
     cfg.dspParams = p;
     cfg.mix = preset.mix;
     cfg.bypassTarget = 1.0f;
-    stagedConfigBuffer.publish(cfg, newGen);
+    publishToStagedBuffer(cfg, newGen);
     publishConfigToAudio(cfg, newGen);
 
     syncAdvancedParamsInternal(p);

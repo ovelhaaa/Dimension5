@@ -238,6 +238,20 @@ public:
     bool hasPendingUpdates() const;
     float getFloatParam(const char* id) const;
 
+    struct IpcDiagnostics {
+        std::atomic<uint32_t> publishSuccess { 0 };
+        std::atomic<uint32_t> publishStaleGen { 0 };
+        std::atomic<uint32_t> publishSlotsUnavailable { 0 };
+        std::atomic<uint32_t> publishContentionLimit { 0 };
+        std::atomic<uint32_t> staleStateRecovered { 0 };
+    };
+
+    uint32_t getIpcPublishSuccessCount() const noexcept { return ipcDiagnostics.publishSuccess.load(std::memory_order_relaxed); }
+    uint32_t getIpcPublishStaleGenCount() const noexcept { return ipcDiagnostics.publishStaleGen.load(std::memory_order_relaxed); }
+    uint32_t getIpcPublishSlotsUnavailableCount() const noexcept { return ipcDiagnostics.publishSlotsUnavailable.load(std::memory_order_relaxed); }
+    uint32_t getIpcPublishContentionLimitCount() const noexcept { return ipcDiagnostics.publishContentionLimit.load(std::memory_order_relaxed); }
+    uint32_t getIpcStaleStateRecoveredCount() const noexcept { return ipcDiagnostics.staleStateRecovered.load(std::memory_order_relaxed); }
+
     dimension_ipc::SnapshotBuffer<PluginConfig, 8>& getAppliedSnapshotBufferForTesting() { return appliedSnapshotBuffer; }
     dimension_ipc::SnapshotBuffer<PluginConfig, 8>& getStagedConfigBufferForTesting() { return stagedConfigBuffer; }
     dimension_ipc::BoundedMPSCQueue<ConfigEnvelope, 64>& getConfigQueueForTesting() { return configQueue; }
@@ -258,6 +272,10 @@ private:
     void setInternalParamValue(const char* id, float value);
     void syncAdvancedParamsInternal(const DimensionParams& p);
     void publishConfigToAudio(const PluginConfig& cfg, uint64_t gen = 0);
+    dimension_ipc::SnapshotBuffer<PluginConfig, 8>::PublishResult publishToStagedBuffer(const PluginConfig& cfg, uint64_t gen);
+    void reconcileConfigWithAuthoritativeState(PluginConfig& cfg, uint64_t snapshotGen) const;
+
+    mutable IpcDiagnostics ipcDiagnostics {};
 
     mutable std::recursive_mutex controlMutex;
 
