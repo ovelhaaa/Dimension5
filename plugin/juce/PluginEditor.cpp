@@ -25,7 +25,7 @@ struct AdvancedSpec {
     const char* suffix;
 };
 
-constexpr AdvancedSpec kAdvancedSpecs[9] = {
+constexpr AdvancedSpec kAdvancedSpecs[10] = {
     { "baseDelayMs",     "BASE DELAY", " ms" },
     { "hpfHz",           "LOW FOCUS",  " Hz" },
     { "analogAmount",    "ANALOG",     "" },
@@ -34,7 +34,8 @@ constexpr AdvancedSpec kAdvancedSpecs[9] = {
     { "dryGain",         "DRY",        "x" },
     { "wetDirectGain",   "WET DIRECT", "x" },
     { "wetCrossGain",    "WET CROSS",  "x" },
-    { "bassFocusHz",     "BASS FOCUS", " Hz" }
+    { "bassFocusHz",     "BASS FOCUS", " Hz" },
+    { "bbdCharacter",    "BBD CHARACTER", "%" }
 };
 
 float meterToNormalised(float value) {
@@ -189,6 +190,18 @@ Dimension5AudioProcessorEditor::Dimension5AudioProcessorEditor(Dimension5AudioPr
             advancedSliders[i].valueFromTextFunction = [](const juce::String& text) {
                 if (text.trim().equalsIgnoreCase("off")) return 0.0;
                 return text.getDoubleValue();
+            };
+        } else if (specId == "bbdCharacter") {
+            advancedSliders[i].setNumDecimalPlacesToDisplay(0);
+            advancedSliders[i].textFromValueFunction = [](double val) {
+                if (val <= 0.005) return juce::String("OFF");
+                return juce::String(juce::roundToInt(val * 100.0)) + "%";
+            };
+            advancedSliders[i].valueFromTextFunction = [](const juce::String& text) {
+                if (text.trim().equalsIgnoreCase("off")) return 0.0;
+                auto t = text.trim();
+                if (t.endsWithChar('%')) t = t.dropLastCharacters(1).trim();
+                return t.getDoubleValue() * 0.01;
             };
         } else {
             advancedSliders[i].textFromValueFunction = [sfx](double val) {

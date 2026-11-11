@@ -327,12 +327,13 @@ static int test_regression_signal_metrics(void) {
 }
 
 static int test_parameter_schema_is_stable(void) {
-    CHECK(DIMENSION_PARAM_SCHEMA_VERSION == 2U);
-    CHECK(DIMENSION_PARAM_COUNT == 15);
+    CHECK(DIMENSION_PARAM_SCHEMA_VERSION == 3U);
+    CHECK(DIMENSION_PARAM_COUNT == 16);
     CHECK(DIMENSION_PARAM_INPUT_GAIN == 0);
     CHECK(DIMENSION_PARAM_WIDTH == 12);
     CHECK(DIMENSION_PARAM_STEREO_WIDTH == 13);
     CHECK(DIMENSION_PARAM_BASS_FOCUS_HZ == 14);
+    CHECK(DIMENSION_PARAM_BBD_CHARACTER == 15);
 
     for (uint32_t i = 0U; i < (uint32_t)DIMENSION_PARAM_COUNT; ++i) {
         const DimensionParamDescriptor* desc = Dimension_GetParamDescriptor((DimensionParamId)i);
@@ -889,6 +890,389 @@ static int test_spatial_engine_automation_smoothness(void) {
     return 0;
 }
 
+/* =========================================================================
+ * BBD Character Engine 2.1 — Phase A Test Suite
+ * ========================================================================= */
+
+static int test_bbd_character_neutrality_zero(void) {
+    DimensionDSP dOld, dNew;
+    Dimension_Init(&dOld, TEST_SR);
+    Dimension_Init(&dNew, TEST_SR);
+
+    DimensionParams p = dNew.params;
+    p.bbdCharacter = 0.0f;
+    Dimension_SetParams(&dNew, &p);
+
+    float inL[BLOCK], inR[BLOCK];
+    float outOldL[BLOCK], outOldR[BLOCK];
+    float outNewL[BLOCK], outNewR[BLOCK];
+
+    for (uint32_t b = 0; b < 200; ++b) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            inL[i] = 0.25f * sinf(2.0f * 3.14159f * 440.0f * (float)(b * BLOCK + i) / TEST_SR);
+            inR[i] = 0.25f * cosf(2.0f * 3.14159f * 660.0f * (float)(b * BLOCK + i) / TEST_SR);
+        }
+        Dimension_ProcessBlock(&dOld, inL, inR, outOldL, outOldR, BLOCK);
+        Dimension_ProcessBlock(&dNew, inL, inR, outNewL, outNewR, BLOCK);
+
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            CHECK(fabsf(outNewL[i] - outOldL[i]) == 0.0f);
+            CHECK(fabsf(outNewR[i] - outOldR[i]) == 0.0f);
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_character_progressive_response(void) {
+    const float levels[5] = { 0.0f, 0.25f, 0.50f, 0.75f, 1.0f };
+    double diffRms[5] = { 0.0 };
+
+    float inL[BLOCK], inR[BLOCK];
+    float outRefL[BLOCK], outRefR[BLOCK];
+    float outTestL[BLOCK], outTestR[BLOCK];
+
+    DimensionDSP dRef;
+    Dimension_Init(&dRef, TEST_SR);
+
+    for (int k = 0; k < 5; ++k) {
+        DimensionDSP dTest;
+        Dimension_Init(&dTest, TEST_SR);
+        DimensionParams p = dTest.params;
+        p.bbdCharacter = levels[k];
+        Dimension_SetParams(&dTest, &p);
+
+        Dimension_Reset(&dRef);
+        Dimension_Reset(&dTest);
+
+        double accumDiff = 0.0;
+        uint32_t totalSamples = 0;
+
+        for (uint32_t b = 0; b < 100; ++b) {
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                inL[i] = 0.30f * sinf(2.0f * 3.14159f * 1000.0f * (float)(b * BLOCK + i) / TEST_SR);
+                inR[i] = 0.30f * cosf(2.0f * 3.14159f * 1000.0f * (float)(b * BLOCK + i) / TEST_SR);
+            }
+            Dimension_ProcessBlock(&dRef, inL, inR, outRefL, outRefR, BLOCK);
+            Dimension_ProcessBlock(&dTest, inL, inR, outTestL, outTestR, BLOCK);
+
+            if (b >= 20) { /* after smoother settling */
+                for (uint32_t i = 0; i < BLOCK; ++i) {
+                    const float dL = outTestL[i] - outRefL[i];
+                    const float dR = outTestR[i] - outRefR[i];
+                    accumDiff += (double)(dL * dL + dR * dR);
+                    totalSamples += 2;
+                }
+            }
+        }
+        diffRms[k] = sqrt(accumDiff / (double)totalSamples);
+    }
+
+    CHECK(diffRms[0] == 0.0);
+    CHECK(diffRms[1] > 0.0001);
+    CHECK(diffRms[2] > diffRms[1]);
+    CHECK(diffRms[3] > diffRms[2]);
+    CHECK(diffRms[4] > diffRms[3]);
+    return 0;
+}
+
+static int test_bbd_character_determinism(void) {
+    DimensionDSP d1, d2;
+    Dimension_Init(&d1, TEST_SR);
+    Dimension_Init(&d2, TEST_SR);
+
+    DimensionParams p = d1.params;
+    p.bbdCharacter = 0.75f;
+    Dimension_SetParams(&d1, &p);
+    Dimension_SetParams(&d2, &p);
+
+    float inL[BLOCK], inR[BLOCK];
+    float out1L[BLOCK], out1R[BLOCK];
+    float out2L[BLOCK], out2R[BLOCK];
+
+    for (uint32_t b = 0; b < 100; ++b) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            inL[i] = (float)((b * BLOCK + i) % 17) * 0.05f - 0.4f;
+            inR[i] = (float)((b * BLOCK + i) % 23) * 0.04f - 0.4f;
+        }
+        Dimension_ProcessBlock(&d1, inL, inR, out1L, out1R, BLOCK);
+        Dimension_ProcessBlock(&d2, inL, inR, out2L, out2R, BLOCK);
+
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            CHECK(out1L[i] == out2L[i]);
+            CHECK(out1R[i] == out2R[i]);
+            CHECK(isfinite(out1L[i]));
+            CHECK(isfinite(out1R[i]));
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_character_automation_smoothness(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        inL[i] = 0.20f;
+        inR[i] = 0.15f;
+    }
+
+    Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+
+    float prevL = outL[BLOCK - 1];
+    float prevR = outR[BLOCK - 1];
+    float maxDelta = 0.0f;
+
+    for (uint32_t b = 0; b < 100; ++b) {
+        if (b % 10 == 0) {
+            DimensionParams p = d.params;
+            p.bbdCharacter = (b % 20 == 0) ? 1.0f : 0.0f;
+            Dimension_SetParams(&d, &p);
+        }
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float dL = fabsf(outL[i] - prevL);
+            const float dR = fabsf(outR[i] - prevR);
+            if (dL > maxDelta) maxDelta = dL;
+            if (dR > maxDelta) maxDelta = dR;
+            prevL = outL[i];
+            prevR = outR[i];
+            CHECK(isfinite(outL[i]));
+            CHECK(isfinite(outR[i]));
+        }
+    }
+    CHECK(maxDelta < 0.05f);
+    return 0;
+}
+
+static int test_bbd_character_fast_slow_modulation(void) {
+    const float rates[2] = { 0.02f, 4.0f };
+    for (int r = 0; r < 2; ++r) {
+        DimensionDSP d;
+        Dimension_Init(&d, TEST_SR);
+        DimensionParams p = d.params;
+        p.mode = DIMENSION_MODE_CUSTOM;
+        p.rateHz = rates[r];
+        p.depthMs = 2.5f;
+        p.bbdCharacter = 1.0f;
+        Dimension_SetParams(&d, &p);
+
+        float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+        for (uint32_t b = 0; b < 100; ++b) {
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                inL[i] = 0.25f * sinf(2.0f * 3.14159f * 300.0f * (float)(b * BLOCK + i) / TEST_SR);
+                inR[i] = 0.25f * cosf(2.0f * 3.14159f * 300.0f * (float)(b * BLOCK + i) / TEST_SR);
+            }
+            Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                CHECK(isfinite(outL[i]));
+                CHECK(isfinite(outR[i]));
+                CHECK(fabsf(outL[i]) < 1.5f);
+                CHECK(fabsf(outR[i]) < 1.5f);
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_character_sample_rates(void) {
+    const float rates[3] = { 44100.0f, 48000.0f, 96000.0f };
+    for (int k = 0; k < 3; ++k) {
+        DimensionDSP d;
+        Dimension_Init(&d, rates[k]);
+        DimensionParams p = d.params;
+        p.bbdCharacter = 0.85f;
+        Dimension_SetParams(&d, &p);
+
+        float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+        for (uint32_t b = 0; b < 80; ++b) {
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                inL[i] = 0.20f * sinf(2.0f * 3.14159f * 1000.0f * (float)(b * BLOCK + i) / rates[k]);
+                inR[i] = 0.20f * sinf(2.0f * 3.14159f * 1000.0f * (float)(b * BLOCK + i) / rates[k]);
+            }
+            Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                CHECK(isfinite(outL[i]));
+                CHECK(isfinite(outR[i]));
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_character_block_sizes(void) {
+    const uint32_t blockSizes[3] = { 16, 32, 64 };
+    for (int k = 0; k < 3; ++k) {
+        DimensionDSP d;
+        Dimension_Init(&d, TEST_SR);
+        DimensionParams p = d.params;
+        p.bbdCharacter = 0.60f;
+        Dimension_SetParams(&d, &p);
+
+        const uint32_t bs = blockSizes[k];
+        float inL[64], inR[64], outL[64], outR[64];
+        for (uint32_t b = 0; b < 50; ++b) {
+            for (uint32_t i = 0; i < bs; ++i) {
+                inL[i] = 0.18f;
+                inR[i] = 0.18f;
+            }
+            Dimension_ProcessBlock(&d, inL, inR, outL, outR, bs);
+            for (uint32_t i = 0; i < bs; ++i) {
+                CHECK(isfinite(outL[i]));
+                CHECK(isfinite(outR[i]));
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_character_reset_clean(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    DimensionParams p = d.params;
+    p.bbdCharacter = 1.0f;
+    Dimension_SetParams(&d, &p);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        inL[i] = 0.5f;
+        inR[i] = 0.5f;
+    }
+    for (uint32_t b = 0; b < 20; ++b) {
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+    }
+
+    Dimension_Reset(&d);
+    CHECK(d.bbdClock.chL.dispState == 0.0f);
+    CHECK(d.bbdClock.chR.dispState == 0.0f);
+
+    /* Zero input produces zero output */
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        inL[i] = 0.0f;
+        inR[i] = 0.0f;
+    }
+    Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+    for (uint32_t i = 0; i < BLOCK; ++i) {
+        CHECK(fabsf(outL[i]) < 1e-6f);
+        CHECK(fabsf(outR[i]) < 1e-6f);
+    }
+    return 0;
+}
+
+static int test_bbd_character_silence_input(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    DimensionParams p = d.params;
+    p.bbdCharacter = 1.0f;
+    Dimension_SetParams(&d, &p);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    memset(inL, 0, sizeof(inL));
+    memset(inR, 0, sizeof(inR));
+
+    for (uint32_t b = 0; b < 100; ++b) {
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            CHECK(outL[i] == 0.0f);
+            CHECK(outR[i] == 0.0f);
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_character_aliasing_and_dc_protection(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    DimensionParams p = d.params;
+    p.bbdCharacter = 1.0f;
+    Dimension_SetParams(&d, &p);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    double sumL = 0.0, sumR = 0.0;
+    uint32_t totalSamples = 0;
+
+    for (uint32_t b = 0; b < 200; ++b) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            inL[i] = 0.25f * sinf(2.0f * 3.14159f * 10000.0f * (float)(b * BLOCK + i) / TEST_SR);
+            inR[i] = 0.25f * cosf(2.0f * 3.14159f * 10000.0f * (float)(b * BLOCK + i) / TEST_SR);
+        }
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        if (b >= 50) {
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                sumL += (double)outL[i];
+                sumR += (double)outR[i];
+                totalSamples++;
+            }
+        }
+    }
+    const double dcL = sumL / (double)totalSamples;
+    const double dcR = sumR / (double)totalSamples;
+    CHECK(fabs(dcL) < 0.005);
+    CHECK(fabs(dcR) < 0.005);
+    return 0;
+}
+
+static int test_bbd_character_lr_integrity_and_mono_compat(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+    DimensionParams p = d.params;
+    p.mode = DIMENSION_MODE_CUSTOM;
+    p.rateHz = 1.0f;
+    p.bbdCharacter = 0.70f;
+    Dimension_SetParams(&d, &p);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    double energyL = 0.0, energyR = 0.0;
+    double energyMid = 0.0;
+    const uint32_t totalBlocks = (uint32_t)(TEST_SR / BLOCK); /* Exactly 1 full LFO cycle */
+
+    for (uint32_t b = 0; b < totalBlocks + 50; ++b) {
+        for (uint32_t i = 0; i < BLOCK; ++i) {
+            const float monoSig = 0.25f * sinf(2.0f * 3.14159f * 250.0f * (float)(b * BLOCK + i) / TEST_SR);
+            inL[i] = monoSig;
+            inR[i] = monoSig;
+        }
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+        if (b >= 50) { /* Exactly 1 full period after smoother settling */
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                energyL += (double)(outL[i] * outL[i]);
+                energyR += (double)(outR[i] * outR[i]);
+                const float mid = 0.5f * (outL[i] + outR[i]);
+                energyMid += (double)(mid * mid);
+            }
+        }
+    }
+    /* Symmetrical energy balance over a complete modulation cycle */
+    const double ratio = energyL / energyR;
+    CHECK(ratio > 0.95 && ratio < 1.05);
+    /* Robust mid presence for mono compatibility */
+    CHECK(energyMid > 0.5 * energyL);
+    return 0;
+}
+
+static int test_bbd_character_modes_regression(void) {
+    for (int m = 0; m <= 3; ++m) {
+        DimensionDSP d;
+        Dimension_Init(&d, TEST_SR);
+        Dimension_SetMode(&d, (DimensionMode)m);
+        CHECK(d.params.bbdCharacter == 0.0f);
+
+        float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+        for (uint32_t b = 0; b < 30; ++b) {
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                inL[i] = 0.2f;
+                inR[i] = 0.2f;
+            }
+            Dimension_ProcessBlock(&d, inL, inR, outL, outR, BLOCK);
+            for (uint32_t i = 0; i < BLOCK; ++i) {
+                CHECK(isfinite(outL[i]));
+                CHECK(isfinite(outR[i]));
+            }
+        }
+    }
+    return 0;
+}
+
 int main(void) {
 #define RUN_TEST(fn) do { if ((fn)() != 0) return 1; } while (0)
     RUN_TEST(test_zero_input_long_no_nan_low_dc);
@@ -912,6 +1296,18 @@ int main(void) {
     RUN_TEST(test_spatial_engine_mid_integrity);
     RUN_TEST(test_spatial_engine_bass_focus_response);
     RUN_TEST(test_spatial_engine_automation_smoothness);
+    RUN_TEST(test_bbd_character_neutrality_zero);
+    RUN_TEST(test_bbd_character_progressive_response);
+    RUN_TEST(test_bbd_character_determinism);
+    RUN_TEST(test_bbd_character_automation_smoothness);
+    RUN_TEST(test_bbd_character_fast_slow_modulation);
+    RUN_TEST(test_bbd_character_sample_rates);
+    RUN_TEST(test_bbd_character_block_sizes);
+    RUN_TEST(test_bbd_character_reset_clean);
+    RUN_TEST(test_bbd_character_silence_input);
+    RUN_TEST(test_bbd_character_aliasing_and_dc_protection);
+    RUN_TEST(test_bbd_character_lr_integrity_and_mono_compat);
+    RUN_TEST(test_bbd_character_modes_regression);
     puts("test_dimension_core: OK");
     return 0;
 }

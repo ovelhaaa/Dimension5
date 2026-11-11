@@ -1,4 +1,4 @@
-export const PARAM_SCHEMA_VERSION = 2;
+export const PARAM_SCHEMA_VERSION = 3;
 
 export const PARAM_DESCRIPTORS = [
   { id: 0, stableId: 'inputGain', displayName: 'Input', unit: 'x', minValue: 0, maxValue: 4, step: 0.01, defaultValue: 1, role: 'primary' },
@@ -15,7 +15,8 @@ export const PARAM_DESCRIPTORS = [
   { id: 11, stableId: 'companderAmount', displayName: 'Compander', unit: '', minValue: 0, maxValue: 1, step: 0.01, defaultValue: 0.35, role: 'advanced' },
   { id: 12, stableId: 'width', displayName: 'Width', unit: '', minValue: 0, maxValue: 2, step: 0.01, defaultValue: 1, role: 'primary' },
   { id: 13, stableId: 'stereoWidth', displayName: 'Stereo Width', unit: 'x', minValue: 0, maxValue: 2, step: 0.01, defaultValue: 1, role: 'primary' },
-  { id: 14, stableId: 'bassFocusHz', displayName: 'Bass Focus', unit: 'Hz', minValue: 0, maxValue: 300, step: 1, defaultValue: 0, role: 'advanced' }
+  { id: 14, stableId: 'bassFocusHz', displayName: 'Bass Focus', unit: 'Hz', minValue: 0, maxValue: 300, step: 1, defaultValue: 0, role: 'advanced' },
+  { id: 15, stableId: 'bbdCharacter', displayName: 'BBD Character', unit: '', minValue: 0, maxValue: 1, step: 0.01, defaultValue: 0, role: 'advanced' }
 ];
 
 export const PARAM_IDS = Object.freeze(Object.fromEntries(

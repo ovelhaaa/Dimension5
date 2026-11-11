@@ -87,11 +87,127 @@ static void render_mode(int mode, const char* out_dir) {
     free(left); free(right);
 }
 
+typedef enum SignalKind {
+    SIG_KIND_SYNTH_PLUCK = 0,
+    SIG_KIND_MULTITONE,
+    SIG_KIND_IMPULSES
+} SignalKind;
+
+static void render_bbd_character_variation(
+    float bbdChar,
+    int wetOnly,
+    SignalKind kind,
+    const char* filename,
+    const char* out_dir) {
+    const uint32_t frames = SR * SECONDS;
+    float* left = (float*)calloc(frames, sizeof(float));
+    float* right = (float*)calloc(frames, sizeof(float));
+    if (!left || !right) { free(left); free(right); fprintf(stderr, "allocation failed\n"); exit(2); }
+
+    DimensionDSP d;
+    Dimension_Init(&d, (float)SR);
+    Dimension_SetMode(&d, DIMENSION_MODE_II);
+    DimensionParams p = d.params;
+    p.bbdCharacter = bbdChar;
+    if (wetOnly) {
+        p.mode = DIMENSION_MODE_CUSTOM;
+        p.dryGain = 0.0f;
+    }
+    Dimension_SetParams(&d, &p);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    Stats st = {0.0f, 0.0, 0.0};
+    uint32_t localRng = 0x12345678u;
+
+    for (uint32_t pos = 0; pos < frames; pos += BLOCK) {
+        const uint32_t n = (frames - pos > BLOCK) ? BLOCK : frames - pos;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t t = pos + i;
+            float xL = 0.0f, xR = 0.0f;
+
+            switch (kind) {
+                case SIG_KIND_SYNTH_PLUCK: {
+                    /* Clean guitar/pluck fixture: fundamental (220 Hz) + harmonics + pluck transient */
+                    const float f0 = 220.0f;
+                    const float tSec = (float)t / (float)SR;
+                    const float env = expf(-fmodf(tSec, 1.0f) * 3.5f);
+                    const float body = 0.22f * sinf(2.0f * PI_F * f0 * tSec) +
+                                       0.12f * sinf(2.0f * PI_F * 2.0f * f0 * tSec) +
+                                       0.06f * sinf(2.0f * PI_F * 3.0f * f0 * tSec) +
+                                       0.03f * sinf(2.0f * PI_F * 5.0f * f0 * tSec);
+                    localRng = localRng * 1664525u + 1013904223u;
+                    const float nz = 0.015f * (((float)((localRng >> 8) & 0xFFFFFFu) / 8388608.0f) - 1.0f);
+                    xL = (body + nz) * env;
+                    xR = xL;
+                    break;
+                }
+                case SIG_KIND_MULTITONE: {
+                    const float tSec = (float)t / (float)SR;
+                    const float m = 0.12f * sinf(2.0f * PI_F * 300.0f * tSec) +
+                                    0.10f * sinf(2.0f * PI_F * 1200.0f * tSec) +
+                                    0.06f * sinf(2.0f * PI_F * 4500.0f * tSec);
+                    xL = m;
+                    xR = m;
+                    break;
+                }
+                case SIG_KIND_IMPULSES: {
+                    xL = (t % 2400 == 0) ? 0.75f : 0.0f;
+                    xR = (t % 2400 == 1200) ? 0.75f : 0.0f;
+                    break;
+                }
+            }
+
+            inL[i] = xL;
+            inR[i] = xR;
+        }
+        Dimension_ProcessBlock(&d, inL, inR, outL, outR, n);
+        for (uint32_t i = 0; i < n; ++i) {
+            left[pos + i] = outL[i];
+            right[pos + i] = outR[i];
+            const float m = 0.5f * (outL[i] + outR[i]);
+            const float a = fabsf(m);
+            if (a > st.peak) st.peak = a;
+            st.sum += (double)m;
+            st.energy += (double)m * (double)m;
+        }
+    }
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", out_dir, filename);
+    if (write_wav(path, left, right, frames) != 0) {
+        fprintf(stderr, "failed to write %s\n", path);
+        exit(3);
+    }
+    printf("%s peak=%.4f dc=%.6f rms=%.4f\n", path, (double)st.peak, st.sum / (double)frames, sqrt(st.energy / (double)frames));
+    free(left);
+    free(right);
+}
+
 int main(int argc, char** argv) {
     const char* out_dir = (argc > 1) ? argv[1] : "out";
     if (create_output_dir(out_dir) != 0) {
         return 1;
     }
+
+    printf("=== RENDERING LEGACY MODES (I..IV) ===\n");
     for (int mode = 0; mode < 4; ++mode) render_mode(mode, out_dir);
+
+    printf("\n=== RENDERING BBD CHARACTER ENGINE 2.1 SUITE ===\n");
+    render_bbd_character_variation(0.00f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_000.wav", out_dir);
+    render_bbd_character_variation(0.25f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_025.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_050.wav", out_dir);
+    render_bbd_character_variation(0.75f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_075.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_100.wav", out_dir);
+
+    render_bbd_character_variation(0.00f, 1, SIG_KIND_SYNTH_PLUCK, "bbd_character_000_wet.wav", out_dir);
+    render_bbd_character_variation(0.50f, 1, SIG_KIND_SYNTH_PLUCK, "bbd_character_050_wet.wav", out_dir);
+    render_bbd_character_variation(1.00f, 1, SIG_KIND_SYNTH_PLUCK, "bbd_character_100_wet.wav", out_dir);
+
+    render_bbd_character_variation(0.00f, 0, SIG_KIND_MULTITONE,   "bbd_multitone_000.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_MULTITONE,   "bbd_multitone_100.wav", out_dir);
+
+    render_bbd_character_variation(0.00f, 0, SIG_KIND_IMPULSES,    "bbd_impulses_000.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_IMPULSES,    "bbd_impulses_100.wav", out_dir);
+
     return 0;
 }

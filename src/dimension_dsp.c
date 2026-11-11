@@ -105,6 +105,7 @@ static void dimension_clear_state(DimensionDSP* d) {
     d->expEnvL = d->expEnvR = 0.0f;
     d->bbdStateL = d->bbdStateR = 0.0f;
     d->bassFocusState = 0.0f;
+    DimensionBBDClock_Reset(&d->bbdClock);
 }
 
 static DimensionParams dimension_default_params(float sampleRate) {
@@ -128,6 +129,7 @@ static DimensionParams dimension_default_params(float sampleRate) {
     p.width = 1.0f;
     p.stereoWidth = 1.0f;
     p.bassFocusHz = 0.0f;
+    p.bbdCharacter = 0.0f;
     return p;
 }
 
@@ -206,6 +208,7 @@ static inline void dimension_sync_smoothers(DimensionDSP* d) {
     d->smoothCompanderAmount = d->params.companderAmount;
     d->smoothBassFocusHz = (d->params.bassFocusHz > 0.0f) ? d->params.bassFocusHz : 120.0f;
     d->smoothBassFocusAmount = (d->params.bassFocusHz > 0.0f) ? 1.0f : 0.0f;
+    d->smoothBbdCharacter = d->params.bbdCharacter;
 }
 
 void Dimension_Init(DimensionDSP* d, float sampleRate) {
@@ -257,6 +260,7 @@ void Dimension_SetParams(DimensionDSP* d, const DimensionParams* p) {
     d->params.width = dimension_sanitize_param(d->params.width, 1.0f, 0.0f, 2.0f);
     d->params.stereoWidth = dimension_sanitize_param(d->params.stereoWidth, 1.0f, 0.0f, 2.0f);
     d->params.bassFocusHz = dimension_sanitize_param(d->params.bassFocusHz, 0.0f, 0.0f, 500.0f);
+    d->params.bbdCharacter = dimension_sanitize_param(d->params.bbdCharacter, 0.0f, 0.0f, 1.0f);
     if (d->params.mode != DIMENSION_MODE_CUSTOM) {
         dimension_apply_mode_preset(&d->params, d->params.mode);
     }
@@ -327,8 +331,12 @@ void Dimension_ProcessBlock(
     const float analogAmount = dimension_clampf(d->smoothAnalogAmount, 0.0f, 1.0f);
     const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - analogAmount), sr);
 
+    const float invBaseMs = 1.0f / (d->smoothBaseDelayMs > 0.5f ? d->smoothBaseDelayMs : 0.5f);
+    const float bbdF0 = 512000.0f * invBaseMs;
+    const float bbdDepthRatio = d->smoothDepthMs * invBaseMs;
+
     for (uint32_t i = 0U; i < n; ++i) {
-        /* Per-sample parameter smoothing (rate, depth, delay, matrix gains, width, stereoWidth, input/output gains) */
+        /* Per-sample parameter smoothing (rate, depth, delay, matrix gains, width, stereoWidth, input/output gains, bbdCharacter) */
         d->smoothRateHz += smoothCoeff * (d->params.rateHz - d->smoothRateHz);
         d->smoothDepthMs += smoothCoeff * (d->params.depthMs - d->smoothDepthMs);
         d->smoothBaseDelayMs += smoothCoeff * (d->params.baseDelayMs - d->smoothBaseDelayMs);
@@ -343,12 +351,17 @@ void Dimension_ProcessBlock(
             d->smoothStereoWidth = 1.0f;
         }
         d->smoothCompanderAmount += smoothCoeff * (d->params.companderAmount - d->smoothCompanderAmount);
+        d->smoothBbdCharacter += smoothCoeff * (d->params.bbdCharacter - d->smoothBbdCharacter);
+        if (d->smoothBbdCharacter < 1e-5f && d->params.bbdCharacter == 0.0f) {
+            d->smoothBbdCharacter = 0.0f;
+        }
 
         const float inGain = dimension_clampf(d->smoothInputGain, 0.0f, 8.0f);
         const float outGain = dimension_clampf(d->smoothOutputGain, 0.0f, 8.0f);
         const float gDry = dimension_clampf(d->smoothDryGain, 0.0f, 2.0f);
         const float width = dimension_clampf(d->smoothWidth, 0.0f, 2.0f);
         const float stereoWidth = dimension_clampf(d->smoothStereoWidth, 0.0f, 2.0f);
+        const float bbdChar = dimension_clampf(d->smoothBbdCharacter, 0.0f, 1.0f);
 
         float xL = dimension_sanitize_sample(inL[i]) * inGain;
         float xR = dimension_sanitize_sample(inR[i]) * inGain;
@@ -388,9 +401,20 @@ void Dimension_ProcessBlock(
         wetR = d->bbdStateR;
 
         const float tri = (d->lfoPhase < 0.5f) ? (4.0f * d->lfoPhase - 1.0f) : (3.0f - 4.0f * d->lfoPhase);
-        const float lfo = tri;
-        const float delayL = baseDelay + depthDelay * lfo;
-        const float delayR = baseDelay - depthDelay * lfo;
+        const float lfo = DimensionBBDClock_ModulateLfo(tri, bbdChar);
+
+        const float modRatio = bbdDepthRatio * lfo;
+        const float modRatioSq = modRatio * modRatio;
+        const float modRatioCu = modRatioSq * modRatio;
+        const float clockL = bbdF0 * (1.0f - modRatio + modRatioSq - modRatioCu);
+        const float clockR = bbdF0 * (1.0f + modRatio + modRatioSq + modRatioCu);
+        d->bbdClock.chL.instantaneousClockHz = clockL;
+        d->bbdClock.chR.instantaneousClockHz = clockR;
+
+        const float transLagL = DimensionBBDClock_TransportLag(clockL, bbdF0, bbdChar);
+        const float transLagR = DimensionBBDClock_TransportLag(clockR, bbdF0, bbdChar);
+        const float delayL = baseDelay + depthDelay * lfo + transLagL;
+        const float delayR = baseDelay - depthDelay * lfo + transLagR;
         const float readPosL = (float)d->writePos - delayL + (float)DIMENSION_DELAY_SIZE;
         const float readPosR = (float)d->writePos - delayR + (float)DIMENSION_DELAY_SIZE;
 
@@ -399,6 +423,9 @@ void Dimension_ProcessBlock(
 
         wetL = delay_interp(d->delayL, readPosL);
         wetR = delay_interp(d->delayR, readPosR);
+
+        wetL = DimensionBBDClock_ProcessDispersion(&d->bbdClock.chL, wetL, clockL, sr, bbdChar);
+        wetR = DimensionBBDClock_ProcessDispersion(&d->bbdClock.chR, wetR, clockR, sr, bbdChar);
 
         d->lpf1StateL += lpfAlpha * (wetL - d->lpf1StateL);
         d->lpf1StateR += lpfAlpha * (wetR - d->lpf1StateR);

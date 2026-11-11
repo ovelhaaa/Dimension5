@@ -32,6 +32,7 @@ typedef struct MockPluginState {
     float width;
     float stereoWidth;
     float bassFocusHz;
+    float bbdCharacter;
 } MockPluginState;
 
 static void mock_init_defaults(MockPluginState* s) {
@@ -55,6 +56,7 @@ static void mock_init_defaults(MockPluginState* s) {
     s->width = p.width;
     s->stereoWidth = p.stereoWidth;
     s->bassFocusHz = p.bassFocusHz;
+    s->bbdCharacter = 0.0f;
 }
 
 static void mock_apply_mode(MockPluginState* s, DimensionMode mode) {
@@ -342,32 +344,40 @@ static int test_spatial_engine_wrapper_parameters_and_legacy_recall(void) {
     mock_init_defaults(&s);
     CHECK(s.stereoWidth == 1.0f);
     CHECK(s.bassFocusHz == 0.0f);
+    CHECK(s.bbdCharacter == 0.0f);
 
-    /* Changing mode does not alter stereoWidth or bassFocusHz */
+    /* Changing mode does not alter stereoWidth, bassFocusHz, or bbdCharacter */
     s.stereoWidth = 1.6f;
     s.bassFocusHz = 120.0f;
+    s.bbdCharacter = 0.75f;
     mock_apply_mode(&s, DIMENSION_MODE_III);
     CHECK(s.stereoWidth == 1.6f);
     CHECK(s.bassFocusHz == 120.0f);
+    CHECK(s.bbdCharacter == 0.75f);
 
-    /* Simulate legacy state restore without stereoWidth or bassFocusHz:
+    /* Simulate legacy state restore without stereoWidth, bassFocusHz, or bbdCharacter:
      * In APVTS / Wrapper, missing keys fall back to descriptor defaults */
     const DimensionParamDescriptor* dWidth = Dimension_GetParamDescriptor(DIMENSION_PARAM_STEREO_WIDTH);
     const DimensionParamDescriptor* dBF = Dimension_GetParamDescriptor(DIMENSION_PARAM_BASS_FOCUS_HZ);
+    const DimensionParamDescriptor* dBBD = Dimension_GetParamDescriptor(DIMENSION_PARAM_BBD_CHARACTER);
     CHECK(dWidth != NULL && dWidth->defaultValue == 1.0f);
     CHECK(dBF != NULL && dBF->defaultValue == 0.0f);
+    CHECK(dBBD != NULL && dBBD->defaultValue == 0.0f);
 
-    /* A/B compare slots preserve spatial parameters */
+    /* A/B compare slots preserve spatial & BBD parameters */
     MockPluginState slotA = s;
     MockPluginState slotB;
     mock_init_defaults(&slotB);
     slotB.stereoWidth = 0.5f;
     slotB.bassFocusHz = 80.0f;
+    slotB.bbdCharacter = 0.40f;
 
     CHECK(slotA.stereoWidth == 1.6f);
     CHECK(slotA.bassFocusHz == 120.0f);
+    CHECK(slotA.bbdCharacter == 0.75f);
     CHECK(slotB.stereoWidth == 0.5f);
     CHECK(slotB.bassFocusHz == 80.0f);
+    CHECK(slotB.bbdCharacter == 0.40f);
     return 0;
 }
 

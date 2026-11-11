@@ -3934,6 +3934,80 @@ void test_phase123_scenario_8_concurrent_automation() {
     check(std::isfinite(cfg.dspParams.stereoWidth) && std::isfinite(cfg.dspParams.bassFocusHz), "Values are finite and valid");
 }
 
+// 95. Phase 2.1 BBD Character Engine: APVTS parameter, global mode independence, and legacy state persistence
+void test_phase21_bbd_character_apvts_and_persistence() {
+    Dimension5AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 32);
+
+    auto* bbdParam = proc.parameters.getParameter("bbdCharacter");
+    check(bbdParam != nullptr, "bbdCharacter parameter exists in APVTS");
+    check(std::abs(proc.getFloatParam("bbdCharacter") - 0.0f) < 1e-4f, "bbdCharacter defaults to 0.0f (OFF)");
+
+    // 1. Setting bbdCharacter on Mode I should NOT switch mode to Custom
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_I);
+    setParamHostValue(proc, "bbdCharacter", 0.75f);
+    processStereoTestSignal(proc);
+
+    Dimension5AudioProcessor::PluginConfig cfg;
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_I, "bbdCharacter edit preserves Mode I (does not force Custom)");
+    check(std::abs(cfg.dspParams.bbdCharacter - 0.75f) < 1e-4f, "DSP applied bbdCharacter is 0.75");
+
+    // 2. Mode switching should preserve bbdCharacter
+    setParamHostValue(proc, "mode", (float)DIMENSION_MODE_III);
+    processStereoTestSignal(proc);
+    proc.getLastAppliedConfig(cfg);
+    check(cfg.dspParams.mode == DIMENSION_MODE_III, "Switched to Mode III");
+    check(std::abs(cfg.dspParams.bbdCharacter - 0.75f) < 1e-4f, "bbdCharacter preserved as 0.75 after mode switch");
+
+    // 3. A/B comparison slot switching
+    proc.selectCompareSlot(0); // Slot A has 0.75
+    proc.selectCompareSlot(1); // Switch to Slot B
+    setParamHostValue(proc, "bbdCharacter", 0.25f);
+    processStereoTestSignal(proc);
+    proc.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.bbdCharacter - 0.25f) < 1e-4f, "Slot B bbdCharacter is 0.25");
+
+    proc.selectCompareSlot(0); // Switch back to Slot A
+    processStereoTestSignal(proc);
+    proc.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.bbdCharacter - 0.75f) < 1e-4f, "Slot A bbdCharacter recalled as 0.75");
+
+    // 4. Save state & restore
+    juce::MemoryBlock destData;
+    proc.getStateInformation(destData);
+
+    Dimension5AudioProcessor proc2;
+    proc2.prepareToPlay(48000.0, 32);
+    proc2.setStateInformation(destData.getData(), (int)destData.getSize());
+    processStereoTestSignal(proc2);
+    proc2.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.bbdCharacter - 0.75f) < 1e-4f, "Restored state bbdCharacter is 0.75");
+
+    // 5. Legacy XML load without bbdCharacter parameter falls back to 0.0f
+    std::unique_ptr<juce::XmlElement> xml(proc.getXmlFromBinary(destData.getData(), (int)destData.getSize()));
+    check(xml != nullptr, "valid xml");
+    for (int i = xml->getNumChildElements() - 1; i >= 0; --i) {
+        auto* child = xml->getChildElement(i);
+        if (child->getStringAttribute("id") == "bbdCharacter") {
+            xml->removeChildElement(child, true);
+        }
+    }
+    juce::MemoryBlock legacyData;
+    proc.copyXmlToBinary(*xml, legacyData);
+
+    Dimension5AudioProcessor procLegacy;
+    procLegacy.prepareToPlay(48000.0, 32);
+    // Set to 0.50 first to ensure recall actually changes it
+    setParamHostValue(procLegacy, "bbdCharacter", 0.50f);
+    processStereoTestSignal(procLegacy);
+
+    procLegacy.setStateInformation(legacyData.getData(), (int)legacyData.getSize());
+    processStereoTestSignal(procLegacy);
+    procLegacy.getLastAppliedConfig(cfg);
+    check(std::abs(cfg.dspParams.bbdCharacter - 0.0f) < 1e-4f, "Legacy state defaults bbdCharacter to 0.0f");
+}
+
 int main() {
     std::cout.setf(std::ios::unitbuf);
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -4224,6 +4298,9 @@ int main() {
 
         std::cout << "[JUCE Tests] 94. test_phase123_scenario_8_concurrent_automation...\n";
         test_phase123_scenario_8_concurrent_automation();
+
+        std::cout << "[JUCE Tests] 95. test_phase21_bbd_character_apvts_and_persistence...\n";
+        test_phase21_bbd_character_apvts_and_persistence();
 
         std::cout << "All JUCE processor tests PASSED successfully!\n";
         return 0;
