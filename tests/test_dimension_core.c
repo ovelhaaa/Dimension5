@@ -1602,7 +1602,7 @@ static int test_bbd_character_host_block_segmentation(void) {
 }
 
 static int test_bbd_character_block_boundary_discontinuity(void) {
-    /* Section 9: Validate continuity and absence of spurious jumps at block boundaries
+    /* Section 9 & 11: Validate continuity and absence of spurious jumps at block boundaries
      * Test automation events positioned at:
      *   Frame 63 (boundary - 1), Frame 64 (boundary), Frame 65 (boundary + 1)
      *   Frame 127, Frame 128, Frame 129
@@ -1645,10 +1645,12 @@ static int test_bbd_character_block_boundary_discontinuity(void) {
 
             Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, n);
 
-            /* Track clock boundary jump */
+            /* Track clock jump across consecutive block boundaries */
             if (prevClockHz > 0.0f) {
                 const float clkJump = fabsf(dsp.bbdClock.chL.instantaneousClockHz - prevClockHz);
-                if (clkJump > maxClockJump) maxClockJump = clkJump;
+                if (clkJump > maxClockJump) {
+                    maxClockJump = clkJump;
+                }
             }
             prevClockHz = dsp.bbdClock.chL.instantaneousClockHz;
 
@@ -1658,6 +1660,12 @@ static int test_bbd_character_block_boundary_discontinuity(void) {
             }
             pos += n;
         }
+
+        /* Assert clock continuity across blocks during rapid automation:
+         * Block-to-block change over up to 64 frames during an extreme 3.5 ms step transition
+         * must remain physically bounded by the 30 ms smoother slew rate (< 1200 Hz, or < 2.0% of clock),
+         * proving absence of uninitialized resets or discontinuous click artifacts */
+        CHECK(maxClockJump < 1200.0f);
 
         /* Check that single-sample jump across the event boundary frame does not exceed
          * the continuous audio signal slew rate (normal 440 Hz @ 0.25 amp has max slew ~ 0.023) */
@@ -1672,66 +1680,119 @@ static int test_bbd_character_block_boundary_discontinuity(void) {
 }
 
 static int test_bbd_character_clock_interpolation_accuracy(void) {
-    /* Section 10: Validate mathematical consistency between block-interpolated clock
-     * and sample-by-sample physical formula f_ref(n) = 512000 / T_delay(n) */
+    /* Section 9 & 10: Validate mathematical consistency between block-interpolated clock
+     * and instantaneous physical formula f_ref(n) = 512000 / T_delay(n)
+     * Tested across sample rates (44.1k, 48k, 96k) and block sizes (1, 7, 16, 32, 64) */
     const float baseDelays[4] = { 7.0f, 8.5f, 10.0f, 11.5f };
     const float depths[4] = { 0.9f, 1.4f, 1.8f, 2.4f };
     const float rates[4] = { 0.25f, 0.25f, 0.50f, 0.50f };
-    const float testSR = 48000.0f;
-    const uint32_t testBlockSizes[4] = { 16, 32, 48, 64 };
+    const float testSRs[3] = { 44100.0f, 48000.0f, 96000.0f };
+    const uint32_t testBlockSizes[5] = { 1, 7, 16, 32, 64 };
 
-    for (int b = 0; b < 4; ++b) {
-        const uint32_t bs = testBlockSizes[b];
+    for (int s = 0; s < 3; ++s) {
+        const float testSR = testSRs[s];
 
-        for (int m = 0; m < 4; ++m) {
-            DimensionDSP dsp;
-            Dimension_Init(&dsp, testSR);
-            DimensionParams p = dsp.params;
-            p.mode = (DimensionMode)m;
-            p.bbdCharacter = 1.0f;
-            p.baseDelayMs = baseDelays[m];
-            p.depthMs = depths[m];
-            p.rateHz = rates[m];
-            Dimension_SetParams(&dsp, &p);
+        for (int b = 0; b < 5; ++b) {
+            const uint32_t bs = testBlockSizes[b];
 
-            float inL[64], inR[64], outL[64], outR[64];
-            for (uint32_t i = 0; i < bs; ++i) {
-                inL[i] = 0.2f; inR[i] = 0.2f;
+            for (int m = 0; m < 4; ++m) {
+                DimensionDSP dsp;
+                Dimension_Init(&dsp, testSR);
+                DimensionParams p = dsp.params;
+                p.mode = (DimensionMode)m;
+                p.bbdCharacter = 1.0f;
+                p.baseDelayMs = baseDelays[m];
+                p.depthMs = depths[m];
+                p.rateHz = rates[m];
+                Dimension_SetParams(&dsp, &p);
+
+                float inL[64], inR[64], outL[64], outR[64];
+                for (uint32_t i = 0; i < bs; ++i) {
+                    inL[i] = 0.2f; inR[i] = 0.2f;
+                }
+
+                /* Warm up 50 blocks so initial mode transition settles into true steady state */
+                for (uint32_t blk = 0; blk < 50; ++blk) {
+                    Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, bs);
+                }
+
+                /* Run 50 blocks in confirmed steady state */
+                for (uint32_t blk = 0; blk < 50; ++blk) {
+                    Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, bs);
+
+                    const float actualClockL = dsp.bbdClock.chL.instantaneousClockHz;
+                    const float actualClockR = dsp.bbdClock.chR.instantaneousClockHz;
+                    CHECK(actualClockL >= DIMENSION_BBD_MIN_CLOCK_HZ);
+                    CHECK(actualClockL <= DIMENSION_BBD_MAX_CLOCK_HZ);
+                    CHECK(actualClockR >= DIMENSION_BBD_MIN_CLOCK_HZ);
+                    CHECK(actualClockR <= DIMENSION_BBD_MAX_CLOCK_HZ);
+
+                    /* Reference instantaneous clock at the exact sample where actualClock was evaluated (sample n-1 of block).
+                     * Note: dsp.lfoPhase was advanced by lfoInc at the end of sample n-1, so the phase during
+                     * sample n-1 was (dsp.lfoPhase - lfoInc). */
+                    const float lfoInc = dsp.smoothRateHz / testSR;
+                    float lastSamplePhase = dsp.lfoPhase - lfoInc;
+                    if (lastSamplePhase < 0.0f) lastSamplePhase += 1.0f;
+
+                    const float tri = (lastSamplePhase < 0.5f) ? (4.0f * lastSamplePhase - 1.0f) : (3.0f - 4.0f * lastSamplePhase);
+                    const float lfo = DimensionBBDClock_ModulateLfo(tri, dsp.smoothBbdCharacter);
+                    const float effDelayL_ms = dsp.smoothBaseDelayMs + dsp.smoothDepthMs * lfo;
+                    const float effDelayR_ms = dsp.smoothBaseDelayMs - dsp.smoothDepthMs * lfo;
+                    float refClockL = DimensionBBDClock_DelayToFrequency(effDelayL_ms);
+                    float refClockR = DimensionBBDClock_DelayToFrequency(effDelayR_ms);
+                    if (refClockL < DIMENSION_BBD_MIN_CLOCK_HZ) refClockL = DIMENSION_BBD_MIN_CLOCK_HZ;
+                    if (refClockL > DIMENSION_BBD_MAX_CLOCK_HZ) refClockL = DIMENSION_BBD_MAX_CLOCK_HZ;
+                    if (refClockR < DIMENSION_BBD_MIN_CLOCK_HZ) refClockR = DIMENSION_BBD_MIN_CLOCK_HZ;
+                    if (refClockR > DIMENSION_BBD_MAX_CLOCK_HZ) refClockR = DIMENSION_BBD_MAX_CLOCK_HZ;
+
+                    /* In steady state, error between DSP clock and physical delay formula is strictly bounded
+                     * by the 7th-order reciprocal polynomial expansion and single-sample discrete resolution (< 0.2%, or < 2e-3) */
+                    const double steadyRelErrL = fabs((double)(actualClockL - refClockL)) / (double)refClockL;
+                    const double steadyRelErrR = fabs((double)(actualClockR - refClockR)) / (double)refClockR;
+                    CHECK(steadyRelErrL < 0.002);
+                    CHECK(steadyRelErrR < 0.002);
+                }
+
+                /* Test during rapid parameter automation (sweep baseDelayMs from 7.0 to 11.5 over 50 blocks) */
+                p.baseDelayMs = 11.5f;
+                p.depthMs = 2.4f;
+                Dimension_SetParams(&dsp, &p);
+
+                double maxRelErr = 0.0;
+                double sumSqRelErr = 0.0;
+                uint32_t totalSamples = 0;
+
+                for (uint32_t blk = 0; blk < 50; ++blk) {
+                    Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, bs);
+                    const float clkL = dsp.bbdClock.chL.instantaneousClockHz;
+                    const float clkR = dsp.bbdClock.chR.instantaneousClockHz;
+                    CHECK(clkL >= DIMENSION_BBD_MIN_CLOCK_HZ && clkL <= DIMENSION_BBD_MAX_CLOCK_HZ);
+                    CHECK(clkR >= DIMENSION_BBD_MIN_CLOCK_HZ && clkR <= DIMENSION_BBD_MAX_CLOCK_HZ);
+
+                    /* Instantaneous reference at sample n-1 of block */
+                    const float lfoInc = dsp.smoothRateHz / testSR;
+                    float lastSamplePhase = dsp.lfoPhase - lfoInc;
+                    if (lastSamplePhase < 0.0f) lastSamplePhase += 1.0f;
+
+                    const float tri = (lastSamplePhase < 0.5f) ? (4.0f * lastSamplePhase - 1.0f) : (3.0f - 4.0f * lastSamplePhase);
+                    const float lfo = DimensionBBDClock_ModulateLfo(tri, dsp.smoothBbdCharacter);
+                    const float effDelayL_ms = dsp.smoothBaseDelayMs + dsp.smoothDepthMs * lfo;
+                    float refClockL = DimensionBBDClock_DelayToFrequency(effDelayL_ms);
+                    if (refClockL < DIMENSION_BBD_MIN_CLOCK_HZ) refClockL = DIMENSION_BBD_MIN_CLOCK_HZ;
+                    if (refClockL > DIMENSION_BBD_MAX_CLOCK_HZ) refClockL = DIMENSION_BBD_MAX_CLOCK_HZ;
+
+                    const double relErr = fabs((double)(clkL - refClockL)) / (double)refClockL;
+                    if (relErr > maxRelErr) maxRelErr = relErr;
+                    sumSqRelErr += relErr * relErr;
+                    totalSamples++;
+                }
+
+                const double rmsRelErr = sqrt(sumSqRelErr / (double)totalSamples);
+                /* During rapid automation sweep, maximum relative error between linear block
+                 * trajectory and exponential smoother is strictly bounded (< 0.5% max, < 0.2% RMS) */
+                CHECK(maxRelErr < 0.005);
+                CHECK(rmsRelErr < 0.002);
             }
-
-            double maxRelErr = 0.0;
-            double sumSqRelErr = 0.0;
-            uint32_t totalSamples = 0;
-
-            /* Run 50 blocks in steady state */
-            for (uint32_t blk = 0; blk < 50; ++blk) {
-                Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, bs);
-
-                const float actualClockL = dsp.bbdClock.chL.instantaneousClockHz;
-                CHECK(actualClockL >= DIMENSION_BBD_MIN_CLOCK_HZ);
-                CHECK(actualClockL <= DIMENSION_BBD_MAX_CLOCK_HZ);
-            }
-
-            /* Test during rapid parameter automation (sweep baseDelayMs from 7.0 to 11.5 over 50 blocks) */
-            p.baseDelayMs = 11.5f;
-            p.depthMs = 2.4f;
-            Dimension_SetParams(&dsp, &p);
-
-            for (uint32_t blk = 0; blk < 50; ++blk) {
-                Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, bs);
-                const float clk = dsp.bbdClock.chL.instantaneousClockHz;
-                CHECK(clk >= DIMENSION_BBD_MIN_CLOCK_HZ && clk <= DIMENSION_BBD_MAX_CLOCK_HZ);
-                const float refF0 = 512000.0f / dsp.smoothBaseDelayMs;
-                const double relErr = fabs((double)(clk - refF0)) / (double)refF0;
-                if (relErr > maxRelErr) maxRelErr = relErr;
-                sumSqRelErr += relErr * relErr;
-                totalSamples++;
-            }
-
-            const double rmsRelErr = sqrt(sumSqRelErr / (double)totalSamples);
-            /* Across modulation excursions, relative clock shift tracks modulation depth ratio cleanly */
-            CHECK(maxRelErr < 0.35); /* Mode IV maximum depth excursion */
-            CHECK(rmsRelErr < 0.25);
         }
     }
     return 0;

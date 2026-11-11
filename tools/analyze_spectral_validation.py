@@ -22,6 +22,106 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+def write_wav_float32(path, left, right, sample_rate):
+    """Writes stereo 32-bit float WAV file."""
+    left = np.asarray(left, dtype=np.float32)
+    right = np.asarray(right, dtype=np.float32)
+    n = min(len(left), len(right))
+    interleaved = np.empty(2 * n, dtype=np.float32)
+    interleaved[0::2] = left[:n]
+    interleaved[1::2] = right[:n]
+    raw_data = interleaved.tobytes()
+    data_size = len(raw_data)
+    
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, 'wb') as f:
+        f.write(struct.pack('<4sI4s', b'RIFF', 36 + data_size, b'WAVE'))
+        byte_rate = sample_rate * 8
+        f.write(struct.pack('<4sIHHIIHH', b'fmt ', 16, 3, 2, sample_rate, byte_rate, 8, 32))
+        f.write(struct.pack('<4sI', b'data', data_size))
+        f.write(raw_data)
+
+def validate_wav_file(path, expected_sr=None, min_samples=None, expected_channels=2, require_float32=True):
+    """
+    Validates WAV file existence, header integrity, sample rate, channels, minimum duration,
+    and absence of NaN/Inf.
+    Returns:
+        (is_valid: bool, error_code: str, left: np.ndarray, right: np.ndarray, sr: int)
+    """
+    if not os.path.exists(path):
+        return False, "REQUIRED_FIXTURE_MISSING", None, None, 0
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(12)
+            if len(header) < 12:
+                return False, "INVALID_HEADER", None, None, 0
+            riff, size, wave = struct.unpack('<4sI4s', header)
+            if riff != b'RIFF' or wave != b'WAVE':
+                return False, "INVALID_HEADER", None, None, 0
+            
+            fmt_found = False
+            data_found = False
+            audio_format = 1
+            num_channels = 2
+            sample_rate = 48000
+            bits_per_sample = 16
+            raw_data = None
+            
+            while True:
+                chunk_header = f.read(8)
+                if len(chunk_header) < 8:
+                    break
+                chunk_id, chunk_size = struct.unpack('<4sI', chunk_header)
+                if chunk_id == b'fmt ':
+                    fmt_data = f.read(chunk_size)
+                    audio_format, num_channels, sample_rate, byte_rate, block_align, bits_per_sample = struct.unpack(
+                        '<HHIIHH', fmt_data[:16]
+                    )
+                    fmt_found = True
+                elif chunk_id == b'data':
+                    raw_data = f.read(chunk_size)
+                    data_found = True
+                    break
+                else:
+                    f.seek(chunk_size, os.SEEK_CUR)
+                    
+            if not fmt_found or not data_found:
+                return False, "INVALID_HEADER", None, None, 0
+                
+            if require_float32 and audio_format != 3:
+                return False, "UNSUPPORTED_FORMAT", None, None, sample_rate
+            if expected_channels is not None and num_channels != expected_channels:
+                return False, "CHANNEL_COUNT_MISMATCH", None, None, sample_rate
+            if expected_sr is not None and sample_rate != expected_sr:
+                return False, "SAMPLE_RATE_MISMATCH", None, None, sample_rate
+                
+            if audio_format == 3:
+                samples = np.frombuffer(raw_data, dtype=np.float32)
+            elif audio_format == 1 and bits_per_sample == 16:
+                samples = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) * (1.0 / 32768.0)
+            elif audio_format == 1 and bits_per_sample == 32:
+                samples = np.frombuffer(raw_data, dtype=np.int32).astype(np.float32) * (1.0 / 2147483648.0)
+            else:
+                return False, "UNSUPPORTED_FORMAT", None, None, sample_rate
+                
+            if num_channels == 2:
+                left = samples[0::2]
+                right = samples[1::2]
+            else:
+                left = samples
+                right = samples
+                
+            n_frames = len(left)
+            if min_samples is not None and n_frames < min_samples:
+                return False, "INVALID_DURATION", left, right, sample_rate
+                
+            if np.isnan(left).any() or np.isnan(right).any() or np.isinf(left).any() or np.isinf(right).any():
+                return False, "NONFINITE_AUDIO", left, right, sample_rate
+                
+            return True, "OK", left, right, sample_rate
+    except Exception as e:
+        return False, f"EXCEPTION_{type(e).__name__}", None, None, 0
+
 def read_wav(path):
     """Reads 16-bit PCM or 32-bit float WAV file into left, right numpy arrays and sample rate."""
     with open(path, 'rb') as f:

@@ -5,6 +5,7 @@ option(DIMENSION5_ENABLE_ASAN "Enable AddressSanitizer for host builds" OFF)
 option(DIMENSION5_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer for host builds" OFF)
 option(DIMENSION5_ENABLE_TSAN "Enable ThreadSanitizer for host builds" OFF)
 option(DIMENSION5_ENABLE_FAST_MATH "Enable fast-math optimizations explicitly" OFF)
+option(DIMENSION5_STRICT_CI "Require all CI dependencies including Python validation tooling" OFF)
 option(DIMENSION5_BUILD_JUCE_PLUGIN "Build the JUCE VST3/plugin wrapper" OFF)
 set(DIMENSION5_JUCE_DIR "" CACHE PATH "Optional path to a local JUCE checkout")
 
@@ -96,7 +97,25 @@ set_tests_properties(dimension5_spatial_engine_validation_smoke PROPERTIES DEPEN
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_FOUND)
-  add_test(NAME dimension5_validator_negative_tests COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_spectral_analyzer.py)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c "import numpy, scipy, matplotlib"
+    RESULT_VARIABLE _PY_VAL_DEPS_RES
+    OUTPUT_QUIET
+    ERROR_QUIET
+  )
+  if(_PY_VAL_DEPS_RES EQUAL 0)
+    add_test(NAME dimension5_validator_negative_tests COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_spectral_analyzer.py)
+  else()
+    if(DIMENSION5_STRICT_CI)
+      message(FATAL_ERROR "DIMENSION5_STRICT_CI is ON, but Python validation dependencies (numpy, scipy, matplotlib) are missing.")
+    else()
+      message(STATUS "Python validation dependencies (numpy, scipy, matplotlib) not found. Skipping dimension5_validator_negative_tests in CTest.")
+    endif()
+  endif()
+else()
+  if(DIMENSION5_STRICT_CI)
+    message(FATAL_ERROR "DIMENSION5_STRICT_CI is ON, but Python3 Interpreter was not found.")
+  endif()
 endif()
 
 if(DIMENSION5_BUILD_JUCE_PLUGIN)

@@ -2,41 +2,84 @@
 """
 DIMENSION5 — BBD CHARACTER ENGINE 2.1
 Comprehensive Spectral Validation, Sideband Resolution & Aliasing Runner
-Phase A.2 Validation Suite
+Phase A.3 Validation Suite
 
-Analyzes rendered 16-second fixtures to:
-1. Resolve 0.25 Hz LFO modulation sidebands with high frequency resolution (df = 0.0625 Hz).
-2. Measure exact carrier amplitude, sideband power, out-of-band spurious, and noise floor.
-3. Scan for potential aliasing / Nyquist foldover across 44.1, 48, and 96 kHz.
-4. Verify bit-exact neutrality against frozen e153da5 baseline when character = 0%.
-5. Generate CSV, JSON reports and publication-quality spectral PNG plots.
+Audits all rendered 16-second fixtures to:
+1. Validate presence, WAV headers, float32 format, stereo channels, sample rates,
+   duration (>= 16s), and absence of non-finite (NaN/Inf) samples.
+2. Verify bit-exact neutrality against frozen e153da5 baseline when character = 0%.
+3. Resolve 0.25 Hz LFO modulation sidebands with high resolution (df = 0.0625 Hz).
+4. Measure exact carrier amplitude, sideband power, out-of-band spurious, and noise floor.
+5. Scan for potential aliasing / Nyquist foldover across 44.1, 48, and 96 kHz.
+6. Enforce explicit PASS/FAIL/NOT_RUN status on all required tests.
+   Returns exit code 0 ONLY if all tests pass; exits non-zero on any FAIL or NOT_RUN.
+7. Generate CSV, JSON reports and publication-quality spectral PNG plots.
 """
 
 import os
 import sys
 import json
 import csv
+import datetime
+import subprocess
 import numpy as np
+import scipy
+import matplotlib
 from analyze_spectral_validation import (
-    read_wav,
+    validate_wav_file,
     analyze_carrier_and_sidebands,
     compare_block_invariance,
     plot_spectral_validation
 )
 
+def get_git_commit():
+    try:
+        res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+        return res.stdout.strip()
+    except Exception:
+        return "unknown"
+
 def run_spectral_suite(out_dir="out", docs_dir="docs/spectral"):
-    print("=" * 72)
-    print("DIMENSION5 — PHASE A.2 HIGH-RESOLUTION SPECTRAL VALIDATION SUITE")
-    print("=" * 72)
+    print("=" * 76)
+    print("DIMENSION5 — PHASE A.3 HIGH-RESOLUTION SPECTRAL VALIDATION SUITE")
+    print("=" * 76)
     os.makedirs(docs_dir, exist_ok=True)
     
+    start_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    git_commit = get_git_commit()
+    
+    test_results = {}
+    failures = []
+    
+    def record_test(test_id, category, status, metric_name, threshold, measured, reason=None):
+        test_results[test_id] = {
+            "test_id": test_id,
+            "category": category,
+            "status": status,
+            "metric": metric_name,
+            "threshold": threshold,
+            "measured": measured,
+            "reason": reason
+        }
+        if status != "PASS":
+            failures.append(f"[{status}] {test_id}: {reason or status} (measured={measured}, threshold={threshold})")
+
     report = {
         "metadata": {
-            "suite": "Phase A.2 Spectral Validation",
+            "suite": "Phase A.3 Spectral Validation & Reliability",
+            "git_commit": git_commit,
+            "execution_date_utc": start_time,
+            "tools": {
+                "python": sys.version.split()[0],
+                "numpy": np.__version__,
+                "scipy": scipy.__version__,
+                "matplotlib": matplotlib.__version__
+            },
             "resolution_nominal_hz": 0.0625,
             "duration_sec": 16.0,
             "window": "4-term Blackman-Harris (-92 dB sidelobes)"
         },
+        "test_results": test_results,
         "neutrality_e153da5": {},
         "spectral_fixtures": {},
         "aliasing_evaluations": {},
@@ -49,22 +92,41 @@ def run_spectral_suite(out_dir="out", docs_dir="docs/spectral"):
     print("\n--- 1. VERIFYING NEUTRALITY AGAINST e153da5 BASELINE (16-second audio) ---")
     freqs = ["1k", "5k", "10k", "15k", "18k"]
     all_neutral = True
+    
     for f_label in freqs:
         f_char0 = os.path.join(out_dir, f"spec_{f_label}_48k_char000_f32.wav")
         f_base = os.path.join(out_dir, f"spec_{f_label}_48k_e153da5_f32.wav")
-        if os.path.exists(f_char0) and os.path.exists(f_base):
-            l0, r0, sr0 = read_wav(f_char0)
-            lb, rb, srb = read_wav(f_base)
-            comp_l = compare_block_invariance(lb, l0, sr0, f"neutrality_{f_label}_left")
-            comp_r = compare_block_invariance(rb, r0, sr0, f"neutrality_{f_label}_right")
-            is_exact = comp_l["is_bit_exact"] and comp_r["is_bit_exact"]
-            all_neutral &= is_exact
-            report["neutrality_e153da5"][f_label] = {
-                "is_bit_exact": is_exact,
-                "max_abs_diff_l": comp_l["max_abs_diff"],
-                "max_abs_diff_r": comp_r["max_abs_diff"]
-            }
-            print(f"  {f_label} 48kHz (16s): Bit-Exact = {is_exact} (MaxDiff L={comp_l['max_abs_diff']}, R={comp_r['max_abs_diff']})")
+        test_id = f"neutrality_e153da5_{f_label}_48k"
+        
+        ok0, err0, l0, r0, sr0 = validate_wav_file(f_char0, expected_sr=48000, min_samples=48000 * 16)
+        okb, errb, lb, rb, srb = validate_wav_file(f_base, expected_sr=48000, min_samples=48000 * 16)
+        
+        if not ok0:
+            record_test(test_id, "neutrality", "FAIL", "bit_exact", "True", f"ERR_{err0}", f"Invalid char000 fixture: {err0}")
+            all_neutral = False
+            continue
+        if not okb:
+            record_test(test_id, "neutrality", "FAIL", "bit_exact", "True", f"ERR_{errb}", f"Invalid e153da5 fixture: {errb}")
+            all_neutral = False
+            continue
+            
+        comp_l = compare_block_invariance(lb, l0, sr0, f"neutrality_{f_label}_left")
+        comp_r = compare_block_invariance(rb, r0, sr0, f"neutrality_{f_label}_right")
+        is_exact = comp_l["is_bit_exact"] and comp_r["is_bit_exact"]
+        max_diff = max(comp_l["max_abs_diff"], comp_r["max_abs_diff"])
+        
+        if is_exact:
+            record_test(test_id, "neutrality", "PASS", "max_abs_diff", "== 0.0", f"{max_diff:.1e}")
+        else:
+            record_test(test_id, "neutrality", "FAIL", "max_abs_diff", "== 0.0", f"{max_diff:.1e}", "Divergent from e153da5 baseline")
+            all_neutral = False
+            
+        report["neutrality_e153da5"][f_label] = {
+            "is_bit_exact": is_exact,
+            "max_abs_diff_l": comp_l["max_abs_diff"],
+            "max_abs_diff_r": comp_r["max_abs_diff"]
+        }
+        print(f"  {f_label} 48kHz (16s): Bit-Exact = {is_exact} (MaxDiff L={comp_l['max_abs_diff']}, R={comp_r['max_abs_diff']})")
 
     # -------------------------------------------------------------------------
     # 2. Sideband Resolution and Spectral Analysis across Carriers at 48 kHz
@@ -84,18 +146,36 @@ def run_spectral_suite(out_dir="out", docs_dir="docs/spectral"):
     for label, fc in carrier_freqs:
         for char_lvl, char_tag in [(0.0, "000"), (0.5, "050"), (1.0, "100")]:
             wav_path = os.path.join(out_dir, f"spec_{label}_48k_char{char_tag}_f32.wav")
-            if not os.path.exists(wav_path):
+            test_id = f"spectral_{label}_48k_char{char_tag}"
+            
+            ok, err_code, l, r, sr = validate_wav_file(wav_path, expected_sr=48000, min_samples=48000 * 16)
+            if not ok:
+                record_test(test_id, "spectral_resolution", "FAIL", "fixture_integrity", "VALID", err_code, f"Fixture invalid: {err_code}")
                 continue
-            l, r, sr = read_wav(wav_path)
+                
             res = analyze_carrier_and_sidebands(l, sr, f_carrier=fc, f_mod=0.25, max_delay_depth_ms=1.4)
             
-            fixture_key = f"{label}_48k_char{char_tag}"
+            # Grounded acceptance criteria:
+            # - Carrier peak within normal envelope: [-16.0, -10.0] dBFS
+            # - SFDR >= 45.0 dB
+            # - Noise floor < -120.0 dBFS
+            pass_carrier = -16.0 <= res["carrier_peak_dbfs"] <= -10.0
+            pass_sfdr = res["sfdr_db"] >= 45.0
+            pass_floor = res["noise_floor_median_dbfs"] < -120.0
             
-            # Store lean record in report (excluding giant raw freqs array for json)
+            if pass_carrier and pass_sfdr and pass_floor:
+                record_test(test_id, "spectral_resolution", "PASS", "sfdr_db", ">= 45.0 dB", f"{res['sfdr_db']:.1f} dB")
+            else:
+                reasons = []
+                if not pass_carrier: reasons.append(f"carrier={res['carrier_peak_dbfs']:.1f}dBFS")
+                if not pass_sfdr: reasons.append(f"sfdr={res['sfdr_db']:.1f}dB")
+                if not pass_floor: reasons.append(f"floor={res['noise_floor_median_dbfs']:.1f}dBFS")
+                record_test(test_id, "spectral_resolution", "FAIL", "sfdr_db", ">= 45.0 dB", f"{res['sfdr_db']:.1f} dB", ", ".join(reasons))
+                
+            fixture_key = f"{label}_48k_char{char_tag}"
             res_lean = {k: v for k, v in res.items() if k not in ["freqs", "mag_db"]}
             report["spectral_fixtures"][fixture_key] = res_lean
             
-            # Add to summary table
             report["summary_table"].append({
                 "fixture": fixture_key,
                 "sr": sr,
@@ -130,14 +210,36 @@ def run_spectral_suite(out_dir="out", docs_dir="docs/spectral"):
         print(f"\nEvaluating Carrier = {fc:.0f} Hz across sample rates:")
         for rate, tag_sr in [(44100, "44k"), (48000, "48k"), (96000, "96k")]:
             wav_path = os.path.join(out_dir, f"spec_{f_label}_{tag_sr}_char100_f32.wav")
-            if not os.path.exists(wav_path):
+            test_id = f"multirate_aliasing_{f_label}_{tag_sr}_char100"
+            
+            ok, err_code, l, r, sr = validate_wav_file(wav_path, expected_sr=rate, min_samples=rate * 16)
+            if not ok:
+                record_test(test_id, "aliasing_multirate", "FAIL", "fixture_integrity", "VALID", err_code, f"Fixture invalid: {err_code}")
                 continue
-            l, r, sr = read_wav(wav_path)
+                
             res = analyze_carrier_and_sidebands(l, sr, f_carrier=fc, f_mod=0.25, max_delay_depth_ms=1.4)
             key = f"{f_label}_{tag_sr}_char100"
             
-            # Check aliasing candidates
+            # Baseline reference at same rate to separate inherent baseline foldover from BBD engine foldover
+            wav_base = os.path.join(out_dir, f"spec_{f_label}_{tag_sr}_char000_f32.wav")
+            base_significant_count = 0
+            if os.path.exists(wav_base):
+                ok_b, _, l_b, _, _ = validate_wav_file(wav_base, expected_sr=rate, min_samples=rate * 16)
+                if ok_b:
+                    res_b = analyze_carrier_and_sidebands(l_b, rate, f_carrier=fc, f_mod=0.25, max_delay_depth_ms=1.4)
+                    base_significant_count = len([c for c in res_b["aliasing_candidates"] if c["is_significant"]])
+                    
             sig_aliases = [c for c in res["aliasing_candidates"] if c["is_significant"]]
+            
+            # Criterion: BBD character must NOT introduce NEW significant aliasing components beyond baseline
+            new_aliases_count = max(0, len(sig_aliases) - base_significant_count)
+            pass_aliasing = (new_aliases_count == 0) and (res["sfdr_db"] >= 45.0)
+            
+            if pass_aliasing:
+                record_test(test_id, "aliasing_multirate", "PASS", "new_aliases", "0", f"{new_aliases_count} (SFDR={res['sfdr_db']:.1f} dB)")
+            else:
+                record_test(test_id, "aliasing_multirate", "FAIL", "new_aliases", "0", f"{new_aliases_count}", f"Introduced {new_aliases_count} new aliasing foldovers or SFDR < 45 dB")
+                
             report["aliasing_evaluations"][key] = {
                 "carrier_hz": fc,
                 "sr": rate,
@@ -145,10 +247,11 @@ def run_spectral_suite(out_dir="out", docs_dir="docs/spectral"):
                 "max_spurious_freq_hz": res["max_spurious_freq_hz"],
                 "max_spurious_dbc": res["max_spurious_dbc"],
                 "significant_aliasing_count": len(sig_aliases),
+                "new_aliasing_count": new_aliases_count,
                 "candidates": res["aliasing_candidates"]
             }
             
-            status = "CLEAN (PASS)" if len(sig_aliases) == 0 else f"FLAGGED ({len(sig_aliases)} aliases)"
+            status = "CLEAN (PASS)" if pass_aliasing else f"FLAGGED ({len(sig_aliases)} aliases)"
             print(f"  [{tag_sr:4s} | fc={fc:5.0f} Hz] SFDR: {res['sfdr_db']:5.1f} dB | "
                   f"Max Spur: {res['max_spurious_dbc']:6.1f} dBc @ {res['max_spurious_freq_hz']:8.1f} Hz | {status}")
             
@@ -196,6 +299,22 @@ def run_spectral_suite(out_dir="out", docs_dir="docs/spectral"):
     # -------------------------------------------------------------------------
     # 5. Export JSON and CSV Reports
     # -------------------------------------------------------------------------
+    total_tests = len(test_results)
+    pass_count = sum(1 for t in test_results.values() if t["status"] == "PASS")
+    fail_count = sum(1 for t in test_results.values() if t["status"] == "FAIL")
+    not_run_count = sum(1 for t in test_results.values() if t["status"] == "NOT_RUN")
+    
+    suite_passed = (total_tests > 0) and (fail_count == 0) and (not_run_count == 0)
+    
+    report["overall_summary"] = {
+        "suite_passed": suite_passed,
+        "total_tests": total_tests,
+        "passed_tests": pass_count,
+        "failed_tests": fail_count,
+        "not_run_tests": not_run_count,
+        "failures": failures
+    }
+    
     json_path = os.path.join(out_dir, "spectral_validation_report.json")
     with open(json_path, 'w') as f:
         json.dump(report, f, indent=2)
@@ -210,10 +329,17 @@ def run_spectral_suite(out_dir="out", docs_dir="docs/spectral"):
             writer.writerows(report["summary_table"])
         print(f"CSV summary written to: {csv_path}")
 
-    print("\n" + "=" * 72)
-    print(f"SPECTRAL SUITE COMPLETE: Neutrality Pass = {all_neutral}")
-    print("=" * 72)
-    return 0 if all_neutral else 1
+    print("\n" + "=" * 76)
+    print(f"SPECTRAL SUITE SUMMARY: {pass_count} / {total_tests} TESTS PASSED "
+          f"({fail_count} Failed, {not_run_count} Not Run)")
+    if not suite_passed:
+        print("FAILURES DETECTED:")
+        for fail in failures:
+            print(f"  * {fail}")
+    print(f"OVERALL RESULT: {'PASS' if suite_passed else 'FAIL'}")
+    print("=" * 76)
+    
+    return 0 if suite_passed else 1
 
 if __name__ == '__main__':
     out_directory = sys.argv[1] if len(sys.argv) > 1 else "out"

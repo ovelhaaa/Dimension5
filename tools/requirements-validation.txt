@@ -1,0 +1,5 @@
+# DIMENSION5 — High-Resolution Spectral Validation & Analysis Dependencies
+# Pinned/bounded for deterministic CI and local reproducibility
+numpy>=1.24.0,<2.3.0
+scipy>=1.10.0,<1.16.0
+matplotlib>=3.7.0,<3.11.0
