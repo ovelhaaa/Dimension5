@@ -379,6 +379,85 @@ def analyze_carrier_and_sidebands(signal, sr, f_carrier, f_mod=0.25, max_delay_d
         "mag_db": mag_db
     }
 
+def classify_aliasing_components(test_candidates, baseline_candidates, df=0.0625, amp_tol_db=6.0, freq_tol_hz=None):
+    """
+    Rigorously compares detected aliasing/spurious components against baseline:
+    - Matches components by frequency within tolerance (default max(5 * df, 10 Hz)).
+    - Classifies each candidate as:
+      * BASELINE_MATCHED: present in baseline with similar amplitude (|delta| <= amp_tol_db).
+      * NEW_COMPONENT: significant component not present in baseline.
+      * AMPLITUDE_INCREASE: present in baseline, but test level exceeds baseline by > amp_tol_db.
+      * AMPLITUDE_DECREASE: present in baseline, but test level is lower by > amp_tol_db.
+      * UNCERTAIN: candidate level below significance threshold.
+    Returns:
+      (classifications: list[dict], new_components_count: int, amplitude_increases_count: int)
+    """
+    freq_tol = freq_tol_hz if freq_tol_hz is not None else max(5.0 * df, 10.0)
+    classifications = []
+    new_components_count = 0
+    amplitude_increases_count = 0
+
+    base_matched_indices = set()
+
+    for cand in test_candidates:
+        f_cand = cand["measured_freq_hz"]
+        p_cand = cand["mag_dbfs"]
+        rel_cand = cand["rel_dbc"]
+        is_sig = cand.get("is_significant", False) or (rel_cand > -60.0 and p_cand > -80.0)
+
+        if not is_sig:
+            classifications.append({
+                "candidate": cand,
+                "classification": "UNCERTAIN",
+                "reason": "Level below significance threshold (-60 dBc or -80 dBFS)"
+            })
+            continue
+
+        # Look for matching baseline candidate within frequency tolerance
+        best_match = None
+        best_idx = -1
+        min_f_diff = float('inf')
+
+        for idx, base_cand in enumerate(baseline_candidates):
+            f_base = base_cand["measured_freq_hz"]
+            f_diff = abs(f_cand - f_base)
+            if f_diff <= freq_tol and f_diff < min_f_diff:
+                min_f_diff = f_diff
+                best_match = base_cand
+                best_idx = idx
+
+        if best_match is not None:
+            base_matched_indices.add(best_idx)
+            delta_amp = rel_cand - best_match["rel_dbc"]
+            if delta_amp > amp_tol_db:
+                classif = "AMPLITUDE_INCREASE"
+                amplitude_increases_count += 1
+                reason = f"Component level increased by {delta_amp:+.1f} dB (>{amp_tol_db} dB threshold)"
+            elif delta_amp < -amp_tol_db:
+                classif = "AMPLITUDE_DECREASE"
+                reason = f"Component level decreased by {delta_amp:+.1f} dB"
+            else:
+                classif = "BASELINE_MATCHED"
+                reason = f"Frequency match within {min_f_diff:.2f} Hz, level delta {delta_amp:+.1f} dB"
+
+            classifications.append({
+                "candidate": cand,
+                "matched_baseline": best_match,
+                "freq_diff_hz": min_f_diff,
+                "delta_dbc": delta_amp,
+                "classification": classif,
+                "reason": reason
+            })
+        else:
+            classifications.append({
+                "candidate": cand,
+                "classification": "NEW_COMPONENT",
+                "reason": f"No baseline component found within {freq_tol:.1f} Hz tolerance"
+            })
+            new_components_count += 1
+
+    return classifications, new_components_count, amplitude_increases_count
+
 def compare_block_invariance(ref, test, sr, name="invariance"):
     """
     Computes rigorous temporal invariance metrics between reference and test signals:

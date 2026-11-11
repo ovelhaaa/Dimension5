@@ -69,6 +69,24 @@ add_executable(dimension5_offline_render tools/dimension5_offline_render.c)
 target_link_libraries(dimension5_offline_render PRIVATE dimension5_core dimension5_baseline_e153da5)
 dimension5_apply_host_options(dimension5_offline_render)
 
+add_executable(dimension5_bbd_clock_trace tools/bbd_clock_trace.c src/dimension_bbd_clock.c)
+target_include_directories(dimension5_bbd_clock_trace PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+dimension5_apply_host_options(dimension5_bbd_clock_trace)
+if(NOT MSVC)
+  target_link_libraries(dimension5_bbd_clock_trace PRIVATE m)
+endif()
+
+add_executable(dimension5_render_phase_a3_a4
+  tools/render_phase_a3_a4.c
+  tools/dimension_dsp_phase_a3.c
+)
+target_include_directories(dimension5_render_phase_a3_a4 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dimension5_render_phase_a3_a4 PRIVATE dimension5_core)
+dimension5_apply_host_options(dimension5_render_phase_a3_a4)
+if(NOT MSVC)
+  target_link_libraries(dimension5_render_phase_a3_a4 PRIVATE m)
+endif()
+
 add_executable(dimension5_bench bench/dimension_bench.c)
 target_link_libraries(dimension5_bench PRIVATE dimension5_core)
 dimension5_apply_host_options(dimension5_bench)

@@ -29,7 +29,8 @@ from analyze_spectral_validation import (
     validate_wav_file,
     analyze_carrier_and_sidebands,
     compare_block_invariance,
-    plot_spectral_validation
+    plot_spectral_validation,
+    classify_aliasing_components
 )
 
 def get_git_commit():
@@ -222,23 +223,30 @@ def run_spectral_suite(out_dir="out", docs_dir="docs/spectral"):
             
             # Baseline reference at same rate to separate inherent baseline foldover from BBD engine foldover
             wav_base = os.path.join(out_dir, f"spec_{f_label}_{tag_sr}_char000_f32.wav")
-            base_significant_count = 0
+            base_candidates = []
             if os.path.exists(wav_base):
                 ok_b, _, l_b, _, _ = validate_wav_file(wav_base, expected_sr=rate, min_samples=rate * 16)
                 if ok_b:
                     res_b = analyze_carrier_and_sidebands(l_b, rate, f_carrier=fc, f_mod=0.25, max_delay_depth_ms=1.4)
-                    base_significant_count = len([c for c in res_b["aliasing_candidates"] if c["is_significant"]])
+                    base_candidates = res_b.get("aliasing_candidates", [])
                     
-            sig_aliases = [c for c in res["aliasing_candidates"] if c["is_significant"]]
+            # Component-by-component spectral matching against baseline
+            df = res.get("freq_resolution_hz", 0.0625)
+            classifications, new_aliases_count, amp_increases_count = classify_aliasing_components(
+                res["aliasing_candidates"], base_candidates, df=df, amp_tol_db=6.0
+            )
             
-            # Criterion: BBD character must NOT introduce NEW significant aliasing components beyond baseline
-            new_aliases_count = max(0, len(sig_aliases) - base_significant_count)
-            pass_aliasing = (new_aliases_count == 0) and (res["sfdr_db"] >= 45.0)
+            sig_aliases = [c for c in res["aliasing_candidates"] if c["is_significant"]]
+            pass_aliasing = (new_aliases_count == 0) and (amp_increases_count == 0) and (res["sfdr_db"] >= 45.0)
             
             if pass_aliasing:
                 record_test(test_id, "aliasing_multirate", "PASS", "new_aliases", "0", f"{new_aliases_count} (SFDR={res['sfdr_db']:.1f} dB)")
             else:
-                record_test(test_id, "aliasing_multirate", "FAIL", "new_aliases", "0", f"{new_aliases_count}", f"Introduced {new_aliases_count} new aliasing foldovers or SFDR < 45 dB")
+                reasons = []
+                if new_aliases_count > 0: reasons.append(f"{new_aliases_count} new alias component(s)")
+                if amp_increases_count > 0: reasons.append(f"{amp_increases_count} amplitude increase(s)")
+                if res["sfdr_db"] < 45.0: reasons.append(f"SFDR={res['sfdr_db']:.1f} dB (<45 dB)")
+                record_test(test_id, "aliasing_multirate", "FAIL", "new_aliases", "0", f"{new_aliases_count}", ", ".join(reasons))
                 
             report["aliasing_evaluations"][key] = {
                 "carrier_hz": fc,
@@ -248,6 +256,8 @@ def run_spectral_suite(out_dir="out", docs_dir="docs/spectral"):
                 "max_spurious_dbc": res["max_spurious_dbc"],
                 "significant_aliasing_count": len(sig_aliases),
                 "new_aliasing_count": new_aliases_count,
+                "amplitude_increases_count": amp_increases_count,
+                "classifications": classifications,
                 "candidates": res["aliasing_candidates"]
             }
             

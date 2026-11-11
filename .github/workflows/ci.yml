@@ -32,6 +32,12 @@ jobs:
         run: ./build/dimension5_bench
       - name: Render offline WAVs
         run: ./build/dimension5_offline_render out --spectral
+      - name: Render Phase A.3 vs A.4 A/B Fixtures
+        run: ./build/dimension5_render_phase_a3_a4 out
+      - name: Compare Phase A.3 vs A.4 Regression
+        run: python3 tools/compare_phase_a3_a4.py out
+      - name: Generate BBD Clock Trace and Invariance
+        run: ./build/dimension5_bbd_clock_trace out
       - name: Spectral Generator Precision
         run: python3 tools/test_generator_precision.py out
       - name: Negative Validator Tests
@@ -42,6 +48,8 @@ jobs:
         run: python3 tools/run_spectral_analysis.py out
       - name: BBD Clock Accuracy & Invariance Validation
         run: python3 tools/validate_clock_and_invariance.py out
+      - name: Summary Aggregator Negative Suite
+        run: python3 tools/test_validation_summary.py out
       - name: Consolidated Validation Summary
         run: python3 tools/generate_validation_summary.py out
       - name: Upload Audio Analysis artifacts

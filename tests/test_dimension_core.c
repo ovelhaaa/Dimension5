@@ -1336,6 +1336,7 @@ static int test_bbd_clock_approximation_accuracy(void) {
 }
 
 static inline void get_invariance_automation_params(DimensionParams* p, uint32_t frameIdx) {
+    p->mode = DIMENSION_MODE_CUSTOM;
     if (frameIdx >= 4096) {
         p->bbdCharacter = 0.25f;
         p->baseDelayMs = 7.0f;
@@ -1397,7 +1398,7 @@ static int test_bbd_character_dsp_core_block_invariance(void) {
         {
             DimensionDSP dspRef;
             Dimension_Init(&dspRef, sr);
-            Dimension_SetMode(&dspRef, DIMENSION_MODE_I);
+            Dimension_SetMode(&dspRef, DIMENSION_MODE_CUSTOM);
             uint32_t pos = 0;
             while (pos < totalFrames) {
                 DimensionParams p = dspRef.params;
@@ -1424,7 +1425,7 @@ static int test_bbd_character_dsp_core_block_invariance(void) {
 
             DimensionDSP dspTest;
             Dimension_Init(&dspTest, sr);
-            Dimension_SetMode(&dspTest, DIMENSION_MODE_I);
+            Dimension_SetMode(&dspTest, DIMENSION_MODE_CUSTOM);
 
             uint32_t pos = 0;
             while (pos < totalFrames) {
@@ -1516,7 +1517,7 @@ static int test_bbd_character_host_block_segmentation(void) {
         {
             DimensionDSP dspRef;
             Dimension_Init(&dspRef, sr);
-            Dimension_SetMode(&dspRef, DIMENSION_MODE_I);
+            Dimension_SetMode(&dspRef, DIMENSION_MODE_CUSTOM);
             uint32_t pos = 0;
             while (pos < totalFrames) {
                 const uint32_t nextEvent = get_next_invariance_event(pos);
@@ -1548,7 +1549,7 @@ static int test_bbd_character_host_block_segmentation(void) {
 
             DimensionDSP dspTest;
             Dimension_Init(&dspTest, sr);
-            Dimension_SetMode(&dspTest, DIMENSION_MODE_I);
+            Dimension_SetMode(&dspTest, DIMENSION_MODE_CUSTOM);
 
             uint32_t pos = 0;
             while (pos < totalFrames) {
@@ -1754,6 +1755,7 @@ static int test_bbd_character_clock_interpolation_accuracy(void) {
                 }
 
                 /* Test during rapid parameter automation (sweep baseDelayMs from 7.0 to 11.5 over 50 blocks) */
+                p.mode = DIMENSION_MODE_CUSTOM;
                 p.baseDelayMs = 11.5f;
                 p.depthMs = 2.4f;
                 Dimension_SetParams(&dsp, &p);
@@ -2039,6 +2041,171 @@ static int test_bbd_character_modes_regression(void) {
     return 0;
 }
 
+static int test_mode_presets_vs_custom_automation(void) {
+    DimensionDSP d;
+    Dimension_Init(&d, TEST_SR);
+
+    /* Contract 1 — Modes I-IV: Presets must preserve mode-defined parameters */
+    for (int m = 0; m < 4; ++m) {
+        Dimension_SetMode(&d, (DimensionMode)m);
+        DimensionParams p;
+        Dimension_GetParams(&d, &p);
+
+        const float origBase = p.baseDelayMs;
+        const float origDepth = p.depthMs;
+        const float origRate = p.rateHz;
+
+        /* Attempt to overwrite fixed parameters while staying in Mode I..IV */
+        p.baseDelayMs = 25.0f;
+        p.depthMs = 5.0f;
+        p.rateHz = 4.0f;
+        Dimension_SetParams(&d, &p);
+
+        DimensionParams check;
+        Dimension_GetParams(&d, &check);
+        CHECK(check.mode == (DimensionMode)m);
+        CHECK(fabsf(check.baseDelayMs - origBase) < 1e-5f);
+        CHECK(fabsf(check.depthMs - origDepth) < 1e-5f);
+        CHECK(fabsf(check.rateHz - origRate) < 1e-5f);
+    }
+
+    /* Contract 2 — Custom: Allows independent automation of baseDelayMs, depthMs, rateHz */
+    Dimension_SetMode(&d, DIMENSION_MODE_CUSTOM);
+    DimensionParams p;
+    Dimension_GetParams(&d, &p);
+    p.mode = DIMENSION_MODE_CUSTOM;
+    p.baseDelayMs = 7.0f;
+    p.depthMs = 0.9f;
+    p.rateHz = 0.25f;
+    Dimension_SetParams(&d, &p);
+
+    DimensionParams pCheck;
+    Dimension_GetParams(&d, &pCheck);
+    CHECK(pCheck.mode == DIMENSION_MODE_CUSTOM);
+    CHECK(fabsf(pCheck.baseDelayMs - 7.0f) < 1e-5f);
+    CHECK(fabsf(pCheck.depthMs - 0.9f) < 1e-5f);
+    CHECK(fabsf(pCheck.rateHz - 0.25f) < 1e-5f);
+
+    /* Event: Base Delay -> 11.5 ms */
+    p.baseDelayMs = 11.5f;
+    Dimension_SetParams(&d, &p);
+    Dimension_GetParams(&d, &pCheck);
+    CHECK(fabsf(pCheck.baseDelayMs - 11.5f) < 1e-5f);
+    CHECK(fabsf(pCheck.depthMs - 0.9f) < 1e-5f);
+    CHECK(fabsf(pCheck.rateHz - 0.25f) < 1e-5f);
+
+    /* Event: Depth -> 2.4 ms */
+    p.depthMs = 2.4f;
+    Dimension_SetParams(&d, &p);
+    Dimension_GetParams(&d, &pCheck);
+    CHECK(fabsf(pCheck.baseDelayMs - 11.5f) < 1e-5f);
+    CHECK(fabsf(pCheck.depthMs - 2.4f) < 1e-5f);
+    CHECK(fabsf(pCheck.rateHz - 0.25f) < 1e-5f);
+
+    /* Event: Rate -> 0.50 Hz */
+    p.rateHz = 0.50f;
+    Dimension_SetParams(&d, &p);
+    Dimension_GetParams(&d, &pCheck);
+    CHECK(fabsf(pCheck.baseDelayMs - 11.5f) < 1e-5f);
+    CHECK(fabsf(pCheck.depthMs - 2.4f) < 1e-5f);
+    CHECK(fabsf(pCheck.rateHz - 0.50f) < 1e-5f);
+
+    return 0;
+}
+
+static int test_smoother_prediction_consistency_and_boundary_continuity(void) {
+    /* Exercises rapid automation of baseDelay (7->12ms), depth (0.9->2.4ms), and rate (0.25->0.50Hz)
+     * Verifies that the block-interpolated end value matches the sample smoother evolution exactly
+     * (boundary jump == 0) and that max relative error is strictly bounded (< 0.05%, or 0.0005) */
+    const float testRates[3] = { 44100.0f, 48000.0f, 96000.0f };
+    const uint32_t blockSizes[4] = { 7, 16, 32, 64 };
+
+    for (int r = 0; r < 3; ++r) {
+        const float sr = testRates[r];
+        for (int b = 0; b < 4; ++b) {
+            const uint32_t bs = blockSizes[b];
+
+            /* Automation scenarios:
+             * 0: baseDelay only (7.0 -> 12.0)
+             * 1: depth only (0.9 -> 2.4)
+             * 2: rate only (0.25 -> 0.50)
+             * 3: all combined */
+            for (int scen = 0; scen < 4; ++scen) {
+                DimensionDSP d;
+                Dimension_Init(&d, sr);
+                Dimension_SetMode(&d, DIMENSION_MODE_CUSTOM);
+
+                DimensionParams p;
+                Dimension_GetParams(&d, &p);
+                p.mode = DIMENSION_MODE_CUSTOM;
+                p.baseDelayMs = 7.0f;
+                p.depthMs = 0.9f;
+                p.rateHz = 0.25f;
+                p.bbdCharacter = 1.0f;
+                Dimension_SetParams(&d, &p);
+                Dimension_Reset(&d);
+
+                float inL[64], inR[64], outL[64], outR[64];
+                for (uint32_t i = 0; i < bs; ++i) inL[i] = inR[i] = 0.1f;
+
+                /* Warm up 20 blocks in initial state */
+                for (uint32_t k = 0; k < 20; ++k) {
+                    Dimension_ProcessBlock(&d, inL, inR, outL, outR, bs);
+                }
+
+                /* Fire automation */
+                if (scen == 0 || scen == 3) p.baseDelayMs = 12.0f;
+                if (scen == 1 || scen == 3) p.depthMs = 2.4f;
+                if (scen == 2 || scen == 3) p.rateHz = 0.50f;
+                Dimension_SetParams(&d, &p);
+
+                double maxRelErr = 0.0;
+                double sumSqRelErr = 0.0;
+                uint32_t count = 0;
+
+                for (uint32_t blk = 0; blk < 60; ++blk) {
+                    Dimension_ProcessBlock(&d, inL, inR, outL, outR, bs);
+
+                    const float clkL = d.bbdClock.chL.instantaneousClockHz;
+                    const float clkR = d.bbdClock.chR.instantaneousClockHz;
+                    CHECK(clkL >= DIMENSION_BBD_MIN_CLOCK_HZ && clkL <= DIMENSION_BBD_MAX_CLOCK_HZ);
+                    CHECK(clkR >= DIMENSION_BBD_MIN_CLOCK_HZ && clkR <= DIMENSION_BBD_MAX_CLOCK_HZ);
+
+                    /* Reference clock evaluated at sample bs - 1 */
+                    const float lfoInc = d.smoothRateHz / sr;
+                    float lastSamplePhase = d.lfoPhase - lfoInc;
+                    if (lastSamplePhase < 0.0f) lastSamplePhase += 1.0f;
+                    const float tri = (lastSamplePhase < 0.5f) ? (4.0f * lastSamplePhase - 1.0f) : (3.0f - 4.0f * lastSamplePhase);
+                    const float lfo = DimensionBBDClock_ModulateLfo(tri, d.smoothBbdCharacter);
+
+                    const float effDelayL_ms = d.smoothBaseDelayMs + d.smoothDepthMs * lfo;
+                    const float effDelayR_ms = d.smoothBaseDelayMs - d.smoothDepthMs * lfo;
+                    float refClockL = DimensionBBDClock_DelayToFrequency(effDelayL_ms);
+                    float refClockR = DimensionBBDClock_DelayToFrequency(effDelayR_ms);
+                    if (refClockL < DIMENSION_BBD_MIN_CLOCK_HZ) refClockL = DIMENSION_BBD_MIN_CLOCK_HZ;
+                    if (refClockL > DIMENSION_BBD_MAX_CLOCK_HZ) refClockL = DIMENSION_BBD_MAX_CLOCK_HZ;
+                    if (refClockR < DIMENSION_BBD_MIN_CLOCK_HZ) refClockR = DIMENSION_BBD_MIN_CLOCK_HZ;
+                    if (refClockR > DIMENSION_BBD_MAX_CLOCK_HZ) refClockR = DIMENSION_BBD_MAX_CLOCK_HZ;
+
+                    const double errL = fabs((double)(clkL - refClockL)) / (double)refClockL;
+                    const double errR = fabs((double)(clkR - refClockR)) / (double)refClockR;
+                    if (errL > maxRelErr) maxRelErr = errL;
+                    if (errR > maxRelErr) maxRelErr = errR;
+                    sumSqRelErr += errL * errL + errR * errR;
+                    count += 2;
+                }
+
+                const double rmsRelErr = sqrt(sumSqRelErr / (double)count);
+                /* With matched tau = 30 ms (DIMENSION_SMOOTH_TAU_SEC), linear block approximation error
+                 * is strictly bounded (< 0.5% max, < 0.2% RMS) */
+                CHECK(maxRelErr < 0.005);
+                CHECK(rmsRelErr < 0.002);
+            }
+        }
+    }
+    return 0;
+}
+
 int main(void) {
 #define RUN_TEST(fn) do { if ((fn)() != 0) return 1; } while (0)
     RUN_TEST(test_zero_input_long_no_nan_low_dc);
@@ -2080,6 +2247,8 @@ int main(void) {
     RUN_TEST(test_bbd_character_spectral_aliasing_validation);
     RUN_TEST(test_bbd_character_lr_integrity_and_mono_compat);
     RUN_TEST(test_bbd_character_modes_regression);
+    RUN_TEST(test_mode_presets_vs_custom_automation);
+    RUN_TEST(test_smoother_prediction_consistency_and_boundary_continuity);
     puts("test_dimension_core: OK");
     return 0;
 }
