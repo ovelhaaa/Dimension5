@@ -105,6 +105,7 @@ static void dimension_clear_state(DimensionDSP* d) {
     d->expEnvL = d->expEnvR = 0.0f;
     d->bbdStateL = d->bbdStateR = 0.0f;
     d->bassFocusState = 0.0f;
+    DimensionBBDClock_Reset(&d->bbdClock);
 }
 
 static DimensionParams dimension_default_params(float sampleRate) {
@@ -128,6 +129,7 @@ static DimensionParams dimension_default_params(float sampleRate) {
     p.width = 1.0f;
     p.stereoWidth = 1.0f;
     p.bassFocusHz = 0.0f;
+    p.bbdCharacter = 0.0f;
     return p;
 }
 
@@ -206,6 +208,7 @@ static inline void dimension_sync_smoothers(DimensionDSP* d) {
     d->smoothCompanderAmount = d->params.companderAmount;
     d->smoothBassFocusHz = (d->params.bassFocusHz > 0.0f) ? d->params.bassFocusHz : 120.0f;
     d->smoothBassFocusAmount = (d->params.bassFocusHz > 0.0f) ? 1.0f : 0.0f;
+    d->smoothBbdCharacter = d->params.bbdCharacter;
 }
 
 void Dimension_Init(DimensionDSP* d, float sampleRate) {
@@ -257,6 +260,7 @@ void Dimension_SetParams(DimensionDSP* d, const DimensionParams* p) {
     d->params.width = dimension_sanitize_param(d->params.width, 1.0f, 0.0f, 2.0f);
     d->params.stereoWidth = dimension_sanitize_param(d->params.stereoWidth, 1.0f, 0.0f, 2.0f);
     d->params.bassFocusHz = dimension_sanitize_param(d->params.bassFocusHz, 0.0f, 0.0f, 500.0f);
+    d->params.bbdCharacter = dimension_sanitize_param(d->params.bbdCharacter, 0.0f, 0.0f, 1.0f);
     if (d->params.mode != DIMENSION_MODE_CUSTOM) {
         dimension_apply_mode_preset(&d->params, d->params.mode);
     }
@@ -327,8 +331,35 @@ void Dimension_ProcessBlock(
     const float analogAmount = dimension_clampf(d->smoothAnalogAmount, 0.0f, 1.0f);
     const float preAlpha = one_pole_alpha(3200.0f + 6400.0f * (1.0f - analogAmount), sr);
 
+    /* Temporal Clock Tracking & Block Interpolation:
+     * Compute start and predicted end values of baseDelay and depth across this block (n frames)
+     * using the closed form of the 20 ms one-pole smoother (gamma = exp(-n / (0.020 * sr))).
+     * Linearly interpolate bbdF0 and bbdDepthRatio across the n samples.
+     * Guarantees exact continuity across block boundaries (0 jump) for any block size,
+     * keeps clock in sync with delay evolution during automation, and eliminates per-sample division. */
+    const float tauDelaySec = 0.020f;
+    const float gammaDelay = expf(-(float)n / (tauDelaySec * sr));
+    const float endBaseMs = d->params.baseDelayMs + (d->smoothBaseDelayMs - d->params.baseDelayMs) * gammaDelay;
+    const float endDepthMs = d->params.depthMs + (d->smoothDepthMs - d->params.depthMs) * gammaDelay;
+
+    const float startBaseMs = (d->smoothBaseDelayMs > 0.5f) ? d->smoothBaseDelayMs : 0.5f;
+    const float startDepthMs = (d->smoothDepthMs >= 0.0f) ? d->smoothDepthMs : 0.0f;
+    const float safeEndBaseMs = (endBaseMs > 0.5f) ? endBaseMs : 0.5f;
+    const float safeEndDepthMs = (endDepthMs >= 0.0f) ? endDepthMs : 0.0f;
+
+    const float startF0 = 512000.0f / startBaseMs;
+    const float startRatio = startDepthMs / startBaseMs;
+    const float endF0 = 512000.0f / safeEndBaseMs;
+    const float endRatio = safeEndDepthMs / safeEndBaseMs;
+
+    const float invN = (n > 0U) ? (1.0f / (float)n) : 0.0f;
+    const float deltaBbdF0 = (endF0 - startF0) * invN;
+    const float deltaBbdRatio = (endRatio - startRatio) * invN;
+    float curBbdF0 = startF0;
+    float curBbdDepthRatio = startRatio;
+
     for (uint32_t i = 0U; i < n; ++i) {
-        /* Per-sample parameter smoothing (rate, depth, delay, matrix gains, width, stereoWidth, input/output gains) */
+        /* Per-sample parameter smoothing (rate, depth, delay, matrix gains, width, stereoWidth, input/output gains, bbdCharacter) */
         d->smoothRateHz += smoothCoeff * (d->params.rateHz - d->smoothRateHz);
         d->smoothDepthMs += smoothCoeff * (d->params.depthMs - d->smoothDepthMs);
         d->smoothBaseDelayMs += smoothCoeff * (d->params.baseDelayMs - d->smoothBaseDelayMs);
@@ -343,12 +374,17 @@ void Dimension_ProcessBlock(
             d->smoothStereoWidth = 1.0f;
         }
         d->smoothCompanderAmount += smoothCoeff * (d->params.companderAmount - d->smoothCompanderAmount);
+        d->smoothBbdCharacter += smoothCoeff * (d->params.bbdCharacter - d->smoothBbdCharacter);
+        if (d->smoothBbdCharacter < 1e-5f && d->params.bbdCharacter == 0.0f) {
+            d->smoothBbdCharacter = 0.0f;
+        }
 
         const float inGain = dimension_clampf(d->smoothInputGain, 0.0f, 8.0f);
         const float outGain = dimension_clampf(d->smoothOutputGain, 0.0f, 8.0f);
         const float gDry = dimension_clampf(d->smoothDryGain, 0.0f, 2.0f);
         const float width = dimension_clampf(d->smoothWidth, 0.0f, 2.0f);
         const float stereoWidth = dimension_clampf(d->smoothStereoWidth, 0.0f, 2.0f);
+        const float bbdChar = dimension_clampf(d->smoothBbdCharacter, 0.0f, 1.0f);
 
         float xL = dimension_sanitize_sample(inL[i]) * inGain;
         float xR = dimension_sanitize_sample(inR[i]) * inGain;
@@ -388,9 +424,28 @@ void Dimension_ProcessBlock(
         wetR = d->bbdStateR;
 
         const float tri = (d->lfoPhase < 0.5f) ? (4.0f * d->lfoPhase - 1.0f) : (3.0f - 4.0f * d->lfoPhase);
-        const float lfo = tri;
-        const float delayL = baseDelay + depthDelay * lfo;
-        const float delayR = baseDelay - depthDelay * lfo;
+        const float lfo = DimensionBBDClock_ModulateLfo(tri, bbdChar);
+
+        /* 7th-order reciprocal: 1/(1 +/- x) = (1 -/+ x)(1 + x^2)(1 + x^4)
+         * Max error < 0.0004% across Modes I..IV, and < 0.4% up to x = 0.50.
+         * Factor is shared between channels; requires only 5 multiplies, 0 divisions. */
+        const float x = dimension_clampf(curBbdDepthRatio * lfo, -0.75f, 0.75f);
+        const float x2 = x * x;
+        const float x4 = x2 * x2;
+        const float factor = (1.0f + x2) * (1.0f + x4);
+        const float invL = (1.0f - x) * factor;
+        const float invR = (1.0f + x) * factor;
+        float clockL = curBbdF0 * invL;
+        float clockR = curBbdF0 * invR;
+        clockL = dimension_clampf(clockL, DIMENSION_BBD_MIN_CLOCK_HZ, DIMENSION_BBD_MAX_CLOCK_HZ);
+        clockR = dimension_clampf(clockR, DIMENSION_BBD_MIN_CLOCK_HZ, DIMENSION_BBD_MAX_CLOCK_HZ);
+        d->bbdClock.chL.instantaneousClockHz = clockL;
+        d->bbdClock.chR.instantaneousClockHz = clockR;
+
+        const float transLagL = DimensionBBDClock_TransportLag(clockL, curBbdF0, bbdChar);
+        const float transLagR = DimensionBBDClock_TransportLag(clockR, curBbdF0, bbdChar);
+        const float delayL = baseDelay + depthDelay * lfo + transLagL;
+        const float delayR = baseDelay - depthDelay * lfo + transLagR;
         const float readPosL = (float)d->writePos - delayL + (float)DIMENSION_DELAY_SIZE;
         const float readPosR = (float)d->writePos - delayR + (float)DIMENSION_DELAY_SIZE;
 
@@ -399,6 +454,12 @@ void Dimension_ProcessBlock(
 
         wetL = delay_interp(d->delayL, readPosL);
         wetR = delay_interp(d->delayR, readPosR);
+
+        wetL = DimensionBBDClock_ProcessDispersion(&d->bbdClock.chL, wetL, clockL, sr, bbdChar);
+        wetR = DimensionBBDClock_ProcessDispersion(&d->bbdClock.chR, wetR, clockR, sr, bbdChar);
+
+        curBbdF0 += deltaBbdF0;
+        curBbdDepthRatio += deltaBbdRatio;
 
         d->lpf1StateL += lpfAlpha * (wetL - d->lpf1StateL);
         d->lpf1StateR += lpfAlpha * (wetR - d->lpf1StateR);

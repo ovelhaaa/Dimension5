@@ -59,6 +59,11 @@ web/node_modules/
 web/dist/
 web/public/wasm/*.wasm
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
 # Local CMake builds
 build/
 build-*/

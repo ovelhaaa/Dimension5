@@ -30,8 +30,8 @@ public:
     static constexpr int kMaxHeight = 1000;
 
     // Direct accessors for automated geometry and accessibility validation
-    const std::array<juce::Slider, 9>& getAdvancedSliders() const noexcept { return advancedSliders; }
-    const std::array<juce::Label, 9>& getAdvancedLabels() const noexcept { return advancedLabels; }
+    const std::array<juce::Slider, 10>& getAdvancedSliders() const noexcept { return advancedSliders; }
+    const std::array<juce::Label, 10>& getAdvancedLabels() const noexcept { return advancedLabels; }
     const juce::Slider& getInputSlider() const noexcept { return inputSlider; }
     const juce::Slider& getOutputSlider() const noexcept { return outputSlider; }
     const juce::TextButton& getAdvancedButton() const noexcept { return advancedButton; }
@@ -82,15 +82,15 @@ private:
     // Advanced Drawer Components
     juce::Label advancedTitleLabel;
     juce::Label advancedHintLabel;
-    std::array<juce::Slider, 9> advancedSliders;
-    std::array<juce::Label, 9> advancedLabels;
+    std::array<juce::Slider, 10> advancedSliders;
+    std::array<juce::Label, 10> advancedLabels;
 
     // Attachments
     std::unique_ptr<ComboAttachment> modeAttachment;
     std::unique_ptr<ButtonAttachment> bypassAttachment;
     std::unique_ptr<SliderAttachment> inputAttachment;
     std::unique_ptr<SliderAttachment> outputAttachment;
-    std::array<std::unique_ptr<SliderAttachment>, 9> advancedAttachments;
+    std::array<std::unique_ptr<SliderAttachment>, 10> advancedAttachments;
 
     // Meter levels (smoothed), peak hold and bounds
     float inMeterLeft = 0.0f;

@@ -20,13 +20,25 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Benchmark
+        run: ./build/dimension5_bench
       - name: Render offline WAVs
-        run: ./build/dimension5_offline_render out
-      - name: Upload WAV artifacts
+        run: ./build/dimension5_offline_render out --spectral
+      - name: Negative Validator Tests
+        run: python3 tools/test_spectral_analyzer.py
+      - name: BBD Audio Characterization
+        run: python3 tools/analyze_bbd_character.py out
+      - name: BBD High-Resolution Spectral Validation
+        run: python3 tools/run_spectral_analysis.py out
+      - name: Upload Audio Analysis artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dimension5-wav-${{ matrix.compiler }}
-          path: out/*.wav
+          name: dimension5-audio-analysis-${{ matrix.compiler }}
+          path: |
+            out/*.wav
+            out/*.json
+            out/*.csv
+            docs/spectral/*.png
       - name: Spatial Engine 2.0 Full Validation
         if: matrix.compiler == 'gcc'
         run: ./build/dimension5_spatial_engine_validation --full tests/test_vectors/legacy_baseline docs/audio/spatial-engine-2.0

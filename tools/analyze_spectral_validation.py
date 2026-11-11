@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""
+DIMENSION5 — BBD CHARACTER ENGINE 2.1
+High-Resolution Spectral Validation & Aliasing Characterization Engine
+Phase A.2 Validation Suite
+
+Rigorous, FFT-based spectral analysis separating legitimate LFO modulation sidebands
+(at fc +/- k * fm) from spurious components, harmonic distortion, and potential aliasing.
+Supports float32 and PCM16 stereo/mono WAV fixtures across 44.1, 48, and 96 kHz.
+"""
+
+import math
+import struct
+import json
+import csv
+import os
+import sys
+import numpy as np
+import scipy.signal as sig
+import scipy.fft as fft
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+def read_wav(path):
+    """Reads 16-bit PCM or 32-bit float WAV file into left, right numpy arrays and sample rate."""
+    with open(path, 'rb') as f:
+        riff, size, wave = struct.unpack('<4sI4s', f.read(12))
+        if riff != b'RIFF' or wave != b'WAVE':
+            raise ValueError(f"Not a valid WAV file: {path}")
+        
+        fmt_found = False
+        data_found = False
+        audio_format = 1
+        num_channels = 2
+        sample_rate = 48000
+        bits_per_sample = 16
+        raw_data = None
+        
+        while True:
+            chunk_header = f.read(8)
+            if len(chunk_header) < 8:
+                break
+            chunk_id, chunk_size = struct.unpack('<4sI', chunk_header)
+            
+            if chunk_id == b'fmt ':
+                fmt_data = f.read(chunk_size)
+                audio_format, num_channels, sample_rate, byte_rate, block_align, bits_per_sample = struct.unpack(
+                    '<HHIIHH', fmt_data[:16]
+                )
+                fmt_found = True
+            elif chunk_id == b'data':
+                raw_data = f.read(chunk_size)
+                data_found = True
+                break
+            else:
+                f.seek(chunk_size, os.SEEK_CUR)
+                
+        if not fmt_found or not data_found:
+            raise ValueError(f"Incomplete WAV file: {path}")
+            
+        if audio_format == 3: # 32-bit IEEE float
+            samples = np.frombuffer(raw_data, dtype=np.float32)
+        elif audio_format == 1 and bits_per_sample == 16: # 16-bit PCM
+            samples = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) * (1.0 / 32768.0)
+        elif audio_format == 1 and bits_per_sample == 32: # 32-bit PCM
+            samples = np.frombuffer(raw_data, dtype=np.int32).astype(np.float32) * (1.0 / 2147483648.0)
+        else:
+            raise ValueError(f"Unsupported WAV format: format={audio_format}, bits={bits_per_sample}")
+            
+        if num_channels == 2:
+            left = samples[0::2]
+            right = samples[1::2]
+        else:
+            left = samples
+            right = samples
+            
+        return left, right, sample_rate
+
+def compute_spectrum(signal, sr, window_name='blackmanharris'):
+    """
+    Computes single-sided amplitude spectrum with exact window coherent gain normalization.
+    Returns:
+        freqs: frequencies in Hz (0 to sr/2)
+        mag_db: amplitude in dBFS (0 dBFS = full scale 1.0 peak sine)
+        linear_mag: linear amplitude
+        n_fft: FFT length
+        df: frequency resolution (bin spacing in Hz)
+    """
+    n = len(signal)
+    if window_name == 'blackmanharris':
+        win = sig.windows.blackmanharris(n)
+    elif window_name == 'hann':
+        win = sig.windows.hann(n)
+    else:
+        win = np.ones(n)
+        
+    coherent_gain = np.sum(win)
+    windowed = signal * win
+    
+    spec = fft.rfft(windowed)
+    freqs = fft.rfftfreq(n, d=1.0 / sr)
+    
+    linear_mag = (2.0 / coherent_gain) * np.abs(spec)
+    linear_mag[0] *= 0.5 # DC bin does not double
+    if n % 2 == 0:
+        linear_mag[-1] *= 0.5 # Nyquist bin does not double
+        
+    eps = 1e-12
+    mag_db = 20.0 * np.log10(np.maximum(linear_mag, eps))
+    df = float(sr) / float(n)
+    
+    return freqs, mag_db, linear_mag, n, df
+
+def analyze_carrier_and_sidebands(signal, sr, f_carrier, f_mod=0.25, max_delay_depth_ms=2.4, max_sidebands=8):
+    """
+    Separates the carrier and legitimate LFO modulation sidebands (fc +/- k * fm)
+    from spurious energy and calculates key spectral metrics.
+    
+    Uses Carson's rule / FM deviation physics to establish the legitimate modulation band:
+      Delta_f = f_carrier * (depth_ms * 0.001) * 4 * f_mod
+    """
+    freqs, mag_db, linear_mag, n_fft, df = compute_spectrum(signal, sr, window_name='blackmanharris')
+    
+    # 1. Physics-based Modulation Bandwidth (Carson's Rule)
+    # Peak frequency deviation in Dimension chorus:
+    delta_f_peak = f_carrier * (max_delay_depth_ms * 0.001) * (4.0 * f_mod)
+    mod_bandwidth_half = max(15.0, 1.5 * delta_f_peak + 4.0 * f_mod)
+    
+    mod_zone_low = max(0.0, f_carrier - mod_bandwidth_half)
+    mod_zone_high = min(sr * 0.5, f_carrier + mod_bandwidth_half)
+    
+    # 2. Find exact carrier
+    search_width_hz = max(2.0, 4.0 * df)
+    carrier_mask = np.abs(freqs - f_carrier) <= search_width_hz
+    carrier_bins = np.where(carrier_mask)[0]
+    
+    if len(carrier_bins) == 0:
+        actual_carrier_bin = np.argmin(np.abs(freqs - f_carrier))
+    else:
+        actual_carrier_bin = carrier_bins[np.argmax(mag_db[carrier_bins])]
+        
+    measured_f_carrier = freqs[actual_carrier_bin]
+    carrier_mag_linear = linear_mag[actual_carrier_bin]
+    carrier_mag_db = mag_db[actual_carrier_bin]
+    
+    # Quadratic peak interpolation around carrier for sub-bin precision
+    if 0 < actual_carrier_bin < len(mag_db) - 1:
+        alpha = mag_db[actual_carrier_bin - 1]
+        beta = mag_db[actual_carrier_bin]
+        gamma = mag_db[actual_carrier_bin + 1]
+        denom = (alpha - 2.0 * beta + gamma)
+        if abs(denom) > 1e-6:
+            p = 0.5 * (alpha - gamma) / denom
+            measured_f_carrier += p * df
+            carrier_mag_db = beta - 0.25 * (alpha - gamma) * p
+            carrier_mag_linear = 10.0 ** (carrier_mag_db / 20.0)
+            
+    # Compute total fundamental power in the modulation zone
+    in_mod_zone_mask = (freqs >= mod_zone_low) & (freqs <= mod_zone_high)
+    total_mod_zone_power = np.sum(linear_mag[in_mod_zone_mask] ** 2)
+    carrier_rms_dbfs = 10.0 * math.log10(max(1e-12, total_mod_zone_power))
+    
+    # 3. Extract discrete modulation sidebands: fc +/- k * fm
+    sidebands = []
+    total_sideband_power = 0.0
+    half_bin_tolerance = max(1, int(round(0.4 * f_mod / df)))
+    
+    for k in range(1, max_sidebands + 1):
+        for sign in [-1, +1]:
+            target_f = measured_f_carrier + sign * k * f_mod
+            if target_f < 0 or target_f >= sr * 0.5:
+                continue
+            target_bin = int(round(target_f / df))
+            b_start = max(0, target_bin - half_bin_tolerance)
+            b_end = min(len(linear_mag), target_bin + half_bin_tolerance + 1)
+            sb_bin = b_start + np.argmax(linear_mag[b_start:b_end])
+            
+            sb_freq = freqs[sb_bin]
+            sb_mag_lin = linear_mag[sb_bin]
+            sb_mag_db = mag_db[sb_bin]
+            sb_rel_dbc = sb_mag_db - carrier_mag_db
+            
+            sidebands.append({
+                "order": k * sign,
+                "target_freq_hz": float(target_f),
+                "measured_freq_hz": float(sb_freq),
+                "mag_dbfs": float(sb_mag_db),
+                "rel_dbc": float(sb_rel_dbc),
+                "mag_linear": float(sb_mag_lin)
+            })
+            total_sideband_power += sb_mag_lin * sb_mag_lin
+
+    sideband_power_rel_dbc = 10.0 * math.log10(max(1e-12, total_sideband_power) / max(1e-12, carrier_mag_linear * carrier_mag_linear))
+    
+    # 4. Out-of-band spurious energy analysis
+    out_of_band_mask = (freqs > 20.0) & ((freqs < mod_zone_low) | (freqs > mod_zone_high))
+    
+    # Mask out known harmonics of carrier (2*fc, 3*fc) up to Nyquist
+    for h in range(2, 8):
+        h_f = h * measured_f_carrier
+        h_half_bw = max(10.0, h * mod_bandwidth_half)
+        if h_f < sr * 0.5:
+            out_of_band_mask &= ((freqs < h_f - h_half_bw) | (freqs > h_f + h_half_bw))
+            
+    out_of_band_bins = np.where(out_of_band_mask)[0]
+    if len(out_of_band_bins) > 0:
+        spurious_linear = linear_mag[out_of_band_bins]
+        max_spurious_idx = np.argmax(spurious_linear)
+        max_spurious_bin = out_of_band_bins[max_spurious_idx]
+        max_spurious_freq = float(freqs[max_spurious_bin])
+        max_spurious_dbfs = float(mag_db[max_spurious_bin])
+        # Compare spurious level against total fundamental carrier power
+        max_spurious_dbc = float(max_spurious_dbfs - carrier_rms_dbfs)
+        
+        # Estimated noise floor: median of out-of-band bins
+        noise_floor_median_dbfs = float(np.median(mag_db[out_of_band_bins]))
+        noise_floor_rms_dbfs = float(10.0 * math.log10(max(1e-12, np.mean(spurious_linear ** 2))))
+        sfdr_db = float(carrier_rms_dbfs - max_spurious_dbfs)
+    else:
+        max_spurious_freq = 0.0
+        max_spurious_dbfs = -120.0
+        max_spurious_dbc = -120.0
+        noise_floor_median_dbfs = -120.0
+        noise_floor_rms_dbfs = -120.0
+        sfdr_db = 120.0
+
+    # 5. Potential Aliasing / Foldover Search
+    # Check for folded components: f_alias = |k * sr - m * fc|
+    aliasing_candidates = []
+    for k in [1, 2]:
+        for m in [1, 2, 3]:
+            f_fold = abs(k * sr - m * f_carrier)
+            if 20.0 < f_fold < (sr * 0.5 - 20.0):
+                # Is f_fold distinct from carrier and harmonics?
+                is_distinct = (abs(f_fold - f_carrier) > mod_bandwidth_half)
+                for h in range(2, 6):
+                    if abs(f_fold - h * f_carrier) < 30.0:
+                        is_distinct = False
+                if is_distinct:
+                    # Search around f_fold with width m * mod_bandwidth_half
+                    search_half = max(15.0, m * mod_bandwidth_half)
+                    fold_mask = (freqs >= f_fold - search_half) & (freqs <= f_fold + search_half)
+                    fold_bins = np.where(fold_mask)[0]
+                    if len(fold_bins) > 0:
+                        max_f_bin = fold_bins[np.argmax(mag_db[fold_bins])]
+                        f_bin_actual = freqs[max_f_bin]
+                        p_db = mag_db[max_f_bin]
+                        rel_dbc = p_db - carrier_rms_dbfs
+                        aliasing_candidates.append({
+                            "fold_formula": f"|{k}*fs - {m}*fc|",
+                            "predicted_freq_hz": float(f_fold),
+                            "measured_freq_hz": float(f_bin_actual),
+                            "mag_dbfs": float(p_db),
+                            "rel_dbc": float(rel_dbc),
+                            "is_significant": bool(rel_dbc > -60.0 and p_db > -80.0)
+                        })
+
+    return {
+        "fft_length": int(n_fft),
+        "freq_resolution_hz": float(df),
+        "sample_rate": int(sr),
+        "nominal_carrier_hz": float(f_carrier),
+        "measured_carrier_hz": float(measured_f_carrier),
+        "carrier_peak_dbfs": float(carrier_mag_db),
+        "carrier_total_power_dbfs": float(carrier_rms_dbfs),
+        "f_mod_hz": float(f_mod),
+        "sidebands": sidebands,
+        "sideband_power_rel_dbc": float(sideband_power_rel_dbc),
+        "mod_zone_hz": [float(mod_zone_low), float(mod_zone_high)],
+        "sfdr_db": float(sfdr_db),
+        "max_spurious_freq_hz": float(max_spurious_freq),
+        "max_spurious_dbfs": float(max_spurious_dbfs),
+        "max_spurious_dbc": float(max_spurious_dbc),
+        "noise_floor_median_dbfs": float(noise_floor_median_dbfs),
+        "noise_floor_rms_dbfs": float(noise_floor_rms_dbfs),
+        "aliasing_candidates": aliasing_candidates,
+        "freqs": freqs,
+        "mag_db": mag_db
+    }
+
+def compare_block_invariance(ref, test, sr, name="invariance"):
+    """
+    Computes rigorous temporal invariance metrics between reference and test signals:
+    - Max Absolute Difference
+    - RMS Difference
+    - Normalized RMS Error (NRMSE = RMS_diff / RMS_ref)
+    - Relative Error
+    - Peak Difference
+    - Max Single-Sample Jump (|diff[n] - diff[n-1]|)
+    """
+    n = min(len(ref), len(test))
+    r = ref[:n]
+    t = test[:n]
+    diff = np.abs(t - r)
+    
+    max_abs_diff = float(np.max(diff))
+    rms_ref = float(np.sqrt(np.mean(r ** 2)))
+    rms_diff = float(np.sqrt(np.mean(diff ** 2)))
+    nrmse = float(rms_diff / max(1e-9, rms_ref))
+    peak_diff = float(abs(np.max(np.abs(t)) - np.max(np.abs(r))))
+    
+    # Boundary / single-sample jump check
+    sample_jumps = np.abs(diff[1:] - diff[:-1])
+    max_jump = float(np.max(sample_jumps)) if len(sample_jumps) > 0 else 0.0
+    
+    return {
+        "test_name": name,
+        "total_samples": int(n),
+        "sample_rate": int(sr),
+        "max_abs_diff": max_abs_diff,
+        "rms_ref": rms_ref,
+        "rms_diff": rms_diff,
+        "nrmse": nrmse,
+        "peak_diff": peak_diff,
+        "max_single_sample_jump": max_jump,
+        "is_bit_exact": bool(max_abs_diff == 0.0)
+    }
+
+def plot_spectral_validation(results_dict, output_path, title):
+    """
+    Generates publication-quality dual-panel spectral visualization:
+    Top: Full Nyquist spectrum (0 to fs/2) with carrier, harmonics, and noise floor.
+    Bottom: High-resolution zoom around carrier (+/- 5 Hz) resolving 0.25 Hz sidebands.
+    """
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+    fig.suptitle(title, fontsize=13, fontweight='bold')
+    
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    
+    for idx, (label, res) in enumerate(results_dict.items()):
+        freqs = res["freqs"]
+        mag_db = res["mag_db"]
+        c = colors[idx % len(colors)]
+        
+        # Panel 1: Full Spectrum
+        ax1.plot(freqs, mag_db, label=label, color=c, alpha=0.85, linewidth=1.0)
+        
+        # Panel 2: Zoomed around carrier
+        fc = res["measured_carrier_hz"]
+        zoom_span = 5.0 # +/- 5 Hz
+        zoom_mask = (freqs >= fc - zoom_span) & (freqs <= fc + zoom_span)
+        ax2.plot(freqs[zoom_mask] - fc, mag_db[zoom_mask], label=label, color=c, alpha=0.85, linewidth=1.2)
+        
+    ax1.set_title("Full Spectrum (0 to Nyquist)")
+    ax1.set_xlabel("Frequency (Hz)")
+    ax1.set_ylabel("Magnitude (dBFS)")
+    ax1.set_ylim(-130, 5)
+    ax1.grid(True, linestyle=':', alpha=0.6)
+    ax1.legend(loc='upper right')
+    
+    ax2.set_title(f"High-Resolution Zoom around Carrier: Resolving Sidebands (Δf ≈ {results_dict[list(results_dict.keys())[0]]['freq_resolution_hz']:.4f} Hz)")
+    ax2.set_xlabel("Offset from Carrier (Hz)")
+    ax2.set_ylabel("Magnitude (dBFS)")
+    ax2.set_xlim(-5.0, 5.0)
+    ax2.grid(True, linestyle=':', alpha=0.6)
+    
+    # Mark expected sideband ticks
+    ax2.set_xticks(np.arange(-5.0, 5.1, 0.5))
+    for tick in np.arange(-4.0, 4.1, 0.25):
+        if abs(tick) > 0.01:
+            ax2.axvline(tick, color='gray', linestyle='--', alpha=0.3)
+    ax2.legend(loc='upper right')
+    
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+if __name__ == '__main__':
+    print("Spectral Validation Module loaded successfully.")

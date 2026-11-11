@@ -12,6 +12,7 @@ fi
 
 emcc \
   "${ROOT_DIR}/src/dimension_dsp.c" \
+  "${ROOT_DIR}/src/dimension_bbd_clock.c" \
   "${ROOT_DIR}/src/dimension_wasm_bridge.c" \
   -I"${ROOT_DIR}/src" \
   -O3 \

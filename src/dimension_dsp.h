@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "dimension_config.h"
 #include "dimension_params.h"
+#include "dimension_bbd_clock.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +56,7 @@ typedef struct DimensionParams {
     float width;
     float stereoWidth;
     float bassFocusHz;
+    float bbdCharacter;
 } DimensionParams;
 
 typedef struct DimensionDSP {
@@ -76,6 +78,7 @@ typedef struct DimensionDSP {
     float bbdStateL;
     float bbdStateR;
     float bassFocusState;
+    DimensionBBDClock bbdClock;
     float smoothRateHz;
     float smoothDepthMs;
     float smoothBaseDelayMs;
@@ -92,6 +95,7 @@ typedef struct DimensionDSP {
     float smoothCompanderAmount;
     float smoothBassFocusHz;
     float smoothBassFocusAmount;
+    float smoothBbdCharacter;
     float smoothCoeff;
 } DimensionDSP;
 
