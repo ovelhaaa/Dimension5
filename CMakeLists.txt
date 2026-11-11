@@ -47,8 +47,15 @@ function(dimension5_apply_host_options target)
 endfunction()
 
 enable_testing()
+add_library(dimension5_baseline_e153da5 STATIC tests/baseline_e153da5/dimension_dsp_e153da5.c)
+target_include_directories(dimension5_baseline_e153da5 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tests/baseline_e153da5 ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(NOT MSVC)
+  target_compile_options(dimension5_baseline_e153da5 PRIVATE -Wall -Wextra -Wshadow -Wdouble-promotion)
+  target_link_libraries(dimension5_baseline_e153da5 PUBLIC m)
+endif()
+
 add_executable(dimension5_tests tests/test_dimension_core.c)
-target_link_libraries(dimension5_tests PRIVATE dimension5_core)
+target_link_libraries(dimension5_tests PRIVATE dimension5_core dimension5_baseline_e153da5)
 dimension5_apply_host_options(dimension5_tests)
 add_test(NAME dimension5_tests COMMAND dimension5_tests)
 
@@ -58,7 +65,7 @@ dimension5_apply_host_options(dimension5_wrapper_tests)
 add_test(NAME dimension5_wrapper_tests COMMAND dimension5_wrapper_tests)
 
 add_executable(dimension5_offline_render tools/dimension5_offline_render.c)
-target_link_libraries(dimension5_offline_render PRIVATE dimension5_core)
+target_link_libraries(dimension5_offline_render PRIVATE dimension5_core dimension5_baseline_e153da5)
 dimension5_apply_host_options(dimension5_offline_render)
 
 add_executable(dimension5_bench bench/dimension_bench.c)

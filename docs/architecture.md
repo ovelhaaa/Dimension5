@@ -84,24 +84,30 @@ Bucket Brigade Devices (e.g., Panasonic/Matsushita **MN3007** or **MN3207**) tra
 
 To capture analog BBD temporal behavior without requiring massive oversampling or risking digital aliasing, Dimension5 employs a **baseband equivalent temporal modeling layer** (`DimensionBBDClock`).
 
-### 4.1 Smooth VCO Turnaround Relaxation
-Analog VCOs driven by triangle wave LFOs do not reverse direction with infinite derivative discontinuity; capacitor charging characteristics introduce subtle smoothing at peak turnarounds:
-$$LFO_{\text{curved}} = (1 - C) \cdot LFO_{\text{tri}} + C \cdot (1.25 \cdot LFO_{\text{tri}} - 0.25 \cdot LFO_{\text{tri}}^3)$$
-where $C \in [0, 1]$ is the active `bbdCharacter` coefficient. This rounds the LFO peaks organically while maintaining strict zero DC and normalized $[-1, +1]$ bounds.
+### 4.1 Physical Grounding vs. Heuristic Approximations
 
-### 4.2 Per-Sample Division Elimination (Taylor Series Expansion)
-Evaluating $f_{\text{clock}} = \frac{512000}{\tau_0 \pm \Delta \cdot lfo}$ requires division. On microcontrollers (Cortex-M33), division takes 2–14 cycles.
-We factorize the expression:
-$$\frac{1}{\tau_0 (1 \pm \delta)} = \frac{1}{\tau_0} \cdot (1 \mp \delta + \delta^2 \mp \delta^3 + \dots) \quad \text{where } \delta = \frac{\Delta \cdot lfo}{\tau_0}$$
-At the block rate (every 32 frames), the base terms are precomputed. The inner sample loop computes clock frequency in **3 multiply-accumulate operations** with an error $< 0.18\%$.
+To maintain rigorous engineering honesty, the model explicitly distinguishes between physical derivations and musical heuristic approximations:
 
-### 4.3 Micro Bucket Transport Lag
-In a physical BBD, charge propagation across stages introduces a tiny temporal inertia under fast clock acceleration. Dimension5 models this with a discrete single-sample state lag scaled by $\Delta / \tau_0$.
+**Analytically / Physically Grounded:**
+1. **Clock-Delay Relationship**: An MN3007 Bucket Brigade Device contains 1024 capacitive storage stages clocked by a 2-phase clock (CP1, CP2). Each full clock period transfers charge across two stages, yielding exactly 512 clock periods of transit delay:
+   $$T_{\text{delay}} = \frac{512}{f_{\text{clock}}} \implies f_{\text{clock}}(t) = \frac{512000}{\tau_{\text{ms}}(t)}\text{ [Hz]}$$
+2. **Dynamic Clock Range**: In Dimension modes I..IV, the operating clock sweeps dynamically within the ~35 kHz to ~85 kHz range.
+3. **Dispersion Need**: Charge transfer inefficiency over 1024 discrete stages creates high-frequency softening that naturally breathes with clock frequency.
 
-### 4.4 Clock-Tracking Charge Transfer Inefficiency (CTE) Dispersion
-In real BBDs, a small fraction $\epsilon \approx 10^{-4}$ of charge is left behind at each stage transfer. Across 1024 stages, this produces an accumulated high-frequency softening whose effective cutoff tracks the instantaneous clock frequency:
-$$f_c(t) = f_{\text{min}} + (f_{\text{max}} - f_{\text{min}}) \cdot \frac{f_{\text{clock}}(t) - f_{\text{clock\_min}}}{f_{\text{clock\_max}} - f_{\text{clock\_min}}}$$
-As delay lengthens and clock drops, the high end softens naturally, giving analog warmth to delay peaks without adding static dullness.
+**Heuristic Analog Approximations (Musically Tuned):**
+1. **LFO Turnaround Relaxation Contour**: The turnaround curve $f(x) = 1.25x - 0.25x^3$ models VCO relaxation inertia. At peak turnarounds ($x = \pm 1$), the slope is reduced to $0.50$ (cutting the acceleration corner by 50%). Crucially, retaining a non-zero slope ($0.50$) avoids delay stalling at the turnaround crests—preventing the pitch-dwelling "warble" characteristic of zero-derivative LFOs while eliminating the harsh piecewise-linear corner harmonics of pure triangle waves.
+2. **Micro-Time Transport Lag**: Phenomenological heuristic micro-time adjustment (up to ~0.12 samples) modeling transient charge inertia under fast clock modulation.
+3. **Baseband Dispersion Filter**: 1st-order dynamic lowpass whose digital coefficient $\alpha = 1 - e^{-2\pi f_c / f_s}$ tracks instantaneous clock. Discretized via an accurate 4th-degree polynomial fitting $y = (1 - e^{-w})/w$ (error $< 0.088\%$), ensuring zero per-sample transcendentals (`expf`) and zero divisions while guaranteeing dynamic spectral response across 44.1, 48, and 96 kHz.
+
+### 4.2 Temporal Consistency & Block-Boundary Continuity
+In earlier prototypes, clock parameters precomputed at block start desynchronized from per-sample delay smoother trajectories. In Phase A.1:
+- The base clock $f_0$ and depth ratio are predicted at block endpoints using the closed form of the 20 ms one-pole smoother ($\gamma = e^{-n / (\tau \cdot f_s)}$).
+- Both parameters are linearly interpolated across the $n$ samples, ensuring **exact sample-accurate continuity (0 jump) across block boundaries** for any block size (16, 32, 64, 128, 256, 512 frames).
+
+### 4.3 7th-Order Division-Free Reciprocal Clock Approximation
+Evaluating $f_{\text{clock}} = f_0 \cdot \frac{1}{1 \pm x}$ is computed via a 7th-order reciprocal:
+$$\frac{1}{1 \pm x} \approx (1 \mp x)(1 + x^2)(1 + x^4)$$
+The factor $(1 + x^2)(1 + x^4)$ is shared between left and right channels, requiring only **5 floating-point multiplications** total with 0 per-sample divisions. Max relative error is $< 0.0004\%$ across all factory Modes I..IV, and $< 0.4\%$ up to $|x| = 0.50$, clamped defensively to $[16\text{ kHz}, 120\text{ kHz}]$.
 
 ---
 

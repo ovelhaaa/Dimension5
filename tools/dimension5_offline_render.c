@@ -1,4 +1,5 @@
 #include "dimension_dsp.h"
+#include "dimension_dsp_e153da5.h"
 
 #include <errno.h>
 #include <math.h>
@@ -38,6 +39,20 @@ static int write_wav(const char* path, const float* l, const float* r, uint32_t 
         const int16_t li = (int16_t)(lc < 0.0f ? lc * 32768.0f : lc * 32767.0f);
         const int16_t ri = (int16_t)(rc < 0.0f ? rc * 32768.0f : rc * 32767.0f);
         le16(f, (uint16_t)li); le16(f, (uint16_t)ri);
+    }
+    return fclose(f);
+}
+
+static int write_wav_float32(const char* path, const float* l, const float* r, uint32_t frames) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    const uint32_t data = frames * 2U * (uint32_t)sizeof(float);
+    fwrite("RIFF", 1, 4, f); le32(f, 36U + data); fwrite("WAVEfmt ", 1, 8, f);
+    le32(f, 16U); le16(f, 3U); le16(f, 2U); le32(f, SR); le32(f, SR * 8U); le16(f, 8U); le16(f, 32U);
+    fwrite("data", 1, 4, f); le32(f, data);
+    for (uint32_t i = 0; i < frames; ++i) {
+        fwrite(&l[i], sizeof(float), 1, f);
+        fwrite(&r[i], sizeof(float), 1, f);
     }
     return fclose(f);
 }
@@ -178,6 +193,69 @@ static void render_bbd_character_variation(
         fprintf(stderr, "failed to write %s\n", path);
         exit(3);
     }
+    char pathF32[256];
+    char baseName[128];
+    memset(baseName, 0, sizeof(baseName));
+    strncpy(baseName, filename, sizeof(baseName) - 1);
+    char* dot = strrchr(baseName, '.');
+    if (dot) *dot = '\0';
+    snprintf(pathF32, sizeof(pathF32), "%s/%s_f32.wav", out_dir, baseName);
+    write_wav_float32(pathF32, left, right, frames);
+
+    printf("%s peak=%.4f dc=%.6f rms=%.4f\n", path, (double)st.peak, st.sum / (double)frames, sqrt(st.energy / (double)frames));
+    free(left);
+    free(right);
+}
+
+static void render_e153da5_baseline(const char* out_dir) {
+    const uint32_t frames = SR * SECONDS;
+    float* left = (float*)calloc(frames, sizeof(float));
+    float* right = (float*)calloc(frames, sizeof(float));
+    if (!left || !right) { free(left); free(right); fprintf(stderr, "allocation failed\n"); exit(2); }
+
+    DimensionDSP_e153da5 d;
+    Dimension_Init_e153da5(&d, (float)SR);
+    Dimension_SetMode_e153da5(&d, DIMENSION_MODE_II_e153da5);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    Stats st = {0.0f, 0.0, 0.0};
+    uint32_t localRng = 0x12345678u;
+
+    for (uint32_t pos = 0; pos < frames; pos += BLOCK) {
+        const uint32_t n = (frames - pos > BLOCK) ? BLOCK : frames - pos;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t t = pos + i;
+            const float f0 = 220.0f;
+            const float tSec = (float)t / (float)SR;
+            const float env = expf(-fmodf(tSec, 1.0f) * 3.5f);
+            const float body = 0.22f * sinf(2.0f * PI_F * f0 * tSec) +
+                               0.12f * sinf(2.0f * PI_F * 2.0f * f0 * tSec) +
+                               0.06f * sinf(2.0f * PI_F * 3.0f * f0 * tSec) +
+                               0.03f * sinf(2.0f * PI_F * 5.0f * f0 * tSec);
+            localRng = localRng * 1664525u + 1013904223u;
+            const float nz = 0.015f * (((float)((localRng >> 8) & 0xFFFFFFu) / 8388608.0f) - 1.0f);
+            inL[i] = (body + nz) * env;
+            inR[i] = inL[i];
+        }
+        Dimension_ProcessBlock_e153da5(&d, inL, inR, outL, outR, n);
+        for (uint32_t i = 0; i < n; ++i) {
+            left[pos + i] = outL[i];
+            right[pos + i] = outR[i];
+            const float m = 0.5f * (outL[i] + outR[i]);
+            const float a = fabsf(m);
+            if (a > st.peak) st.peak = a;
+            st.sum += (double)m;
+            st.energy += (double)m * (double)m;
+        }
+    }
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/spatial_engine_2_0_baseline.wav", out_dir);
+    write_wav(path, left, right, frames);
+    char pathF32[256];
+    snprintf(pathF32, sizeof(pathF32), "%s/spatial_engine_2_0_baseline_f32.wav", out_dir);
+    write_wav_float32(pathF32, left, right, frames);
+
     printf("%s peak=%.4f dc=%.6f rms=%.4f\n", path, (double)st.peak, st.sum / (double)frames, sqrt(st.energy / (double)frames));
     free(left);
     free(right);
@@ -191,6 +269,9 @@ int main(int argc, char** argv) {
 
     printf("=== RENDERING LEGACY MODES (I..IV) ===\n");
     for (int mode = 0; mode < 4; ++mode) render_mode(mode, out_dir);
+
+    printf("\n=== RENDERING FROZEN BASELINE (e153da5 Spatial Engine 2.0) ===\n");
+    render_e153da5_baseline(out_dir);
 
     printf("\n=== RENDERING BBD CHARACTER ENGINE 2.1 SUITE ===\n");
     render_bbd_character_variation(0.00f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_000.wav", out_dir);

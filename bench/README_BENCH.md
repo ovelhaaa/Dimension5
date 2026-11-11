@@ -25,24 +25,25 @@ The Dimension5 DSP core is completely deterministic and static, allocating **zer
 
 ## 2. Real-Time Performance & CPU Budget
 
-Measurements taken using `dimension5_bench` across $20\text{ seconds}$ ($960,000\text{ samples}$) of audio per run.
+Measurements taken using `dimension5_bench` across $20\text{ seconds}$ ($960,000\text{ samples}$) of audio per run on desktop host systems, alongside analytical theoretical projections for the ARM Cortex-M33 architecture.
 
-### 2.1 BBD Character Overhead (48 kHz, Block = 32 frames)
+### 2.1 Measured Desktop Host Performance & BBD Overhead (48 kHz, Block = 32 frames)
 
-| Configuration | Host Time (ns/sample) | Host CPU % (1 Core) | Cortex-M33 Est. % (@250 MHz) | Overhead vs Baseline |
+| Configuration | Host Time (ns/sample) | Host CPU % (1 Core) | Overhead vs Baseline | Theoretical M33 Projection* |
 | :--- | :---: | :---: | :---: | :---: |
-| **BBD Character = 0% (Neutral)** | **473.7 ns** | **2.27%** | **~0.8%** | **+0.0% (Bit-exact bypass)** |
-| BBD Character = 25% (Discreet) | 576.6 ns | 2.77% | ~0.9% | +21.7% |
-| BBD Character = 50% (Musical) | 577.6 ns | 2.77% | ~0.9% | +21.9% |
-| BBD Character = 100% (Full) | 563.9 ns | 2.71% | ~0.9% | +19.0% |
+| **BBD Character = 0% (Neutral)** | **473.7 ns** | **2.27%** | **+0.0% (Bit-exact bypass)** | ~0.8% (~40 cycles) |
+| BBD Character = 25% (Discreet) | 576.6 ns | 2.77% | +21.7% | ~0.9% (~46 cycles) |
+| BBD Character = 50% (Musical) | 577.6 ns | 2.77% | +21.9% | ~0.9% (~46 cycles) |
+| BBD Character = 100% (Full) | 563.9 ns | 2.71% | +19.0% | ~0.9% (~46 cycles) |
 
-> **Key takeaway:** The additional BBD clock modeling layer costs less than **100 ns** per stereo sample on desktop host systems, and approximately **6 clock cycles** on Cortex-M33. It effortlessly satisfies the target of **< 50% CPU** on STM32H562 (actual load is under **1.0%** for stereo chorus).
+> **\*Note on Theoretical M33 Projections:**
+> Figures labeled "Theoretical M33 Projection" are analytical estimates based on instruction cycle counts (~40 to 46 cycles/sample at 250 MHz), NOT physical on-target measurements. Physical verification on the STM32H562 requires measuring on target hardware via the DWT cycle counter or GPIO toggling (see section 4.1).
 
 ---
 
-### 2.2 Sample Rate Scaling (BBD Character = 50%, Block = 32 frames)
+### 2.2 Host Sample Rate Scaling (BBD Character = 50%, Block = 32 frames)
 
-| Sample Rate | Host Time (ns/sample) | Sample Period | Host CPU % | Cortex-M33 Est. % |
+| Sample Rate | Host Time (ns/sample) | Sample Period | Host CPU % | Theoretical M33 Projection* |
 | :---: | :---: | :---: | :---: | :---: |
 | **44,100 Hz** | 557.6 ns | 22,676 ns | 2.46% | ~0.8% |
 | **48,000 Hz** | 575.1 ns | 20,833 ns | 2.76% | ~0.9% |
@@ -50,7 +51,7 @@ Measurements taken using `dimension5_bench` across $20\text{ seconds}$ ($960,000
 
 ---
 
-### 2.3 Block Size Scaling (48 kHz, BBD Character = 50%)
+### 2.3 Host Block Size Scaling (48 kHz, BBD Character = 50%)
 
 | Block Size | Host Time (ns/sample) | Host CPU % | Throughput |
 | :---: | :---: | :---: | :---: |
@@ -72,7 +73,9 @@ To ensure rock-solid real-time performance on microcontrollers:
 
 ---
 
-## 4. Running the Benchmark
+## 4. Running the Benchmark & Target Hardware Measurement
+
+### 4.1 Desktop Host Benchmark Execution
 
 Build and execute the benchmark tool locally:
 
@@ -84,3 +87,23 @@ cmake --build build --target dimension5_bench
 # Run benchmark
 ./build/dimension5_bench
 ```
+
+### 4.2 Hardware Measurement on STM32H562
+
+To verify execution cycles directly on an STM32H562 target running at 250 MHz:
+
+1. **DWT Cycle Counter**:
+   ```c
+   /* Enable DWT cycle counter in debug initialization */
+   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+   /* In the audio block callback: */
+   uint32_t t0 = DWT->CYCCNT;
+   Dimension_ProcessBlock(&g_dimension, inL, inR, outL, outR, frames);
+   uint32_t elapsedCycles = DWT->CYCCNT - t0;
+   float cyclesPerSample = (float)elapsedCycles / (float)frames;
+   ```
+
+2. **GPIO Oscilloscope / Logic Analyzer Duty Cycle**:
+   Set a dedicated test GPIO pin HIGH immediately before calling `Dimension_ProcessBlock()`, and set it LOW immediately after. Measure high-pulse width vs audio block period (e.g. 666.7 µs for 32 frames @ 48 kHz) to obtain real physical duty cycle.
