@@ -85,8 +85,6 @@ def compute_spectral_indicators(samples, sr, f_carrier=220.0):
         return (real * real + imag * imag) / (seg_len * seg_len)
     
     p_carrier = dft_power_at(f_carrier)
-    p_side_plus = dft_power_at(f_carrier + 0.25)
-    p_side_minus = dft_power_at(f_carrier - 0.25)
     p_high = dft_power_at(10000.0)
     p_nyquist_margin = dft_power_at(0.48 * sr)
     
@@ -94,9 +92,9 @@ def compute_spectral_indicators(samples, sr, f_carrier=220.0):
     
     return {
         "carrier_power": p_carrier,
-        "sideband_power_rel_db": 10.0 * math.log10(max(1e-12, (p_side_plus + p_side_minus) / max(1e-12, p_carrier))),
         "hf_10k_power_db": 10.0 * math.log10(max(1e-12, p_high / max(1e-12, total_energy))),
-        "aliasing_margin_power_db": 10.0 * math.log10(max(1e-12, p_nyquist_margin / max(1e-12, total_energy)))
+        "aliasing_margin_power_db": 10.0 * math.log10(max(1e-12, p_nyquist_margin / max(1e-12, total_energy))),
+        "spectral_smoke_note": "4096-sample window (df=11.72 Hz) is a fast smoke indicator. True sideband resolution (df=0.0625 Hz) is measured in analyze_spectral_validation.py."
     }
 
 def compare_signals(ref_l, ref_r, test_l, test_r):
@@ -173,7 +171,8 @@ def main():
     print(f"  Left Channel  : Peak={ref_peak_l:.4f}, DC={ref_dc_l:.6f}, RMS={ref_rms_l:.4f}")
     print(f"  Right Channel : Peak={ref_peak_r:.4f}, DC={ref_dc_r:.6f}, RMS={ref_rms_r:.4f}")
     print(f"  Stereo Metric : Correlation={ref_stereo['stereo_correlation']:.4f}, Side/Mid={ref_stereo['side_to_mid_ratio']:.4f}")
-    print(f"  Sideband Pwr  : {ref_spectral.get('sideband_power_rel_db', 0.0):.1f} dB rel carrier")
+    print(f"  HF / Nyquist  : HF(10k)={ref_spectral.get('hf_10k_power_db', 0.0):.1f} dB, NyquistMargin={ref_spectral.get('aliasing_margin_power_db', 0.0):.1f} dB")
+    print(f"  Spectral Note : {ref_spectral.get('spectral_smoke_note', '')}")
 
     # 3. Progressive Character Progression
     levels = ["025", "050", "075", "100"]

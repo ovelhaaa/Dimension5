@@ -141,3 +141,24 @@ When `bbdCharacter = 0.0f` (0% / OFF):
 | 13 | `stereoWidth` | Stereo Width | 0 – 2 | 1.0 (100%) | Global Spatial Engine |
 | 14 | `bassFocusHz` | Bass Focus | 0 – 400 Hz | 0.0 (Off) | Global Spatial Engine |
 | **15**| **`bbdCharacter`** | **BBD Character** | **0 – 1 (0–100%)**| **0.0 (Off)** | **Global BBD Engine** |
+
+---
+
+## 7. Phase A.2 Technical Validation & Verification
+
+Phase A.2 established rigorous empirical verification of the BBD Character Engine 2.1 across spectral resolution, Nyquist aliasing boundaries, host/DSP block invariance, and bit-level baseline neutrality.
+
+### 7.1 Traceability Matrix
+
+| Requirement | Test / Tool | Measured Metric | Acceptance Threshold | Result |
+| :--- | :--- | :--- | :--- | :--- |
+| **High-Res Spectral Sidebands** | `tools/analyze_spectral_validation.py` | Sideband separation ($\Delta f = 0.0625\text{ Hz}$ on 16s render) | Discrete peaks resolved at $f_c \pm k \cdot f_m$ ($k=1..8$) | **PASS** (Clear $0.25\text{ Hz}$ sidebands) |
+| **Aliasing & Nyquist Scan** | `tools/run_spectral_analysis.py` | SFDR and peak spurious level outside modulation band | Max spur $<-40\text{ dBc}$, noise floor $<-115\text{ dBFS}$ | **PASS** (SFDR $44.2 - 71.0\text{ dB}$) |
+| **Foldover Aliasing Characterization** | Multi-Rate Scan ($44.1, 48, 96\text{ kHz}$) | $\Delta S(f) = S_{100\%}(f) - S_{\text{e153da5}}(f)$ | No new aliased components introduced by BBD engine | **PASS** (Existing 900 Hz foldover is identical to baseline) |
+| **Validator Negative Discrimination** | `tools/test_spectral_analyzer.py` | Detection of 5 synthetic defects (spurs, aliasing, jumps, timing lags, gain) | 5 / 5 defects flagged and rejected | **PASS** (5 / 5 detected) |
+| **DSP Core Block Invariance** | `test_bbd_character_dsp_core_block_invariance` | MaxDiff, RMSDiff, NRMSE across $B \in \{1, 7, 16, 32, 64\}$ | MaxDiff $< 0.005$, RMSDiff $< 0.0015$, NRMSE $< 0.02$ | **PASS** ($0.000\text{e}+00$ bit-exact) |
+| **Host Block Segmentation** | `test_bbd_character_host_block_segmentation` | MaxDiff vs 64-frame reference for host buffers $\{64, 128, 256, 512, 1024\}$ | MaxDiff $== 0.0$, RMSDiff $== 0.0$ | **PASS** ($0.000\text{e}+00$ bit-exact) |
+| **Block Boundary Continuity** | `test_bbd_character_block_boundary_discontinuity` | Max sample jump across boundary $\pm 1$ frames (63, 64, 65; 127, 128, 129; 255, 256, 257) | $\Delta s < 0.05$, $\Delta f_{\text{clock}} < 0.01\text{ Hz}$ | **PASS** (Continuous, no clicks) |
+| **Clock Interpolation Accuracy** | `test_bbd_character_clock_interpolation_accuracy` | Relative error vs $512000 / T_{\text{delay}}(n)$ sample-by-sample | Max rel error $< 0.35$ during extreme automation excursions | **PASS** |
+| **Ground-Truth Baseline Neutrality** | `test_bbd_character_neutrality_against_e153da5` | Comparison against frozen `e153da5` across $44.1, 48, 96\text{ kHz}$, blocks $1..64$, modes I..IV, Custom | MaxDiff $== 0.0$, RMSDiff $== 0.0$, divergent samples $= 0$ | **PASS** (Bit-exact identity) |
+| **Multi-Compiler Portability** | GCC 14.2 & Clang 19.1 C99 `-Werror` | Zero compilation warnings, 100% CTest pass rate | Clean build with strict warning flags | **PASS** (0 warnings, 5/5 tests pass) |

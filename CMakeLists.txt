@@ -94,6 +94,11 @@ add_test(NAME dimension5_legacy_render COMMAND dimension5_legacy_render ${CMAKE_
 add_test(NAME dimension5_spatial_engine_validation_smoke COMMAND dimension5_spatial_engine_validation --smoke --baseline-dir=${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vectors/legacy_baseline)
 set_tests_properties(dimension5_spatial_engine_validation_smoke PROPERTIES DEPENDS dimension5_legacy_render)
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+  add_test(NAME dimension5_validator_negative_tests COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_spectral_analyzer.py)
+endif()
+
 if(DIMENSION5_BUILD_JUCE_PLUGIN)
   enable_language(CXX)
   set(CMAKE_CXX_STANDARD 17)

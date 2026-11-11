@@ -901,7 +901,8 @@ static int test_spatial_engine_automation_smoothness(void) {
  * ========================================================================= */
 
 static int test_bbd_character_neutrality_against_e153da5(void) {
-    /* Priority 4 / Section 9: Ground-truth neutrality regression testing against frozen e153da5 DSP */
+    /* Priority 4 / Section 9: Ground-truth neutrality regression testing against frozen e153da5 DSP
+     * Comprehensive multi-rate, multi-block-size, and multi-mode regression suite. */
     const DimensionMode modes[5] = {
         DIMENSION_MODE_I,
         DIMENSION_MODE_II,
@@ -916,69 +917,96 @@ static int test_bbd_character_neutrality_against_e153da5(void) {
         DIMENSION_MODE_IV_e153da5,
         DIMENSION_MODE_CUSTOM_e153da5
     };
+    const float testSRs[3] = { 44100.0f, 48000.0f, 96000.0f };
+    const uint32_t testBlocks[5] = { 1, 7, 16, 32, 64 };
 
-    for (int m = 0; m < 5; ++m) {
-        DimensionDSP dNew;
-        Dimension_Init(&dNew, TEST_SR);
-        DimensionDSP_e153da5 dBase;
-        Dimension_Init_e153da5(&dBase, TEST_SR);
+    for (int s = 0; s < 3; ++s) {
+        const float sr = testSRs[s];
+        for (int blkIdx = 0; blkIdx < 5; ++blkIdx) {
+            const uint32_t bs = testBlocks[blkIdx];
 
-        DimensionParams pNew = dNew.params;
-        pNew.mode = modes[m];
-        pNew.bbdCharacter = 0.0f;
-        if (modes[m] == DIMENSION_MODE_CUSTOM) {
-            pNew.rateHz = 0.65f;
-            pNew.baseDelayMs = 12.3f;
-            pNew.depthMs = 2.1f;
-            pNew.stereoWidth = 1.35f;
-            pNew.bassFocusHz = 160.0f;
-        }
-        Dimension_SetParams(&dNew, &pNew);
+            for (int m = 0; m < 5; ++m) {
+                DimensionDSP dNew;
+                Dimension_Init(&dNew, sr);
+                DimensionDSP_e153da5 dBase;
+                Dimension_Init_e153da5(&dBase, sr);
 
-        DimensionParams_e153da5 pBase = dBase.params;
-        pBase.mode = modes_baseline[m];
-        if (modes_baseline[m] == DIMENSION_MODE_CUSTOM_e153da5) {
-            pBase.rateHz = 0.65f;
-            pBase.baseDelayMs = 12.3f;
-            pBase.depthMs = 2.1f;
-            pBase.stereoWidth = 1.35f;
-            pBase.bassFocusHz = 160.0f;
-        }
-        Dimension_SetParams_e153da5(&dBase, &pBase);
+                DimensionParams pNew = dNew.params;
+                pNew.mode = modes[m];
+                pNew.bbdCharacter = 0.0f;
+                if (modes[m] == DIMENSION_MODE_CUSTOM) {
+                    pNew.rateHz = 0.65f;
+                    pNew.baseDelayMs = 12.3f;
+                    pNew.depthMs = 2.1f;
+                    pNew.stereoWidth = 1.35f;
+                    pNew.bassFocusHz = 160.0f;
+                }
+                Dimension_SetParams(&dNew, &pNew);
 
-        float inL[BLOCK], inR[BLOCK];
-        float outNewL[BLOCK], outNewR[BLOCK];
-        float outBaseL[BLOCK], outBaseR[BLOCK];
+                DimensionParams_e153da5 pBase = dBase.params;
+                pBase.mode = modes_baseline[m];
+                if (modes_baseline[m] == DIMENSION_MODE_CUSTOM_e153da5) {
+                    pBase.rateHz = 0.65f;
+                    pBase.baseDelayMs = 12.3f;
+                    pBase.depthMs = 2.1f;
+                    pBase.stereoWidth = 1.35f;
+                    pBase.bassFocusHz = 160.0f;
+                }
+                Dimension_SetParams_e153da5(&dBase, &pBase);
 
-        float maxDiff = 0.0f;
-        double sumSqDiff = 0.0;
-        uint32_t divergentSamples = 0;
-        uint32_t totalSamples = 0;
+                float inL[64], inR[64];
+                float outNewL[64], outNewR[64];
+                float outBaseL[64], outBaseR[64];
 
-        for (uint32_t b = 0; b < 200; ++b) {
-            for (uint32_t i = 0; i < BLOCK; ++i) {
-                const uint32_t t = b * BLOCK + i;
-                inL[i] = 0.25f * sinf(2.0f * PI_F * 440.0f * (float)t / TEST_SR) + 0.10f * sinf(2.0f * PI_F * 1200.0f * (float)t / TEST_SR);
-                inR[i] = 0.25f * cosf(2.0f * PI_F * 660.0f * (float)t / TEST_SR) + 0.10f * cosf(2.0f * PI_F * 1800.0f * (float)t / TEST_SR);
+                float maxDiff = 0.0f;
+                double sumSqDiff = 0.0;
+                uint32_t divergentSamples = 0;
+                uint32_t totalSamples = 0;
+
+                const uint32_t numChunks = (bs == 1) ? 2048 : (bs <= 16 ? 512 : 200);
+
+                for (uint32_t b = 0; b < numChunks; ++b) {
+                    for (uint32_t i = 0; i < bs; ++i) {
+                        const uint32_t t = b * bs + i;
+                        inL[i] = 0.25f * sinf(2.0f * PI_F * 440.0f * (float)t / sr) + 0.10f * sinf(2.0f * PI_F * 1200.0f * (float)t / sr);
+                        inR[i] = 0.25f * cosf(2.0f * PI_F * 660.0f * (float)t / sr) + 0.10f * cosf(2.0f * PI_F * 1800.0f * (float)t / sr);
+                    }
+
+                    /* Dynamic parameter automation test at frame ~1000 */
+                    if (b * bs >= 1024 && (b - 1) * bs < 1024) {
+                        pNew.dryGain = 0.90f;
+                        pNew.wetDirectGain = 0.55f;
+                        pNew.stereoWidth = 1.20f;
+                        pNew.bassFocusHz = 180.0f;
+                        Dimension_SetParams(&dNew, &pNew);
+
+                        pBase.dryGain = 0.90f;
+                        pBase.wetDirectGain = 0.55f;
+                        pBase.stereoWidth = 1.20f;
+                        pBase.bassFocusHz = 180.0f;
+                        Dimension_SetParams_e153da5(&dBase, &pBase);
+                    }
+
+                    Dimension_ProcessBlock(&dNew, inL, inR, outNewL, outNewR, bs);
+                    Dimension_ProcessBlock_e153da5(&dBase, inL, inR, outBaseL, outBaseR, bs);
+
+                    for (uint32_t i = 0; i < bs; ++i) {
+                        const float diffL = fabsf(outNewL[i] - outBaseL[i]);
+                        const float diffR = fabsf(outNewR[i] - outBaseR[i]);
+                        if (diffL > maxDiff) maxDiff = diffL;
+                        if (diffR > maxDiff) maxDiff = diffR;
+                        sumSqDiff += (double)(diffL * diffL + diffR * diffR);
+                        if (diffL > 0.0f || diffR > 0.0f) divergentSamples++;
+                        totalSamples += 2;
+                    }
+                }
+                const double rmsDiff = sqrt(sumSqDiff / (double)totalSamples);
+                /* Exact bit-level numerical identity */
+                CHECK(maxDiff == 0.0f);
+                CHECK(rmsDiff == 0.0);
+                CHECK(divergentSamples == 0);
             }
-            Dimension_ProcessBlock(&dNew, inL, inR, outNewL, outNewR, BLOCK);
-            Dimension_ProcessBlock_e153da5(&dBase, inL, inR, outBaseL, outBaseR, BLOCK);
-
-            for (uint32_t i = 0; i < BLOCK; ++i) {
-                const float diffL = fabsf(outNewL[i] - outBaseL[i]);
-                const float diffR = fabsf(outNewR[i] - outBaseR[i]);
-                if (diffL > maxDiff) maxDiff = diffL;
-                if (diffR > maxDiff) maxDiff = diffR;
-                sumSqDiff += (double)(diffL * diffL + diffR * diffR);
-                if (diffL > 0.0f || diffR > 0.0f) divergentSamples++;
-                totalSamples += 2;
-            }
         }
-        const double rmsDiff = sqrt(sumSqDiff / (double)totalSamples);
-        /* Exact bit-level or floating-point numerical identity */
-        CHECK(maxDiff == 0.0f);
-        CHECK(rmsDiff == 0.0);
-        CHECK(divergentSamples == 0);
     }
     return 0;
 }
@@ -1307,11 +1335,46 @@ static int test_bbd_clock_approximation_accuracy(void) {
     return 0;
 }
 
-static int test_bbd_character_block_size_invariance(void) {
-    /* Section 8: Invariance across block sizes 16, 32, 64, 128, 256, 512 with active automation */
-    const uint32_t blockSizes[6] = { 16, 32, 64, 128, 256, 512 };
+static inline void get_invariance_automation_params(DimensionParams* p, uint32_t frameIdx) {
+    if (frameIdx >= 4096) {
+        p->bbdCharacter = 0.25f;
+        p->baseDelayMs = 7.0f;
+        p->depthMs = 0.9f;
+        p->rateHz = 0.25f;
+    } else if (frameIdx >= 3072) {
+        p->rateHz = 0.50f;
+    } else if (frameIdx >= 2048) {
+        p->depthMs = 2.4f;
+    } else if (frameIdx >= 1024) {
+        p->bbdCharacter = 1.00f;
+        p->baseDelayMs = 11.5f;
+    } else if (frameIdx >= 512) {
+        p->bbdCharacter = 0.50f;
+        p->baseDelayMs = 8.5f;
+        p->depthMs = 1.4f;
+    } else {
+        p->bbdCharacter = 0.0f;
+        p->baseDelayMs = 7.0f;
+        p->depthMs = 0.9f;
+        p->rateHz = 0.25f;
+    }
+}
+
+static inline uint32_t get_next_invariance_event(uint32_t pos) {
+    const uint32_t events[7] = { 0, 512, 1024, 2048, 3072, 4096, 5120 };
+    for (int i = 0; i < 7; ++i) {
+        if (events[i] > pos) return events[i];
+    }
+    return 5120;
+}
+
+static int test_bbd_character_dsp_core_block_invariance(void) {
+    /* Section 6 & 8: Rigorous DSP Core Segmentation Invariance (1, 7, 16, 32, 64)
+     * Reference: Block size = 1 (pure sample-by-sample processing).
+     * Events aligned to the exact same absolute sample frame across all block sizes. */
+    const uint32_t coreBlockSizes[4] = { 7, 16, 32, 64 };
     const float rates[3] = { 44100.0f, 48000.0f, 96000.0f };
-    const uint32_t totalFrames = 4096;
+    const uint32_t totalFrames = 5120;
 
     for (int r = 0; r < 3; ++r) {
         const float sr = rates[r];
@@ -1330,32 +1393,31 @@ static int test_bbd_character_block_size_invariance(void) {
             inStreamR[i] = s;
         }
 
-        #define AUTOMATE_PARAMS(p, frameIdx) do { \
-            if ((frameIdx) >= 512 && (frameIdx) < 1024) { \
-                (p).bbdCharacter = 0.50f; (p).baseDelayMs = 8.5f; (p).depthMs = 1.4f; \
-            } else if ((frameIdx) >= 1024 && (frameIdx) < 2048) { \
-                (p).bbdCharacter = 1.00f; (p).baseDelayMs = 11.5f; (p).depthMs = 2.4f; (p).rateHz = 0.50f; \
-            } else if ((frameIdx) >= 2048) { \
-                (p).bbdCharacter = 0.25f; (p).baseDelayMs = 7.0f; (p).depthMs = 0.9f; (p).rateHz = 0.25f; \
-            } \
-        } while (0)
-
-        /* Reference rendering: block size = 16 */
+        /* 1. Generate 1-sample (sample-by-sample) reference */
         {
             DimensionDSP dspRef;
             Dimension_Init(&dspRef, sr);
             Dimension_SetMode(&dspRef, DIMENSION_MODE_I);
-            for (uint32_t pos = 0; pos < totalFrames; pos += 16) {
+            uint32_t pos = 0;
+            while (pos < totalFrames) {
                 DimensionParams p = dspRef.params;
-                AUTOMATE_PARAMS(p, pos);
+                get_invariance_automation_params(&p, pos);
                 Dimension_SetParams(&dspRef, &p);
-                Dimension_ProcessBlock(&dspRef, &inStreamL[pos], &inStreamR[pos], &refOutL[pos], &refOutR[pos], 16);
+                Dimension_ProcessBlock(&dspRef, &inStreamL[pos], &inStreamR[pos], &refOutL[pos], &refOutR[pos], 1);
+                pos++;
             }
         }
 
-        /* Test block sizes: 32, 64, 128, 256, 512 against reference */
-        for (int b = 1; b < 6; ++b) {
-            const uint32_t bs = blockSizes[b];
+        /* Compute reference RMS */
+        double refEnergy = 0.0;
+        for (uint32_t i = 0; i < totalFrames; ++i) {
+            refEnergy += (double)(refOutL[i] * refOutL[i] + refOutR[i] * refOutR[i]);
+        }
+        const double refRms = sqrt(refEnergy / (double)(2 * totalFrames));
+
+        /* 2. Test core block sizes: 7, 16, 32, 64 */
+        for (int b = 0; b < 4; ++b) {
+            const uint32_t bs = coreBlockSizes[b];
             float* testOutL = (float*)malloc(totalFrames * sizeof(float));
             float* testOutR = (float*)malloc(totalFrames * sizeof(float));
             CHECK(testOutL && testOutR);
@@ -1364,25 +1426,25 @@ static int test_bbd_character_block_size_invariance(void) {
             Dimension_Init(&dspTest, sr);
             Dimension_SetMode(&dspTest, DIMENSION_MODE_I);
 
-            for (uint32_t pos = 0; pos < totalFrames; pos += bs) {
-                const uint32_t hostChunk = (pos + bs > totalFrames) ? (totalFrames - pos) : bs;
+            uint32_t pos = 0;
+            while (pos < totalFrames) {
+                const uint32_t nextEvent = get_next_invariance_event(pos);
+                const uint32_t chunkMax = nextEvent - pos;
+                const uint32_t n = (chunkMax < bs) ? chunkMax : bs;
+
                 DimensionParams p = dspTest.params;
-                AUTOMATE_PARAMS(p, pos);
+                get_invariance_automation_params(&p, pos);
                 Dimension_SetParams(&dspTest, &p);
 
-                /* Host chunks up to DIMENSION_MAX_BLOCK_SIZE per DSP core contract */
-                uint32_t offset = 0;
-                while (offset < hostChunk) {
-                    uint32_t n = hostChunk - offset;
-                    if (n > BLOCK) n = BLOCK;
-                    Dimension_ProcessBlock(&dspTest, &inStreamL[pos + offset], &inStreamR[pos + offset],
-                                           &testOutL[pos + offset], &testOutR[pos + offset], n);
-                    offset += n;
-                }
+                Dimension_ProcessBlock(&dspTest, &inStreamL[pos], &inStreamR[pos],
+                                       &testOutL[pos], &testOutR[pos], n);
+                pos += n;
             }
 
             double sumSqDiff = 0.0;
             float maxDiff = 0.0f;
+            float maxSingleSampleJump = 0.0f;
+
             for (uint32_t i = 0; i < totalFrames; ++i) {
                 CHECK(isfinite(testOutL[i]));
                 CHECK(isfinite(testOutR[i]));
@@ -1391,20 +1453,286 @@ static int test_bbd_character_block_size_invariance(void) {
                 if (dL > maxDiff) maxDiff = dL;
                 if (dR > maxDiff) maxDiff = dR;
                 sumSqDiff += (double)(dL * dL + dR * dR);
+
+                if (i > 0) {
+                    const float jumpL = fabsf((testOutL[i] - refOutL[i]) - (testOutL[i - 1] - refOutL[i - 1]));
+                    const float jumpR = fabsf((testOutR[i] - refOutR[i]) - (testOutR[i - 1] - refOutR[i - 1]));
+                    if (jumpL > maxSingleSampleJump) maxSingleSampleJump = jumpL;
+                    if (jumpR > maxSingleSampleJump) maxSingleSampleJump = jumpR;
+                }
             }
+
             const double rmsDiff = sqrt(sumSqDiff / (double)(2 * totalFrames));
-            printf("  [BlockSizeInvariance sr=%.0f bs=%u] maxDiff=%.5f rmsDiff=%.5f\n", (double)sr, bs, (double)maxDiff, rmsDiff);
-            CHECK(rmsDiff < 0.015);
+            const double nrmse = rmsDiff / refRms;
+
+            printf("  [DSPCoreInvariance sr=%.0f bs=%u] maxDiff=%.3e rmsDiff=%.3e NRMSE=%.3e maxJump=%.3e\n",
+                   (double)sr, bs, (double)maxDiff, rmsDiff, nrmse, (double)maxSingleSampleJump);
+
+            /* Mathematically grounded thresholds:
+             * MaxDiff < 0.005 (during active 20ms parameter sweeps), NRMSE < 0.02, single sample jump < 0.002 */
+            CHECK(maxDiff < 0.005f);
+            CHECK(rmsDiff < 0.0015);
+            CHECK(nrmse < 0.02);
+            CHECK(maxSingleSampleJump < 0.002f);
 
             free(testOutL);
             free(testOutR);
         }
 
-        #undef AUTOMATE_PARAMS
         free(inStreamL);
         free(inStreamR);
         free(refOutL);
         free(refOutR);
+    }
+    return 0;
+}
+
+static int test_bbd_character_host_block_segmentation(void) {
+    /* Section 6B: Host Buffer Segmentation (64, 128, 256, 512, 1024)
+     * Host chunks are sliced at event boundaries and then chunked into <= 64 for Dimension_ProcessBlock.
+     * Compares against 64-frame reference. Must achieve exact bit-level numerical identity. */
+    const uint32_t hostSizes[5] = { 64, 128, 256, 512, 1024 };
+    const float rates[3] = { 44100.0f, 48000.0f, 96000.0f };
+    const uint32_t totalFrames = 5120;
+
+    for (int r = 0; r < 3; ++r) {
+        const float sr = rates[r];
+
+        float* inStreamL = (float*)malloc(totalFrames * sizeof(float));
+        float* inStreamR = (float*)malloc(totalFrames * sizeof(float));
+        float* refOutL = (float*)malloc(totalFrames * sizeof(float));
+        float* refOutR = (float*)malloc(totalFrames * sizeof(float));
+        CHECK(inStreamL && inStreamR && refOutL && refOutR);
+
+        for (uint32_t i = 0; i < totalFrames; ++i) {
+            const float tSec = (float)i / sr;
+            float s = 0.20f * sinf(2.0f * PI_F * 330.0f * tSec) + 0.10f * sinf(2.0f * PI_F * 880.0f * tSec);
+            if (i % 512 == 0) s += 0.4f;
+            inStreamL[i] = s;
+            inStreamR[i] = s;
+        }
+
+        /* 1. Reference: Host block = 64 */
+        {
+            DimensionDSP dspRef;
+            Dimension_Init(&dspRef, sr);
+            Dimension_SetMode(&dspRef, DIMENSION_MODE_I);
+            uint32_t pos = 0;
+            while (pos < totalFrames) {
+                const uint32_t nextEvent = get_next_invariance_event(pos);
+                const uint32_t hostChunk = (pos + 64 > totalFrames) ? (totalFrames - pos) : 64;
+                const uint32_t validHost = (pos + hostChunk > nextEvent) ? (nextEvent - pos) : hostChunk;
+
+                DimensionParams p = dspRef.params;
+                get_invariance_automation_params(&p, pos);
+                Dimension_SetParams(&dspRef, &p);
+
+                uint32_t offset = 0;
+                while (offset < validHost) {
+                    uint32_t n = validHost - offset;
+                    if (n > 64) n = 64;
+                    Dimension_ProcessBlock(&dspRef, &inStreamL[pos + offset], &inStreamR[pos + offset],
+                                           &refOutL[pos + offset], &refOutR[pos + offset], n);
+                    offset += n;
+                }
+                pos += validHost;
+            }
+        }
+
+        /* 2. Test Host block sizes: 128, 256, 512, 1024 */
+        for (int h = 1; h < 5; ++h) {
+            const uint32_t hostBs = hostSizes[h];
+            float* testOutL = (float*)malloc(totalFrames * sizeof(float));
+            float* testOutR = (float*)malloc(totalFrames * sizeof(float));
+            CHECK(testOutL && testOutR);
+
+            DimensionDSP dspTest;
+            Dimension_Init(&dspTest, sr);
+            Dimension_SetMode(&dspTest, DIMENSION_MODE_I);
+
+            uint32_t pos = 0;
+            while (pos < totalFrames) {
+                const uint32_t nextEvent = get_next_invariance_event(pos);
+                const uint32_t hostChunk = (pos + hostBs > totalFrames) ? (totalFrames - pos) : hostBs;
+                const uint32_t validHost = (pos + hostChunk > nextEvent) ? (nextEvent - pos) : hostChunk;
+
+                DimensionParams p = dspTest.params;
+                get_invariance_automation_params(&p, pos);
+                Dimension_SetParams(&dspTest, &p);
+
+                uint32_t offset = 0;
+                while (offset < validHost) {
+                    uint32_t n = validHost - offset;
+                    if (n > 64) n = 64;
+                    Dimension_ProcessBlock(&dspTest, &inStreamL[pos + offset], &inStreamR[pos + offset],
+                                           &testOutL[pos + offset], &testOutR[pos + offset], n);
+                    offset += n;
+                }
+                pos += validHost;
+            }
+
+            float maxDiff = 0.0f;
+            double sumSqDiff = 0.0;
+            for (uint32_t i = 0; i < totalFrames; ++i) {
+                const float dL = fabsf(testOutL[i] - refOutL[i]);
+                const float dR = fabsf(testOutR[i] - refOutR[i]);
+                if (dL > maxDiff) maxDiff = dL;
+                if (dR > maxDiff) maxDiff = dR;
+                sumSqDiff += (double)(dL * dL + dR * dR);
+            }
+            const double rmsDiff = sqrt(sumSqDiff / (double)(2 * totalFrames));
+
+            printf("  [HostSegmentation sr=%.0f hostBs=%u] maxDiff=%.8f rmsDiff=%.8f (Bit-Exact)\n",
+                   (double)sr, hostBs, (double)maxDiff, rmsDiff);
+
+            /* Exact bit-level numerical identity when host chunks are properly decomposed */
+            CHECK(maxDiff == 0.0f);
+            CHECK(rmsDiff == 0.0);
+
+            free(testOutL);
+            free(testOutR);
+        }
+
+        free(inStreamL);
+        free(inStreamR);
+        free(refOutL);
+        free(refOutR);
+    }
+    return 0;
+}
+
+static int test_bbd_character_block_boundary_discontinuity(void) {
+    /* Section 9: Validate continuity and absence of spurious jumps at block boundaries
+     * Test automation events positioned at:
+     *   Frame 63 (boundary - 1), Frame 64 (boundary), Frame 65 (boundary + 1)
+     *   Frame 127, Frame 128, Frame 129
+     *   Frame 255, Frame 256, Frame 257 */
+    const uint32_t boundaryEvents[9] = { 63, 64, 65, 127, 128, 129, 255, 256, 257 };
+    const float sr = 48000.0f;
+    const uint32_t totalSamples = 512;
+
+    for (int e = 0; e < 9; ++e) {
+        const uint32_t eventFrame = boundaryEvents[e];
+
+        DimensionDSP dsp;
+        Dimension_Init(&dsp, sr);
+        Dimension_SetMode(&dsp, DIMENSION_MODE_II);
+
+        float inL[64], inR[64], outL[64], outR[64];
+        float fullOutL[512], fullOutR[512];
+        float prevClockHz = 0.0f;
+        float maxClockJump = 0.0f;
+
+        uint32_t pos = 0;
+        while (pos < totalSamples) {
+            const uint32_t hostBs = 64;
+            const uint32_t nextChunk = (pos < eventFrame && pos + hostBs > eventFrame) ? (eventFrame - pos) : hostBs;
+            const uint32_t n = (pos + nextChunk > totalSamples) ? (totalSamples - pos) : nextChunk;
+
+            if (pos >= eventFrame) {
+                DimensionParams p = dsp.params;
+                p.bbdCharacter = 1.0f;
+                p.baseDelayMs = 12.0f;
+                p.depthMs = 2.2f;
+                Dimension_SetParams(&dsp, &p);
+            }
+
+            for (uint32_t i = 0; i < n; ++i) {
+                const uint32_t t = pos + i;
+                inL[i] = 0.25f * sinf(2.0f * PI_F * 440.0f * (float)t / sr);
+                inR[i] = 0.25f * cosf(2.0f * PI_F * 440.0f * (float)t / sr);
+            }
+
+            Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, n);
+
+            /* Track clock boundary jump */
+            if (prevClockHz > 0.0f) {
+                const float clkJump = fabsf(dsp.bbdClock.chL.instantaneousClockHz - prevClockHz);
+                if (clkJump > maxClockJump) maxClockJump = clkJump;
+            }
+            prevClockHz = dsp.bbdClock.chL.instantaneousClockHz;
+
+            for (uint32_t i = 0; i < n; ++i) {
+                fullOutL[pos + i] = outL[i];
+                fullOutR[pos + i] = outR[i];
+            }
+            pos += n;
+        }
+
+        /* Check that single-sample jump across the event boundary frame does not exceed
+         * the continuous audio signal slew rate (normal 440 Hz @ 0.25 amp has max slew ~ 0.023) */
+        if (eventFrame > 0 && eventFrame < totalSamples) {
+            const float jumpL = fabsf(fullOutL[eventFrame] - fullOutL[eventFrame - 1]);
+            const float jumpR = fabsf(fullOutR[eventFrame] - fullOutR[eventFrame - 1]);
+            CHECK(jumpL < 0.05f);
+            CHECK(jumpR < 0.05f);
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_character_clock_interpolation_accuracy(void) {
+    /* Section 10: Validate mathematical consistency between block-interpolated clock
+     * and sample-by-sample physical formula f_ref(n) = 512000 / T_delay(n) */
+    const float baseDelays[4] = { 7.0f, 8.5f, 10.0f, 11.5f };
+    const float depths[4] = { 0.9f, 1.4f, 1.8f, 2.4f };
+    const float rates[4] = { 0.25f, 0.25f, 0.50f, 0.50f };
+    const float testSR = 48000.0f;
+    const uint32_t testBlockSizes[4] = { 16, 32, 48, 64 };
+
+    for (int b = 0; b < 4; ++b) {
+        const uint32_t bs = testBlockSizes[b];
+
+        for (int m = 0; m < 4; ++m) {
+            DimensionDSP dsp;
+            Dimension_Init(&dsp, testSR);
+            DimensionParams p = dsp.params;
+            p.mode = (DimensionMode)m;
+            p.bbdCharacter = 1.0f;
+            p.baseDelayMs = baseDelays[m];
+            p.depthMs = depths[m];
+            p.rateHz = rates[m];
+            Dimension_SetParams(&dsp, &p);
+
+            float inL[64], inR[64], outL[64], outR[64];
+            for (uint32_t i = 0; i < bs; ++i) {
+                inL[i] = 0.2f; inR[i] = 0.2f;
+            }
+
+            double maxRelErr = 0.0;
+            double sumSqRelErr = 0.0;
+            uint32_t totalSamples = 0;
+
+            /* Run 50 blocks in steady state */
+            for (uint32_t blk = 0; blk < 50; ++blk) {
+                Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, bs);
+
+                const float actualClockL = dsp.bbdClock.chL.instantaneousClockHz;
+                CHECK(actualClockL >= DIMENSION_BBD_MIN_CLOCK_HZ);
+                CHECK(actualClockL <= DIMENSION_BBD_MAX_CLOCK_HZ);
+            }
+
+            /* Test during rapid parameter automation (sweep baseDelayMs from 7.0 to 11.5 over 50 blocks) */
+            p.baseDelayMs = 11.5f;
+            p.depthMs = 2.4f;
+            Dimension_SetParams(&dsp, &p);
+
+            for (uint32_t blk = 0; blk < 50; ++blk) {
+                Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, bs);
+                const float clk = dsp.bbdClock.chL.instantaneousClockHz;
+                CHECK(clk >= DIMENSION_BBD_MIN_CLOCK_HZ && clk <= DIMENSION_BBD_MAX_CLOCK_HZ);
+                const float refF0 = 512000.0f / dsp.smoothBaseDelayMs;
+                const double relErr = fabs((double)(clk - refF0)) / (double)refF0;
+                if (relErr > maxRelErr) maxRelErr = relErr;
+                sumSqRelErr += relErr * relErr;
+                totalSamples++;
+            }
+
+            const double rmsRelErr = sqrt(sumSqRelErr / (double)totalSamples);
+            /* Across modulation excursions, relative clock shift tracks modulation depth ratio cleanly */
+            CHECK(maxRelErr < 0.35); /* Mode IV maximum depth excursion */
+            CHECK(rmsRelErr < 0.25);
+        }
     }
     return 0;
 }
@@ -1496,7 +1824,8 @@ static int test_bbd_character_dc_protection(void) {
 }
 
 static int test_bbd_character_spectral_aliasing_validation(void) {
-    /* Section 10: True spectral aliasing and sideband validation */
+    /* Section 10: Multi-frequency in-engine spectral smoke test
+     * Verifies fundamental carrier transmission, sideband formation, and multi-bin spurious rejection */
     const float testFreqs[4] = { 1000.0f, 5000.0f, 10000.0f, 15000.0f };
     const float charLevels[3] = { 0.0f, 0.50f, 1.00f };
     const float rates[3] = { 44100.0f, 48000.0f, 96000.0f };
@@ -1536,9 +1865,7 @@ static int test_bbd_character_spectral_aliasing_validation(void) {
                     Dimension_ProcessBlock(&dsp, &inL[pos], &inR[pos], &outL[pos], &outR[pos], n);
                 }
 
-                /* Compute spectral power via windowed DFT */
-                double carrierPwr = 0.0;
-                double spuriousPwr = 0.0;
+                /* Compute spectral power via windowed DFT across steady-state segment */
                 const uint32_t startIdx = 2048;
                 const uint32_t numBins = 2048;
                 double winNorm = 0.0;
@@ -1548,6 +1875,7 @@ static int test_bbd_character_spectral_aliasing_validation(void) {
                     winNorm += (double)(w * w);
                 }
 
+                /* Carrier & modulation sideband bins */
                 double realC = 0.0, imagC = 0.0;
                 for (uint32_t i = 0; i < numBins; ++i) {
                     const float w = 0.5f * (1.0f - cosf(2.0f * PI_F * (float)i / (float)numBins));
@@ -1556,11 +1884,17 @@ static int test_bbd_character_spectral_aliasing_validation(void) {
                     realC += (double)(s * cosf(phi));
                     imagC -= (double)(s * sinf(phi));
                 }
-                carrierPwr = (realC * realC + imagC * imagC) / (winNorm * winNorm);
+                const double carrierPwr = (realC * realC + imagC * imagC) / (winNorm * winNorm);
+                CHECK(carrierPwr > 1e-6);
+                CHECK(isfinite(carrierPwr));
 
-                if (fCarrier >= 5000.0f) {
+                /* Multi-bin out-of-band spurious check */
+                const float checkSpurs[4] = { 250.0f, 500.0f, 1500.0f, 0.46f * sr };
+                for (int sp = 0; sp < 4; ++sp) {
+                    const float fSpur = checkSpurs[sp];
+                    if (fabsf(fSpur - fCarrier) < 100.0f || fSpur >= 0.48f * sr) continue;
+
                     double realSpur = 0.0, imagSpur = 0.0;
-                    const float fSpur = 500.0f;
                     for (uint32_t i = 0; i < numBins; ++i) {
                         const float w = 0.5f * (1.0f - cosf(2.0f * PI_F * (float)i / (float)numBins));
                         const float s = outL[startIdx + i] * w;
@@ -1568,14 +1902,10 @@ static int test_bbd_character_spectral_aliasing_validation(void) {
                         realSpur += (double)(s * cosf(phi));
                         imagSpur -= (double)(s * sinf(phi));
                     }
-                    spuriousPwr = (realSpur * realSpur + imagSpur * imagSpur) / (winNorm * winNorm);
-
+                    const double spuriousPwr = (realSpur * realSpur + imagSpur * imagSpur) / (winNorm * winNorm);
                     const double spuriousRatio = (carrierPwr > 1e-12) ? (spuriousPwr / carrierPwr) : 0.0;
-                    CHECK(spuriousRatio < 0.0001); /* < -40 dB */
+                    CHECK(spuriousRatio < 0.0001); /* Rejection > 40 dB */
                 }
-
-                CHECK(carrierPwr > 1e-6);
-                CHECK(isfinite(carrierPwr));
             }
         }
 
@@ -1679,7 +2009,10 @@ int main(void) {
     RUN_TEST(test_bbd_character_automation_smoothness);
     RUN_TEST(test_bbd_character_fast_slow_modulation);
     RUN_TEST(test_bbd_character_sample_rates);
-    RUN_TEST(test_bbd_character_block_size_invariance);
+    RUN_TEST(test_bbd_character_dsp_core_block_invariance);
+    RUN_TEST(test_bbd_character_host_block_segmentation);
+    RUN_TEST(test_bbd_character_block_boundary_discontinuity);
+    RUN_TEST(test_bbd_character_clock_interpolation_accuracy);
     RUN_TEST(test_bbd_character_reset_clean);
     RUN_TEST(test_bbd_character_silence_input);
     RUN_TEST(test_bbd_character_dc_protection);
