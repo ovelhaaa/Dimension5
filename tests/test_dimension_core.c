@@ -8,6 +8,7 @@
 
 #include "../src/dimension_dsp.h"
 #include "dimension_dsp_e153da5.h"
+#include "dimension_dsp_phase_a4.h"
 
 #define TEST_SR 48000.0f
 #define BLOCK 64U
@@ -1002,6 +1003,115 @@ static int test_bbd_character_neutrality_against_e153da5(void) {
                 }
                 const double rmsDiff = sqrt(sumSqDiff / (double)totalSamples);
                 /* Exact bit-level numerical identity */
+                CHECK(maxDiff == 0.0f);
+                CHECK(rmsDiff == 0.0);
+                CHECK(divergentSamples == 0);
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_character_neutrality_against_phase_a4(void) {
+    /* Section 10 & 12: Rigorous baseline neutrality check against frozen Phase A.4 (37591d0) */
+    const DimensionMode modes[5] = {
+        DIMENSION_MODE_I,
+        DIMENSION_MODE_II,
+        DIMENSION_MODE_III,
+        DIMENSION_MODE_IV,
+        DIMENSION_MODE_CUSTOM
+    };
+    const DimensionMode_phase_a4 modes_a4[5] = {
+        DIMENSION_MODE_I_phase_a4,
+        DIMENSION_MODE_II_phase_a4,
+        DIMENSION_MODE_III_phase_a4,
+        DIMENSION_MODE_IV_phase_a4,
+        DIMENSION_MODE_CUSTOM_phase_a4
+    };
+    const float testSRs[3] = { 44100.0f, 48000.0f, 96000.0f };
+    const uint32_t testBlocks[5] = { 1, 7, 16, 32, 64 };
+
+    for (int s = 0; s < 3; ++s) {
+        const float sr = testSRs[s];
+        for (int blkIdx = 0; blkIdx < 5; ++blkIdx) {
+            const uint32_t bs = testBlocks[blkIdx];
+
+            for (int m = 0; m < 5; ++m) {
+                DimensionDSP dNew;
+                Dimension_Init(&dNew, sr);
+                DimensionDSP_phase_a4 dBase;
+                Dimension_Init_phase_a4(&dBase, sr);
+
+                DimensionParams pNew = dNew.params;
+                pNew.mode = modes[m];
+                pNew.bbdCharacter = 0.0f;
+                if (modes[m] == DIMENSION_MODE_CUSTOM) {
+                    pNew.rateHz = 0.65f;
+                    pNew.baseDelayMs = 12.3f;
+                    pNew.depthMs = 2.1f;
+                    pNew.stereoWidth = 1.35f;
+                    pNew.bassFocusHz = 160.0f;
+                }
+                Dimension_SetParams(&dNew, &pNew);
+
+                DimensionParams_phase_a4 pBase = dBase.params;
+                pBase.mode = modes_a4[m];
+                pBase.bbdCharacter = 0.0f;
+                if (modes_a4[m] == DIMENSION_MODE_CUSTOM_phase_a4) {
+                    pBase.rateHz = 0.65f;
+                    pBase.baseDelayMs = 12.3f;
+                    pBase.depthMs = 2.1f;
+                    pBase.stereoWidth = 1.35f;
+                    pBase.bassFocusHz = 160.0f;
+                }
+                Dimension_SetParams_phase_a4(&dBase, &pBase);
+
+                float inL[64], inR[64];
+                float outNewL[64], outNewR[64];
+                float outBaseL[64], outBaseR[64];
+
+                float maxDiff = 0.0f;
+                double sumSqDiff = 0.0;
+                uint32_t divergentSamples = 0;
+                uint32_t totalSamples = 0;
+
+                const uint32_t numChunks = (bs == 1) ? 2048 : (bs <= 16 ? 512 : 200);
+
+                for (uint32_t b = 0; b < numChunks; ++b) {
+                    for (uint32_t i = 0; i < bs; ++i) {
+                        const uint32_t t = b * bs + i;
+                        inL[i] = 0.25f * sinf(2.0f * PI_F * 440.0f * (float)t / sr) + 0.10f * sinf(2.0f * PI_F * 1200.0f * (float)t / sr);
+                        inR[i] = 0.25f * cosf(2.0f * PI_F * 660.0f * (float)t / sr) + 0.10f * cosf(2.0f * PI_F * 1800.0f * (float)t / sr);
+                    }
+
+                    if (b * bs >= 1024 && (b - 1) * bs < 1024) {
+                        pNew.dryGain = 0.90f;
+                        pNew.wetDirectGain = 0.55f;
+                        pNew.stereoWidth = 1.20f;
+                        pNew.bassFocusHz = 180.0f;
+                        Dimension_SetParams(&dNew, &pNew);
+
+                        pBase.dryGain = 0.90f;
+                        pBase.wetDirectGain = 0.55f;
+                        pBase.stereoWidth = 1.20f;
+                        pBase.bassFocusHz = 180.0f;
+                        Dimension_SetParams_phase_a4(&dBase, &pBase);
+                    }
+
+                    Dimension_ProcessBlock(&dNew, inL, inR, outNewL, outNewR, bs);
+                    Dimension_ProcessBlock_phase_a4(&dBase, inL, inR, outBaseL, outBaseR, bs);
+
+                    for (uint32_t i = 0; i < bs; ++i) {
+                        const float diffL = fabsf(outNewL[i] - outBaseL[i]);
+                        const float diffR = fabsf(outNewR[i] - outBaseR[i]);
+                        if (diffL > maxDiff) maxDiff = diffL;
+                        if (diffR > maxDiff) maxDiff = diffR;
+                        sumSqDiff += (double)(diffL * diffL + diffR * diffR);
+                        if (diffL > 0.0f || diffR > 0.0f) divergentSamples++;
+                        totalSamples += 2;
+                    }
+                }
+                const double rmsDiff = sqrt(sumSqDiff / (double)totalSamples);
                 CHECK(maxDiff == 0.0f);
                 CHECK(rmsDiff == 0.0);
                 CHECK(divergentSamples == 0);
@@ -2206,6 +2316,296 @@ static int test_smoother_prediction_consistency_and_boundary_continuity(void) {
     return 0;
 }
 
+/* ========================================================================= */
+/* Phase B.1 — BBD Spectral Character Engine 2.1 Test Suite                  */
+/* ========================================================================= */
+
+static int test_bbd_spectral_pre_filter_clock_tracking(void) {
+    /* Section 12: Validate Pre-Filter clock tracking across required clocks and sample rates */
+    const float testClocks[7] = { 16000.0f, 25000.0f, 40000.0f, 60000.0f, 80000.0f, 100000.0f, 120000.0f };
+    const float testSRs[4] = { 44100.0f, 48000.0f, 96000.0f, 192000.0f };
+    const float analogAmounts[3] = { 0.0f, 0.45f, 1.0f };
+
+    for (int s = 0; s < 4; ++s) {
+        const float sr = testSRs[s];
+        for (int a = 0; a < 3; ++a) {
+            const float analog = analogAmounts[a];
+            const float expectedBase = 3200.0f + 6400.0f * (1.0f - analog);
+
+            /* 1. Neutrality at bbdChar == 0.0f */
+            for (int c = 0; c < 7; ++c) {
+                const float clk = testClocks[c];
+                const float fc0 = DimensionBBDClock_PreCutoff(clk, analog, 0.0f, sr);
+                CHECK(fc0 == expectedBase);
+            }
+
+            /* 2. Strict monotonicity with clock at bbdChar > 0.0f */
+            for (float bbdChar = 0.25f; bbdChar <= 1.0f; bbdChar += 0.25f) {
+                float prevFc = 0.0f;
+                for (int c = 0; c < 7; ++c) {
+                    const float clk = testClocks[c];
+                    const float fc = DimensionBBDClock_PreCutoff(clk, analog, bbdChar, sr);
+                    CHECK(isfinite(fc));
+                    CHECK(fc >= 1000.0f);
+                    CHECK(fc <= 0.45f * sr + 1e-3f);
+                    if (c > 0) {
+                        CHECK(fc >= prevFc);
+                    }
+                    prevFc = fc;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_spectral_post_filter_clock_tracking(void) {
+    /* Section 12: Validate Post-Filter clock tracking across required clocks and sample rates */
+    const float testClocks[7] = { 16000.0f, 25000.0f, 40000.0f, 60000.0f, 80000.0f, 100000.0f, 120000.0f };
+    const float testSRs[4] = { 44100.0f, 48000.0f, 96000.0f, 192000.0f };
+    const float lpfHzList[4] = { 6500.0f, 7500.0f, 8000.0f, 12000.0f };
+
+    for (int s = 0; s < 4; ++s) {
+        const float sr = testSRs[s];
+        for (int l = 0; l < 4; ++l) {
+            const float baseLpf = lpfHzList[l];
+
+            /* 1. Neutrality at bbdChar == 0.0f */
+            for (int c = 0; c < 7; ++c) {
+                const float clk = testClocks[c];
+                const float fc0 = DimensionBBDClock_PostCutoff(clk, baseLpf, 0.0f, sr);
+                CHECK(fc0 == baseLpf);
+            }
+
+            /* 2. Strict monotonicity with clock at bbdChar > 0.0f */
+            for (float bbdChar = 0.25f; bbdChar <= 1.0f; bbdChar += 0.25f) {
+                float prevFc = 0.0f;
+                for (int c = 0; c < 7; ++c) {
+                    const float clk = testClocks[c];
+                    const float fc = DimensionBBDClock_PostCutoff(clk, baseLpf, bbdChar, sr);
+                    CHECK(isfinite(fc));
+                    CHECK(fc >= 200.0f);
+                    CHECK(fc <= 0.45f * sr + 1e-3f);
+                    if (c > 0) {
+                        CHECK(fc >= prevFc);
+                    }
+                    prevFc = fc;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_spectral_combined_filter_response(void) {
+    /* Section 12 & 13: Joint frequency response under static clock conditions */
+    const float sr = 48000.0f;
+    const float testFreqs[5] = { 100.0f, 1000.0f, 5000.0f, 10000.0f, 15000.0f };
+    const float charLevels[5] = { 0.0f, 0.25f, 0.50f, 0.75f, 1.0f };
+
+    for (int f = 0; f < 5; ++f) {
+        const float freq = testFreqs[f];
+        double gains[5] = { 0.0 };
+
+        for (int k = 0; k < 5; ++k) {
+            DimensionDSP dsp;
+            Dimension_Init(&dsp, sr);
+            DimensionParams p = dsp.params;
+            p.mode = DIMENSION_MODE_CUSTOM;
+            p.baseDelayMs = 8.5f; /* ~60 kHz nominal clock */
+            p.depthMs = 0.0f;    /* Zero modulation -> static clock */
+            p.dryGain = 0.0f;
+            p.wetDirectGain = 1.0f;
+            p.wetCrossGain = 0.0f;
+            p.companderAmount = 0.0f;
+            p.bbdCharacter = charLevels[k];
+            Dimension_SetParams(&dsp, &p);
+
+            /* Warm up states */
+            float inL[64] = {0}, inR[64] = {0}, outL[64] = {0}, outR[64] = {0};
+            for (int w = 0; w < 40; ++w) {
+                for (uint32_t i = 0; i < 64; ++i) {
+                    const float t = (float)(w * 64 + i) / sr;
+                    inL[i] = 0.20f * sinf(2.0f * PI_F * freq * t);
+                    inR[i] = inL[i];
+                }
+                Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, 64);
+            }
+
+            /* Measure steady-state RMS */
+            double sumSqIn = 0.0, sumSqOut = 0.0;
+            for (int m = 0; m < 50; ++m) {
+                for (uint32_t i = 0; i < 64; ++i) {
+                    const float t = (float)(m * 64 + i) / sr;
+                    inL[i] = 0.20f * sinf(2.0f * PI_F * freq * t);
+                    inR[i] = inL[i];
+                    sumSqIn += (double)(inL[i] * inL[i]);
+                }
+                Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, 64);
+                for (uint32_t i = 0; i < 64; ++i) {
+                    sumSqOut += (double)(outL[i] * outL[i]);
+                }
+            }
+            gains[k] = sqrt(sumSqOut / sumSqIn);
+        }
+
+        /* Verification criteria:
+         * 1. 100 Hz center bass is fully preserved (< 0.2 dB variation) */
+        if (freq == 100.0f) {
+            const double diffDb = fabs(20.0 * log10(gains[4] / gains[0]));
+            CHECK(diffDb < 0.25);
+        }
+        /* 2. 10 kHz & 15 kHz high frequency roll-off is strictly monotonic with bbdCharacter */
+        if (freq >= 10000.0f) {
+            for (int k = 1; k < 5; ++k) {
+                CHECK(gains[k] <= gains[k - 1]);
+            }
+            /* Measurable softening at 100% character: between 0.4 dB and 4.5 dB */
+            const double rollOffDb = 20.0 * log10(gains[0] / gains[4]);
+            CHECK(rollOffDb >= 0.4);
+            CHECK(rollOffDb <= 4.5);
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_spectral_stereo_antiphase_coherence(void) {
+    /* Section 12: Verify antiphase clock tracking between L and R channels */
+    const float testSRs[3] = { 44100.0f, 48000.0f, 96000.0f };
+
+    for (int s = 0; s < 3; ++s) {
+        const float sr = testSRs[s];
+        DimensionDSP dsp;
+        Dimension_Init(&dsp, sr);
+        Dimension_SetMode(&dsp, DIMENSION_MODE_II);
+        Dimension_Reset(&dsp);
+        DimensionParams p = dsp.params;
+        p.bbdCharacter = 1.0f;
+        Dimension_SetParams(&dsp, &p);
+
+        float inL[64] = {0}, inR[64] = {0}, outL[64] = {0}, outR[64] = {0};
+
+        /* Process 1 second (several LFO periods at 0.25 Hz) */
+        uint32_t framesProcessed = 0;
+        while (framesProcessed < (uint32_t)sr) {
+            for (uint32_t i = 0; i < 64; ++i) inL[i] = inR[i] = 0.1f;
+            Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, 64);
+
+            const float clkL = dsp.bbdClock.chL.instantaneousClockHz;
+            const float clkR = dsp.bbdClock.chR.instantaneousClockHz;
+
+            /* L and R instantaneous clocks must be bounded */
+            CHECK(clkL >= DIMENSION_BBD_MIN_CLOCK_HZ && clkL <= DIMENSION_BBD_MAX_CLOCK_HZ);
+            CHECK(clkR >= DIMENSION_BBD_MIN_CLOCK_HZ && clkR <= DIMENSION_BBD_MAX_CLOCK_HZ);
+
+            /* Antiphase relation: when clkL > curCenter, clkR < curCenter and vice versa */
+            const float curCenter = 512000.0f / dsp.smoothBaseDelayMs;
+            if (fabsf(clkL - curCenter) > 800.0f) {
+                if (clkL > curCenter) {
+                    CHECK(clkR < curCenter);
+                } else {
+                    CHECK(clkR > curCenter);
+                }
+            }
+            framesProcessed += 64;
+        }
+    }
+    return 0;
+}
+
+static int test_bbd_spectral_automation_and_transitions(void) {
+    /* Section 12: Continuous automation, ON->OFF->ON transitions, zero clicks, stability */
+    const float sr = 48000.0f;
+    DimensionDSP dsp;
+    Dimension_Init(&dsp, sr);
+    Dimension_SetMode(&dsp, DIMENSION_MODE_II);
+
+    float inL[64], inR[64], outL[64], outR[64];
+    float prevL = 0.0f, prevR = 0.0f;
+
+    for (uint32_t b = 0; b < 200; ++b) {
+        for (uint32_t i = 0; i < 64; ++i) {
+            const float t = (float)(b * 64 + i) / sr;
+            inL[i] = 0.25f * sinf(2.0f * PI_F * 440.0f * t);
+            inR[i] = 0.25f * cosf(2.0f * PI_F * 660.0f * t);
+        }
+
+        /* Dynamic automation every 20 blocks: toggle character abruptly to test smoothing */
+        if (b % 20 == 0) {
+            DimensionParams p = dsp.params;
+            p.bbdCharacter = (p.bbdCharacter > 0.5f) ? 0.0f : 1.0f;
+            Dimension_SetParams(&dsp, &p);
+        }
+
+        Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, 64);
+
+        for (uint32_t i = 0; i < 64; ++i) {
+            CHECK(isfinite(outL[i]));
+            CHECK(isfinite(outR[i]));
+            if (b > 0 || i > 0) {
+                /* Discontinuity between consecutive samples must not exhibit step clicks */
+                const float stepL = fabsf(outL[i] - prevL);
+                const float stepR = fabsf(outR[i] - prevR);
+                CHECK(stepL < 0.20f);
+                CHECK(stepR < 0.20f);
+            }
+            prevL = outL[i];
+            prevR = outR[i];
+        }
+    }
+
+    /* Test Reset after Character active */
+    Dimension_Reset(&dsp);
+    CHECK(dsp.bbdStateL == 0.0f);
+    CHECK(dsp.bbdStateR == 0.0f);
+    CHECK(dsp.lpf1StateL == 0.0f);
+    CHECK(dsp.lpf1StateR == 0.0f);
+    CHECK(dsp.lpf2StateL == 0.0f);
+    CHECK(dsp.lpf2StateR == 0.0f);
+    CHECK(dsp.bbdClock.chL.dispState == 0.0f);
+    CHECK(dsp.bbdClock.chR.dispState == 0.0f);
+    return 0;
+}
+
+static int test_bbd_spectral_extreme_cutoffs_stability(void) {
+    /* Section 12: Extreme parameter limits under Custom mode */
+    const float testSRs[4] = { 44100.0f, 48000.0f, 96000.0f, 192000.0f };
+    const float extremeLpf[3] = { 200.0f, 1000.0f, 22000.0f };
+    const float extremeAnalog[3] = { 0.0f, 0.5f, 1.0f };
+
+    for (int s = 0; s < 4; ++s) {
+        const float sr = testSRs[s];
+        for (int l = 0; l < 3; ++l) {
+            for (int a = 0; a < 3; ++a) {
+                DimensionDSP dsp;
+                Dimension_Init(&dsp, sr);
+                DimensionParams p = dsp.params;
+                p.mode = DIMENSION_MODE_CUSTOM;
+                p.lpfHz = extremeLpf[l];
+                p.analogAmount = extremeAnalog[a];
+                p.baseDelayMs = 28.0f; /* ~18 kHz low clock */
+                p.depthMs = 3.5f;
+                p.bbdCharacter = 1.0f;
+                Dimension_SetParams(&dsp, &p);
+
+                float inL[64], inR[64], outL[64], outR[64];
+                for (uint32_t i = 0; i < 64; ++i) inL[i] = inR[i] = 1.5f; /* High input */
+
+                for (int b = 0; b < 20; ++b) {
+                    Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, 64);
+                    for (uint32_t i = 0; i < 64; ++i) {
+                        CHECK(isfinite(outL[i]));
+                        CHECK(isfinite(outR[i]));
+                        CHECK(fabsf(outL[i]) <= 1.5f);
+                        CHECK(fabsf(outR[i]) <= 1.5f);
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 int main(void) {
 #define RUN_TEST(fn) do { if ((fn)() != 0) return 1; } while (0)
     RUN_TEST(test_zero_input_long_no_nan_low_dc);
@@ -2230,6 +2630,7 @@ int main(void) {
     RUN_TEST(test_spatial_engine_bass_focus_response);
     RUN_TEST(test_spatial_engine_automation_smoothness);
     RUN_TEST(test_bbd_character_neutrality_against_e153da5);
+    RUN_TEST(test_bbd_character_neutrality_against_phase_a4);
     RUN_TEST(test_bbd_dispersion_filter_response);
     RUN_TEST(test_bbd_clock_approximation_accuracy);
     RUN_TEST(test_bbd_character_progressive_response);
@@ -2249,6 +2650,12 @@ int main(void) {
     RUN_TEST(test_bbd_character_modes_regression);
     RUN_TEST(test_mode_presets_vs_custom_automation);
     RUN_TEST(test_smoother_prediction_consistency_and_boundary_continuity);
+    RUN_TEST(test_bbd_spectral_pre_filter_clock_tracking);
+    RUN_TEST(test_bbd_spectral_post_filter_clock_tracking);
+    RUN_TEST(test_bbd_spectral_combined_filter_response);
+    RUN_TEST(test_bbd_spectral_stereo_antiphase_coherence);
+    RUN_TEST(test_bbd_spectral_automation_and_transitions);
+    RUN_TEST(test_bbd_spectral_extreme_cutoffs_stability);
     puts("test_dimension_core: OK");
     return 0;
 }

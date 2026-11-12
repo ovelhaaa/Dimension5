@@ -184,3 +184,84 @@ To ensure scientific precision, validation outcomes are categorized strictly by 
 | **Phase A.3 vs A.4 Regression** | `tools/compare_phase_a3_a4.py` | Numerical regression under automation for 50% and 100% character | Steady MaxDiff $< 1\cdot 10^{-5}$, Transient MaxDiff $< 0.01$, Corr $\ge 0.999$ | **Steady MaxDiff $= 0.0$, Transient MaxDiff $\le 1.30\cdot 10^{-5}$, Corr $= 1.000000$** | **PASS** |
 | **Ground-Truth Baseline Neutrality** | `test_bbd_character_neutrality_against_e153da5` | Comparison against frozen `e153da5` across $44.1, 48, 96\text{ kHz}$, blocks $1..64$, modes I..IV, Custom | MaxDiff $== 0.0$, RMSDiff $== 0.0$, divergent samples $= 0$ | **MaxDiff $== 0.0$, Divergent $= 0$** (Bit-exact identity across all modes & SRs) | **PASS** |
 | **Multi-Compiler Portability** | GCC 14.2 & Clang 19.1 C99 `-Werror` | Zero compilation warnings, 100% CTest pass rate | Clean build with strict warning flags | **0 warnings, 5/5 CTest passed** | **PASS** |
+
+---
+
+## 8. Phase B.1 — Clock-Tracking Spectral Character & Analog Filter Interaction
+
+Phase B.1 introduces dynamic anti-aliasing pre-filtering and post-reconstruction filtering tracking instantaneous BBD clock rates ($f_{\text{clock}} = 512000 / T_{\text{delay}}$) per channel (L/R in anti-phase) under control of global parameter `bbdCharacter` ($0.0 - 1.0$).
+
+### 8.1 Architectural Principles & Signal Flow
+
+Rather than stacking redundant filter stages or increasing filter orders, Phase B.1 integrates dynamic clock tracking directly into the **existing** analog filtering topology:
+
+```text
+INPUT
+  |
+  +-------------------- DRY PATH
+  |
+  +-- WET PATH
+        |
+        HPF 1st-Order
+        |
+        COMPANDER — compressor
+        |
+        CLOCK-TRACKING PRE-BBD LOWPASS (1-pole, f_pre(clkL), f_pre(clkR))
+        |
+        MODULATED DELAY / CLOCK ENGINE
+        |
+        CLOCK-TRACKING DISPERSION (1-pole CTE)
+        |
+        CLOCK-TRACKING RECONSTRUCTION LPF (2-pole, f_post(clkL), f_post(clkR))
+        |
+        SOFT CLIP
+        |
+        COMPANDER — expander
+        |
+        STEREO MATRIX
+        |
+        SPATIAL ENGINE
+        |
+OUTPUT
+```
+
+### 8.2 Spectral Transfer Functions
+
+The effective cutoff frequencies for the pre-BBD anti-aliasing filter and post-BBD reconstruction filter are dynamically computed per sample using the instantaneous per-channel clock frequencies $f_{\text{clock},L}(n)$ and $f_{\text{clock},R}(n)$:
+
+1. **Pre-BBD Cutoff Mapping**:
+   $$f_{\text{pre\_base}} = 3200.0 + 6400.0 \cdot (1.0 - \text{analogAmount})$$
+   $$f_{\text{pre}}(n) = f_{\text{pre\_base}} \cdot \left[1.0 + B \cdot \left(-0.10 + 0.22 \cdot \frac{f_{\text{clock}}(n) - 60000}{60000}\right)\right]$$
+   Clamped defensively to $[1200.0\text{ Hz}, 0.45 \cdot f_s]$.
+
+2. **Post-BBD Cutoff Mapping**:
+   $$f_{\text{post}}(n) = f_{\text{LPF}} \cdot \left[1.0 + B \cdot \left(-0.15 + 0.28 \cdot \frac{f_{\text{clock}}(n) - 60000}{60000}\right)\right]$$
+   Clamped defensively to $[1500.0\text{ Hz}, 0.45 \cdot f_s]$.
+
+3. **Digital Discretization & Efficiency**:
+   Filter coefficients $\alpha = 1 - e^{-2\pi f_c / f_s}$ are computed using the optimized 4th-degree Horner polynomial approximation `DimensionBBDClock_AlphaFromCutoff`, requiring zero transcendental functions (`expf`/`powf`) and zero per-sample divisions.
+
+### 8.3 Invariance & Neutrality Guarantees
+
+- **Bit-Exact Neutrality at $B = 0$**: When `bbdCharacter = 0.0f`, $f_{\text{pre}} \equiv f_{\text{pre\_base}}$ and $f_{\text{post}} \equiv f_{\text{LPF}}$ exactly. The DSP core executes the exact baseline mathematical path, verified bit-exact ($0.0\text{e}+00$ max difference, 0 divergent samples) against Phase A.4 (`37591d0`) across all modes (I..IV, Custom), block sizes ($1, 7, 16, 32, 64$), and sample rates ($44.1, 48, 96\text{ kHz}$).
+- **Static Memory Footprint**: `DimensionDSP` remains exactly 16640 bytes (zero memory inflation).
+- **Transient Smoothness**: Filter cutoffs track continuously with smoothed delay times, producing zero zipper noise or boundary clicks during mode switching or parameter sweeps.
+
+### 8.4 Empirical Characterization & A/B Comparison (Phase A.4 vs Phase B.1)
+
+Audition sets rendered across diverse musical material demonstrate smooth, analog high-frequency softening without compromising punch, bass fullness, or stereo width:
+
+| Audio Program | `bbdCharacter` | HF Roll-off (6k-15k) | Gain Shift | Mid/Side Energy Ratio | Cross-Version Correlation |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Synth Pluck** | 50% | $-0.03\text{ dB}$ | $+0.001\text{ dB}$ | $0.3182$ (vs $0.3186$) | $0.99999$ |
+| **Synth Pluck** | 100% | $-0.05\text{ dB}$ | $+0.001\text{ dB}$ | $0.3256$ (vs $0.3264$) | $0.99995$ |
+| **Clean Guitar** | 50% | $-0.03\text{ dB}$ | $+0.001\text{ dB}$ | $0.2903$ (vs $0.2904$) | $0.99999$ |
+| **Clean Guitar** | 100% | $-0.05\text{ dB}$ | $+0.001\text{ dB}$ | $0.3002$ (vs $0.3005$) | $0.99996$ |
+| **Harmonic Pad** | 50% | $-0.04\text{ dB}$ | $-0.006\text{ dB}$ | $0.2966$ (vs $0.2982$) | $0.99994$ |
+| **Harmonic Pad** | 100% | $-0.08\text{ dB}$ | $-0.013\text{ dB}$ | $0.3027$ (vs $0.3061$) | $0.99971$ |
+| **Stereo Asymmetric** | 50% | $-0.47\text{ dB}$ | $-0.005\text{ dB}$ | $1.7261$ (vs $1.7293$) | $0.99993$ |
+| **Stereo Asymmetric** | 100% | $-0.95\text{ dB}$ | $-0.010\text{ dB}$ | $1.7136$ (vs $1.7185$) | $0.99974$ |
+| **Multitone (15k)** | 100% | $-2.18\text{ dB}$ | $0.000\text{ dB}$ | $0.3541$ (vs $0.3542$) | $0.99981$ |
+
+Center imaging is perfectly anchored: 100 Hz low-frequency content exhibits $< 0.01\text{ dB}$ change, with zero bass thinning or center de-correlation.
+

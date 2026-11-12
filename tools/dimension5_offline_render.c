@@ -1,5 +1,6 @@
 #include "dimension_dsp.h"
 #include "dimension_dsp_e153da5.h"
+#include "dimension_dsp_phase_a4.h"
 
 #include <errno.h>
 #include <math.h>
@@ -109,8 +110,89 @@ static void render_mode(int mode, const char* out_dir) {
 typedef enum SignalKind {
     SIG_KIND_SYNTH_PLUCK = 0,
     SIG_KIND_MULTITONE,
-    SIG_KIND_IMPULSES
+    SIG_KIND_IMPULSES,
+    SIG_KIND_GUITAR_CLEAN,
+    SIG_KIND_SYNTH_PAD,
+    SIG_KIND_STEREO_ASYM
 } SignalKind;
+
+static void synthesize_signal(SignalKind kind, uint32_t t, uint32_t sr, uint32_t* localRng, float* xL, float* xR) {
+    const float tSec = (float)t / (float)sr;
+    switch (kind) {
+        case SIG_KIND_SYNTH_PLUCK: {
+            const float f0 = 220.0f;
+            const float env = expf(-fmodf(tSec, 1.0f) * 3.5f);
+            const float body = 0.22f * sinf(2.0f * PI_F * f0 * tSec) +
+                               0.12f * sinf(2.0f * PI_F * 2.0f * f0 * tSec) +
+                               0.06f * sinf(2.0f * PI_F * 3.0f * f0 * tSec) +
+                               0.03f * sinf(2.0f * PI_F * 5.0f * f0 * tSec);
+            *localRng = *localRng * 1664525u + 1013904223u;
+            const float nz = 0.015f * (((float)((*localRng >> 8) & 0xFFFFFFu) / 8388608.0f) - 1.0f);
+            *xL = (body + nz) * env;
+            *xR = *xL;
+            break;
+        }
+        case SIG_KIND_MULTITONE: {
+            const float m = 0.12f * sinf(2.0f * PI_F * 300.0f * tSec) +
+                            0.10f * sinf(2.0f * PI_F * 1200.0f * tSec) +
+                            0.06f * sinf(2.0f * PI_F * 4500.0f * tSec);
+            *xL = m;
+            *xR = m;
+            break;
+        }
+        case SIG_KIND_IMPULSES: {
+            *xL = (t % 2400 == 0) ? 0.75f : 0.0f;
+            *xR = (t % 2400 == 1200) ? 0.75f : 0.0f;
+            break;
+        }
+        case SIG_KIND_GUITAR_CLEAN: {
+            /* Clean electric guitar arpeggio with percussive attack snap & warm sustain */
+            const float cycleSec = fmodf(tSec, 1.333f);
+            const float strikeEnv = expf(-cycleSec * 16.0f);
+            const float ringEnv = expf(-cycleSec * 2.2f);
+            /* Chord: C3, G3, E4, B4, D5 (rich harmonic chord voicing) */
+            const float g = 0.22f * sinf(2.0f * PI_F * 130.81f * tSec) * ringEnv +
+                            0.20f * sinf(2.0f * PI_F * 196.00f * tSec) * ringEnv +
+                            0.16f * sinf(2.0f * PI_F * 329.63f * tSec) * ringEnv +
+                            0.12f * sinf(2.0f * PI_F * 493.88f * tSec) * ringEnv +
+                            0.08f * sinf(2.0f * PI_F * 587.33f * tSec) * ringEnv;
+            *localRng = *localRng * 1664525u + 1013904223u;
+            const float pickNoise = 0.045f * (((float)((*localRng >> 8) & 0xFFFFFFu) / 8388608.0f) - 1.0f) * strikeEnv;
+            *xL = g + pickNoise;
+            *xR = *xL;
+            break;
+        }
+        case SIG_KIND_SYNTH_PAD: {
+            /* Warm analog synth pad with saw/pulse harmonics up to 8 kHz */
+            const float swell = 0.5f + 0.5f * sinf(2.0f * PI_F * 0.5f * tSec - 0.5f * PI_F);
+            float pad = 0.20f * sinf(2.0f * PI_F * 164.81f * tSec) +
+                        0.16f * sinf(2.0f * PI_F * 329.63f * tSec) +
+                        0.14f * sinf(2.0f * PI_F * 493.88f * tSec) +
+                        0.12f * sinf(2.0f * PI_F * 659.25f * tSec) +
+                        0.10f * sinf(2.0f * PI_F * 987.77f * tSec) +
+                        0.08f * sinf(2.0f * PI_F * 1318.5f * tSec) +
+                        0.06f * sinf(2.0f * PI_F * 1975.5f * tSec) +
+                        0.05f * sinf(2.0f * PI_F * 2637.0f * tSec) +
+                        0.04f * sinf(2.0f * PI_F * 3951.0f * tSec) +
+                        0.03f * sinf(2.0f * PI_F * 5274.0f * tSec) +
+                        0.02f * sinf(2.0f * PI_F * 7902.0f * tSec);
+            *xL = pad * (0.35f + 0.65f * swell);
+            *xR = *xL;
+            break;
+        }
+        case SIG_KIND_STEREO_ASYM: {
+            /* Asymmetric stereo signal: Low-mid base on L, high arpeggio on R */
+            *xL = 0.25f * sinf(2.0f * PI_F * 220.0f * tSec) +
+                  0.18f * sinf(2.0f * PI_F * 440.0f * tSec) +
+                  0.10f * sinf(2.0f * PI_F * 880.0f * tSec);
+            *xR = 0.18f * sinf(2.0f * PI_F * 660.0f * tSec) +
+                  0.14f * sinf(2.0f * PI_F * 1320.0f * tSec) +
+                  0.08f * sinf(2.0f * PI_F * 2640.0f * tSec) +
+                  0.05f * sinf(2.0f * PI_F * 5280.0f * tSec);
+            break;
+        }
+    }
+}
 
 static void render_bbd_character_variation(
     float bbdChar,
@@ -142,44 +224,73 @@ static void render_bbd_character_variation(
     for (uint32_t pos = 0; pos < frames; pos += BLOCK) {
         const uint32_t n = (frames - pos > BLOCK) ? BLOCK : frames - pos;
         for (uint32_t i = 0; i < n; ++i) {
-            const uint32_t t = pos + i;
-            float xL = 0.0f, xR = 0.0f;
-
-            switch (kind) {
-                case SIG_KIND_SYNTH_PLUCK: {
-                    const float f0 = 220.0f;
-                    const float tSec = (float)t / (float)sr;
-                    const float env = expf(-fmodf(tSec, 1.0f) * 3.5f);
-                    const float body = 0.22f * sinf(2.0f * PI_F * f0 * tSec) +
-                                       0.12f * sinf(2.0f * PI_F * 2.0f * f0 * tSec) +
-                                       0.06f * sinf(2.0f * PI_F * 3.0f * f0 * tSec) +
-                                       0.03f * sinf(2.0f * PI_F * 5.0f * f0 * tSec);
-                    localRng = localRng * 1664525u + 1013904223u;
-                    const float nz = 0.015f * (((float)((localRng >> 8) & 0xFFFFFFu) / 8388608.0f) - 1.0f);
-                    xL = (body + nz) * env;
-                    xR = xL;
-                    break;
-                }
-                case SIG_KIND_MULTITONE: {
-                    const float tSec = (float)t / (float)sr;
-                    const float m = 0.12f * sinf(2.0f * PI_F * 300.0f * tSec) +
-                                    0.10f * sinf(2.0f * PI_F * 1200.0f * tSec) +
-                                    0.06f * sinf(2.0f * PI_F * 4500.0f * tSec);
-                    xL = m;
-                    xR = m;
-                    break;
-                }
-                case SIG_KIND_IMPULSES: {
-                    xL = (t % 2400 == 0) ? 0.75f : 0.0f;
-                    xR = (t % 2400 == 1200) ? 0.75f : 0.0f;
-                    break;
-                }
-            }
-
-            inL[i] = xL;
-            inR[i] = xR;
+            synthesize_signal(kind, pos + i, sr, &localRng, &inL[i], &inR[i]);
         }
         Dimension_ProcessBlock(&d, inL, inR, outL, outR, n);
+        for (uint32_t i = 0; i < n; ++i) {
+            left[pos + i] = outL[i];
+            right[pos + i] = outR[i];
+            const float m = 0.5f * (outL[i] + outR[i]);
+            const float a = fabsf(m);
+            if (a > st.peak) st.peak = a;
+            st.sum += (double)m;
+            st.energy += (double)m * (double)m;
+        }
+    }
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", out_dir, filename);
+    if (write_wav(path, left, right, frames, sr) != 0) {
+        fprintf(stderr, "failed to write %s\n", path);
+        exit(3);
+    }
+    char pathF32[256];
+    char baseName[128];
+    memset(baseName, 0, sizeof(baseName));
+    strncpy(baseName, filename, sizeof(baseName) - 1);
+    char* dot = strrchr(baseName, '.');
+    if (dot) *dot = '\0';
+    snprintf(pathF32, sizeof(pathF32), "%s/%s_f32.wav", out_dir, baseName);
+    write_wav_float32(pathF32, left, right, frames, sr);
+
+    printf("%s peak=%.4f dc=%.6f rms=%.4f\n", path, (double)st.peak, st.sum / (double)frames, sqrt(st.energy / (double)frames));
+    free(left);
+    free(right);
+}
+
+static void render_phase_a4_variation(
+    float bbdChar,
+    int wetOnly,
+    SignalKind kind,
+    const char* filename,
+    const char* out_dir) {
+    const uint32_t sr = SR_DEFAULT;
+    const uint32_t frames = sr * SECONDS_SMOKE;
+    float* left = (float*)calloc(frames, sizeof(float));
+    float* right = (float*)calloc(frames, sizeof(float));
+    if (!left || !right) { free(left); free(right); fprintf(stderr, "allocation failed\n"); exit(2); }
+
+    DimensionDSP_phase_a4 d;
+    Dimension_Init_phase_a4(&d, (float)sr);
+    Dimension_SetMode_phase_a4(&d, DIMENSION_MODE_II_phase_a4);
+    DimensionParams_phase_a4 p = d.params;
+    p.bbdCharacter = bbdChar;
+    if (wetOnly) {
+        p.mode = DIMENSION_MODE_CUSTOM_phase_a4;
+        p.dryGain = 0.0f;
+    }
+    Dimension_SetParams_phase_a4(&d, &p);
+
+    float inL[BLOCK], inR[BLOCK], outL[BLOCK], outR[BLOCK];
+    Stats st = {0.0f, 0.0, 0.0};
+    uint32_t localRng = 0x12345678u;
+
+    for (uint32_t pos = 0; pos < frames; pos += BLOCK) {
+        const uint32_t n = (frames - pos > BLOCK) ? BLOCK : frames - pos;
+        for (uint32_t i = 0; i < n; ++i) {
+            synthesize_signal(kind, pos + i, sr, &localRng, &inL[i], &inR[i]);
+        }
+        Dimension_ProcessBlock_phase_a4(&d, inL, inR, outL, outR, n);
         for (uint32_t i = 0; i < n; ++i) {
             left[pos + i] = outL[i];
             right[pos + i] = outR[i];
@@ -416,21 +527,83 @@ int main(int argc, char** argv) {
     render_e153da5_baseline(out_dir);
 
     printf("\n=== RENDERING BBD CHARACTER ENGINE 2.1 SUITE ===\n");
+    /* Full Mix Pluck */
     render_bbd_character_variation(0.00f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_000.wav", out_dir);
     render_bbd_character_variation(0.25f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_025.wav", out_dir);
     render_bbd_character_variation(0.50f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_050.wav", out_dir);
     render_bbd_character_variation(0.75f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_075.wav", out_dir);
     render_bbd_character_variation(1.00f, 0, SIG_KIND_SYNTH_PLUCK, "bbd_character_100.wav", out_dir);
 
+    /* Wet-Only Pluck */
     render_bbd_character_variation(0.00f, 1, SIG_KIND_SYNTH_PLUCK, "bbd_character_000_wet.wav", out_dir);
+    render_bbd_character_variation(0.25f, 1, SIG_KIND_SYNTH_PLUCK, "bbd_character_025_wet.wav", out_dir);
     render_bbd_character_variation(0.50f, 1, SIG_KIND_SYNTH_PLUCK, "bbd_character_050_wet.wav", out_dir);
+    render_bbd_character_variation(0.75f, 1, SIG_KIND_SYNTH_PLUCK, "bbd_character_075_wet.wav", out_dir);
     render_bbd_character_variation(1.00f, 1, SIG_KIND_SYNTH_PLUCK, "bbd_character_100_wet.wav", out_dir);
 
+    /* Multitone */
     render_bbd_character_variation(0.00f, 0, SIG_KIND_MULTITONE,   "bbd_multitone_000.wav", out_dir);
+    render_bbd_character_variation(0.25f, 0, SIG_KIND_MULTITONE,   "bbd_multitone_025.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_MULTITONE,   "bbd_multitone_050.wav", out_dir);
+    render_bbd_character_variation(0.75f, 0, SIG_KIND_MULTITONE,   "bbd_multitone_075.wav", out_dir);
     render_bbd_character_variation(1.00f, 0, SIG_KIND_MULTITONE,   "bbd_multitone_100.wav", out_dir);
 
+    /* Impulses */
     render_bbd_character_variation(0.00f, 0, SIG_KIND_IMPULSES,    "bbd_impulses_000.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_IMPULSES,    "bbd_impulses_050.wav", out_dir);
     render_bbd_character_variation(1.00f, 0, SIG_KIND_IMPULSES,    "bbd_impulses_100.wav", out_dir);
+
+    /* Clean Guitar Material */
+    render_bbd_character_variation(0.00f, 0, SIG_KIND_GUITAR_CLEAN, "bbd_guitar_000.wav", out_dir);
+    render_bbd_character_variation(0.25f, 0, SIG_KIND_GUITAR_CLEAN, "bbd_guitar_025.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_GUITAR_CLEAN, "bbd_guitar_050.wav", out_dir);
+    render_bbd_character_variation(0.75f, 0, SIG_KIND_GUITAR_CLEAN, "bbd_guitar_075.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_GUITAR_CLEAN, "bbd_guitar_100.wav", out_dir);
+
+    /* Harmonic Synth Pad Material */
+    render_bbd_character_variation(0.00f, 0, SIG_KIND_SYNTH_PAD,    "bbd_synth_pad_000.wav", out_dir);
+    render_bbd_character_variation(0.25f, 0, SIG_KIND_SYNTH_PAD,    "bbd_synth_pad_025.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_SYNTH_PAD,    "bbd_synth_pad_050.wav", out_dir);
+    render_bbd_character_variation(0.75f, 0, SIG_KIND_SYNTH_PAD,    "bbd_synth_pad_075.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_SYNTH_PAD,    "bbd_synth_pad_100.wav", out_dir);
+
+    /* Stereo Asymmetric Spatial Material */
+    render_bbd_character_variation(0.00f, 0, SIG_KIND_STEREO_ASYM,  "bbd_stereo_asym_000.wav", out_dir);
+    render_bbd_character_variation(0.25f, 0, SIG_KIND_STEREO_ASYM,  "bbd_stereo_asym_025.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_STEREO_ASYM,  "bbd_stereo_asym_050.wav", out_dir);
+    render_bbd_character_variation(0.75f, 0, SIG_KIND_STEREO_ASYM,  "bbd_stereo_asym_075.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_STEREO_ASYM,  "bbd_stereo_asym_100.wav", out_dir);
+
+    printf("\n=== RENDERING PHASE A.4 vs PHASE B.1 A/B AUDITION SUITE ===\n");
+    /* Synth Pluck A/B */
+    render_phase_a4_variation(0.50f, 0, SIG_KIND_SYNTH_PLUCK, "ab_phase_a4_char050_synth.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_SYNTH_PLUCK, "ab_phase_b1_char050_synth.wav", out_dir);
+    render_phase_a4_variation(1.00f, 0, SIG_KIND_SYNTH_PLUCK, "ab_phase_a4_char100_synth.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_SYNTH_PLUCK, "ab_phase_b1_char100_synth.wav", out_dir);
+
+    /* Clean Guitar A/B */
+    render_phase_a4_variation(0.50f, 0, SIG_KIND_GUITAR_CLEAN, "ab_phase_a4_char050_guitar.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_GUITAR_CLEAN, "ab_phase_b1_char050_guitar.wav", out_dir);
+    render_phase_a4_variation(1.00f, 0, SIG_KIND_GUITAR_CLEAN, "ab_phase_a4_char100_guitar.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_GUITAR_CLEAN, "ab_phase_b1_char100_guitar.wav", out_dir);
+
+    /* Harmonic Synth Pad A/B */
+    render_phase_a4_variation(0.50f, 0, SIG_KIND_SYNTH_PAD, "ab_phase_a4_char050_pad.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_SYNTH_PAD, "ab_phase_b1_char050_pad.wav", out_dir);
+    render_phase_a4_variation(1.00f, 0, SIG_KIND_SYNTH_PAD, "ab_phase_a4_char100_pad.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_SYNTH_PAD, "ab_phase_b1_char100_pad.wav", out_dir);
+
+    /* Stereo Asymmetric Spatial A/B */
+    render_phase_a4_variation(0.50f, 0, SIG_KIND_STEREO_ASYM, "ab_phase_a4_char050_stereo.wav", out_dir);
+    render_bbd_character_variation(0.50f, 0, SIG_KIND_STEREO_ASYM, "ab_phase_b1_char050_stereo.wav", out_dir);
+    render_phase_a4_variation(1.00f, 0, SIG_KIND_STEREO_ASYM, "ab_phase_a4_char100_stereo.wav", out_dir);
+    render_bbd_character_variation(1.00f, 0, SIG_KIND_STEREO_ASYM, "ab_phase_b1_char100_stereo.wav", out_dir);
+
+    /* Wet-Only A/B */
+    render_phase_a4_variation(0.50f, 1, SIG_KIND_SYNTH_PAD, "ab_phase_a4_char050_wet.wav", out_dir);
+    render_bbd_character_variation(0.50f, 1, SIG_KIND_SYNTH_PAD, "ab_phase_b1_char050_wet.wav", out_dir);
+    render_phase_a4_variation(1.00f, 1, SIG_KIND_SYNTH_PAD, "ab_phase_a4_char100_wet.wav", out_dir);
+    render_bbd_character_variation(1.00f, 1, SIG_KIND_SYNTH_PAD, "ab_phase_b1_char100_wet.wav", out_dir);
 
     if (render_spectral) {
         render_all_spectral_fixtures(out_dir);

@@ -62,6 +62,10 @@ typedef struct DimensionBBDClock {
     DimensionBBDClockChannel chR;
 } DimensionBBDClock;
 
+static inline float dimension_bbd_clampf(float x, float lo, float hi) {
+    return (x < lo) ? lo : ((x > hi) ? hi : x);
+}
+
 void DimensionBBDClock_Init(DimensionBBDClock* clock);
 void DimensionBBDClock_Reset(DimensionBBDClock* clock);
 
@@ -164,6 +168,70 @@ static inline float DimensionBBDClock_ProcessDispersion(
 
     /* Blend dispersion softening according to bbdCharacter */
     return sample + bbdChar * 0.35f * (ch->dispState - sample);
+}
+
+/**
+ * Computes instantaneous pre-BBD filter cutoff frequency [Hz]
+ * as a function of instantaneous BBD clock, analogAmount, and bbdCharacter.
+ *
+ * Grounding & Physical Principles (Phase B.1):
+ * - Models dynamic anti-aliasing bandwidth conditioning before BBD sampling.
+ * - At lower clock rates (longer delays), analog clock-filtering and charge retention
+ *   require tighter input bandlimiting to prevent clock breakthrough.
+ * - At higher clock rates (shorter delays), bandwidth opens up to preserve attack and detail.
+ *
+ * Neutrality Contract:
+ * - When bbdChar == 0.0f, returns exactly f_pre_base = 3200.0f + 6400.0f * (1.0f - analogAmount).
+ */
+static inline float DimensionBBDClock_PreCutoff(
+    float clockHz,
+    float analogAmount,
+    float bbdChar,
+    float sampleRate) {
+    const float fPreBase = 3200.0f + 6400.0f * (1.0f - analogAmount);
+    if (bbdChar <= 0.0f) {
+        return fPreBase;
+    }
+    const float clockRatio = clockHz * (1.0f / DIMENSION_BBD_NOMINAL_CLOCK_HZ);
+    const float deltaClock = dimension_bbd_clampf(clockRatio - 1.0f, -0.75f, 1.0f);
+    const float modFactor = 1.0f + bbdChar * (-0.10f + 0.22f * deltaClock);
+    float fc = fPreBase * modFactor;
+    const float maxFc = 0.45f * sampleRate;
+    if (fc < 1000.0f) fc = 1000.0f;
+    if (fc > maxFc) fc = maxFc;
+    return fc;
+}
+
+/**
+ * Computes instantaneous post-BBD reconstruction filter cutoff frequency [Hz]
+ * as a function of instantaneous BBD clock, baseline lpfHz, and bbdCharacter.
+ *
+ * Grounding & Physical Principles (Phase B.1):
+ * - Reconstruction / smoothing filter following BBD sampling.
+ * - Clock tracking: shifts cutoff dynamically with BBD clock frequency to attenuate
+ *   clock breakthrough and provide warmer texture at longer delay settings,
+ *   while opening up treble at shorter delays.
+ * - In conjunction with Charge Transfer Dispersion, produces progressive analog softening.
+ *
+ * Neutrality Contract:
+ * - When bbdChar == 0.0f, returns exactly baseline lpfHz.
+ */
+static inline float DimensionBBDClock_PostCutoff(
+    float clockHz,
+    float lpfHz,
+    float bbdChar,
+    float sampleRate) {
+    if (bbdChar <= 0.0f) {
+        return lpfHz;
+    }
+    const float clockRatio = clockHz * (1.0f / DIMENSION_BBD_NOMINAL_CLOCK_HZ);
+    const float deltaClock = dimension_bbd_clampf(clockRatio - 1.0f, -0.75f, 1.0f);
+    const float modFactor = 1.0f + bbdChar * (-0.15f + 0.28f * deltaClock);
+    float fc = lpfHz * modFactor;
+    const float maxFc = 0.45f * sampleRate;
+    if (fc < 200.0f) fc = 200.0f;
+    if (fc > maxFc) fc = maxFc;
+    return fc;
 }
 
 #ifdef __cplusplus

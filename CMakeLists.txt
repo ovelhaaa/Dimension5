@@ -55,8 +55,15 @@ if(NOT MSVC)
   target_link_libraries(dimension5_baseline_e153da5 PUBLIC m)
 endif()
 
+add_library(dimension5_baseline_phase_a4 STATIC tests/baseline_phase_a4/dimension_dsp_phase_a4.c)
+target_include_directories(dimension5_baseline_phase_a4 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tests/baseline_phase_a4 ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(NOT MSVC)
+  target_compile_options(dimension5_baseline_phase_a4 PRIVATE -Wall -Wextra -Wshadow -Wdouble-promotion)
+  target_link_libraries(dimension5_baseline_phase_a4 PUBLIC m)
+endif()
+
 add_executable(dimension5_tests tests/test_dimension_core.c)
-target_link_libraries(dimension5_tests PRIVATE dimension5_core dimension5_baseline_e153da5)
+target_link_libraries(dimension5_tests PRIVATE dimension5_core dimension5_baseline_e153da5 dimension5_baseline_phase_a4)
 dimension5_apply_host_options(dimension5_tests)
 add_test(NAME dimension5_tests COMMAND dimension5_tests)
 
@@ -66,7 +73,7 @@ dimension5_apply_host_options(dimension5_wrapper_tests)
 add_test(NAME dimension5_wrapper_tests COMMAND dimension5_wrapper_tests)
 
 add_executable(dimension5_offline_render tools/dimension5_offline_render.c)
-target_link_libraries(dimension5_offline_render PRIVATE dimension5_core dimension5_baseline_e153da5)
+target_link_libraries(dimension5_offline_render PRIVATE dimension5_core dimension5_baseline_e153da5 dimension5_baseline_phase_a4)
 dimension5_apply_host_options(dimension5_offline_render)
 
 add_executable(dimension5_bbd_clock_trace tools/bbd_clock_trace.c src/dimension_bbd_clock.c)

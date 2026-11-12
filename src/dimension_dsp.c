@@ -424,11 +424,6 @@ void Dimension_ProcessBlock(
         wetL *= compGainL;
         wetR *= compGainR;
 
-        d->bbdStateL += preAlpha * (wetL - d->bbdStateL);
-        d->bbdStateR += preAlpha * (wetR - d->bbdStateR);
-        wetL = d->bbdStateL;
-        wetR = d->bbdStateR;
-
         const float tri = (d->lfoPhase < 0.5f) ? (4.0f * d->lfoPhase - 1.0f) : (3.0f - 4.0f * d->lfoPhase);
         const float lfo = DimensionBBDClock_ModulateLfo(tri, bbdChar);
 
@@ -452,6 +447,23 @@ void Dimension_ProcessBlock(
         DIMENSION_CLOCK_TRACE_HOOK(d, i, clockL, clockR, lfo, curBbdF0);
 #endif
 
+        /* Pre-BBD anti-aliasing / input bandwidth conditioning (Phase B.1):
+         * When bbdChar == 0.0f, exactly preserves the historical preAlpha pole.
+         * When bbdChar > 0.0f, tracks instantaneous BBD clock for L/R channels. */
+        if (bbdChar <= 0.0f) {
+            d->bbdStateL += preAlpha * (wetL - d->bbdStateL);
+            d->bbdStateR += preAlpha * (wetR - d->bbdStateR);
+        } else {
+            const float fcPreL = DimensionBBDClock_PreCutoff(clockL, analogAmount, bbdChar, sr);
+            const float fcPreR = DimensionBBDClock_PreCutoff(clockR, analogAmount, bbdChar, sr);
+            const float alphaPreL = DimensionBBDClock_AlphaFromCutoff(fcPreL, sr);
+            const float alphaPreR = DimensionBBDClock_AlphaFromCutoff(fcPreR, sr);
+            d->bbdStateL += alphaPreL * (wetL - d->bbdStateL);
+            d->bbdStateR += alphaPreR * (wetR - d->bbdStateR);
+        }
+        wetL = d->bbdStateL;
+        wetR = d->bbdStateR;
+
         const float transLagL = DimensionBBDClock_TransportLag(clockL, curBbdF0, bbdChar);
         const float transLagR = DimensionBBDClock_TransportLag(clockR, curBbdF0, bbdChar);
         const float delayL = baseDelay + depthDelay * lfo + transLagL;
@@ -471,10 +483,24 @@ void Dimension_ProcessBlock(
         curBbdF0 += deltaBbdF0;
         curBbdDepthRatio += deltaBbdRatio;
 
-        d->lpf1StateL += lpfAlpha * (wetL - d->lpf1StateL);
-        d->lpf1StateR += lpfAlpha * (wetR - d->lpf1StateR);
-        d->lpf2StateL += lpfAlpha * (d->lpf1StateL - d->lpf2StateL);
-        d->lpf2StateR += lpfAlpha * (d->lpf1StateR - d->lpf2StateR);
+        /* Post-BBD 2-pole reconstruction filter (Phase B.1):
+         * When bbdChar == 0.0f, exactly preserves the historical lpfAlpha poles.
+         * When bbdChar > 0.0f, tracks instantaneous BBD clock for L/R channels. */
+        if (bbdChar <= 0.0f) {
+            d->lpf1StateL += lpfAlpha * (wetL - d->lpf1StateL);
+            d->lpf1StateR += lpfAlpha * (wetR - d->lpf1StateR);
+            d->lpf2StateL += lpfAlpha * (d->lpf1StateL - d->lpf2StateL);
+            d->lpf2StateR += lpfAlpha * (d->lpf1StateR - d->lpf2StateR);
+        } else {
+            const float fcPostL = DimensionBBDClock_PostCutoff(clockL, d->smoothLpfHz, bbdChar, sr);
+            const float fcPostR = DimensionBBDClock_PostCutoff(clockR, d->smoothLpfHz, bbdChar, sr);
+            const float alphaPostL = DimensionBBDClock_AlphaFromCutoff(fcPostL, sr);
+            const float alphaPostR = DimensionBBDClock_AlphaFromCutoff(fcPostR, sr);
+            d->lpf1StateL += alphaPostL * (wetL - d->lpf1StateL);
+            d->lpf1StateR += alphaPostR * (wetR - d->lpf1StateR);
+            d->lpf2StateL += alphaPostL * (d->lpf1StateL - d->lpf2StateL);
+            d->lpf2StateR += alphaPostR * (d->lpf1StateR - d->lpf2StateR);
+        }
         wetL = d->lpf2StateL;
         wetR = d->lpf2StateR;
 
