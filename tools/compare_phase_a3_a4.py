@@ -109,11 +109,12 @@ def analyze_pair(wav_a3_path, wav_a4_path, char_label):
             "stereo_width_correlation_a4": round(stereo_corr_a4, 6),
             "spectral_diff_rms": round(spectral_diff_rms, 6)
         },
-        "audible_assessment": {
-            "nature_of_divergence": "Beneficial elimination of clock prediction mismatch and boundary slew artifacts during rapid parameter changes.",
-            "steady_state_audible_difference": False,
-            "transient_audible_difference": bool(transient_max_diff > 0.001),
-            "musical_integrity_preserved": True
+        "perceptual_evaluation": {
+            "status": "NOT_PERFORMED",
+            "nature_of_divergence": "Measured numerical difference confined to rapid parameter automation regions; steady-state regions exhibit numerical identity.",
+            "steady_state_difference_measured": bool(steady_max_diff > 0.0),
+            "transient_difference_measured": bool(transient_max_diff > 0.0),
+            "note": "Numerical analysis only; formal perceptual evaluation not performed. Inaudibility or musical superiority cannot be inferred from numerical metrics alone."
         }
     }
 
@@ -137,6 +138,30 @@ def main():
     print(f"Comparing Phase A.3 vs A.4 at 100% character: {pA3_c100.name} vs {pA4_c100.name}...")
     res_100 = analyze_pair(str(pA3_c100), str(pA4_c100), "100%")
 
+    # Technical criteria for verification:
+    # 1. Steady-state numerical equivalence (max diff < 1e-5)
+    # 2. Transient automation divergence bounded (max diff < 0.01, correlation >= 0.999)
+    steady_ok = bool(
+        res_50["steady_state"]["is_identical_in_steady_state"]
+        and res_100["steady_state"]["is_identical_in_steady_state"]
+    )
+    transient_max_limit = 0.01
+    min_correlation = 0.999
+    transient_ok = bool(
+        res_50["transient_automation"]["max_abs_diff"] < transient_max_limit
+        and res_100["transient_automation"]["max_abs_diff"] < transient_max_limit
+        and res_50["overall"]["cross_version_correlation"] >= min_correlation
+        and res_100["overall"]["cross_version_correlation"] >= min_correlation
+    )
+    verdict_ok = steady_ok and transient_ok
+    verdict_str = (
+        f"PASS - Steady-state numerically identical ({res_50['steady_state']['max_abs_diff']} / {res_100['steady_state']['max_abs_diff']}); "
+        f"transient automation divergence strictly controlled (max diff {max(res_50['transient_automation']['max_abs_diff'], res_100['transient_automation']['max_abs_diff']):.2e} < {transient_max_limit}, corr >= {min_correlation}); "
+        f"formal perceptual evaluation pending"
+        if verdict_ok
+        else "FAIL - Measured divergence exceeded explicit technical thresholds"
+    )
+
     report = {
         "analysis": "Phase A.3 vs Phase A.4 Regression Analysis",
         "description": "Characterize active BBD character behavior under rapid automation between tau=20ms and tau=30ms",
@@ -145,10 +170,10 @@ def main():
             "character_100pct": res_100
         },
         "conclusions": {
-            "steady_state_identical": res_50["steady_state"]["is_identical_in_steady_state"] and res_100["steady_state"]["is_identical_in_steady_state"],
-            "transient_divergence_controlled": True,
+            "steady_state_identical": steady_ok,
+            "transient_divergence_controlled": transient_ok,
             "character_0pct_neutrality_impact": "Zero (Character 0% bypasses clock modulation completely)",
-            "verdict": "PASS - Regression is strictly confined to transient automation and improves tracking fidelity"
+            "verdict": verdict_str
         }
     }
 
@@ -161,6 +186,7 @@ def main():
     print(f"  Character 100%: Overall RMS diff = {res_100['overall']['rms_diff_dbfs']} dBFS (Peak diff: {res_100['overall']['max_abs_diff_dbfs']} dBFS)")
     print(f"  Steady-state max diff (both): {res_50['steady_state']['max_abs_diff']} / {res_100['steady_state']['max_abs_diff']}")
     print(f"  Verdict: {report['conclusions']['verdict']}")
+    sys.exit(0 if verdict_ok else 1)
 
 if __name__ == "__main__":
     main()

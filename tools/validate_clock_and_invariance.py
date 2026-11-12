@@ -157,6 +157,14 @@ def run_clock_accuracy_analysis(out_dir="out", docs_dir="docs/spectral"):
     # -------------------------------------------------------------------------
     # 3. Export Clock Accuracy Report (Measured Metrics Only)
     # -------------------------------------------------------------------------
+    clock_ok = bool(
+        max_steady_err < 0.001
+        and max_auto_err < 0.005
+        and rms_auto_err < 0.002
+        and max_boundary_step < 15.0
+    )
+    boundary_ok = bool(max_boundary_step < 15.0)
+
     clock_report = {
         "metadata": {
             "title": "Phase A.4 BBD Instantaneous Clock Accuracy",
@@ -179,13 +187,14 @@ def run_clock_accuracy_analysis(out_dir="out", docs_dir="docs/spectral"):
             "rms_relative_error_l": rms_rel_l,
             "rms_relative_error_r": rms_rel_r,
             "source": "bbd_clock_trace_c99",
-            "status": "PASS" if (max_steady_err < 0.001 and max_auto_err < 0.005) else "FAIL"
+            "status": "PASS" if clock_ok else "FAIL"
         },
         "summary": {
             "max_steady_state_relative_error": max_steady_err,
             "max_automation_relative_error": max_auto_err,
             "rms_automation_relative_error": rms_auto_err,
-            "all_tests_passed": bool(max_steady_err < 0.001 and max_auto_err < 0.005)
+            "max_boundary_step_hz": max_boundary_step,
+            "all_tests_passed": clock_ok
         }
     }
     
@@ -201,34 +210,47 @@ def run_clock_accuracy_analysis(out_dir="out", docs_dir="docs/spectral"):
         c99_invar = json.load(f)
         
     c99_metrics = c99_invar.get("measured_metrics", {})
+    dsp_core_max_diff = float(c99_metrics.get("dsp_core_max_abs_diff", 0.0))
+    dsp_core_divergent = int(c99_metrics.get("dsp_core_divergent_samples", 0))
+    host_max_diff = float(c99_metrics.get("host_segmentation_max_abs_diff", 0.0))
+    host_divergent = int(c99_metrics.get("host_segmentation_divergent_samples", 0))
+
+    dsp_core_ok = bool(dsp_core_max_diff < 0.005 and dsp_core_divergent == 0)
+    host_bit_exact_ok = bool(host_max_diff == 0.0 and host_divergent == 0)
+    invariance_ok = dsp_core_ok and host_bit_exact_ok
     
     invariance_report = {
         "metadata": {
             "title": "Phase A.4 Block Invariance & Segmentation Verification",
             "git_commit": commit,
-            "contract": "Identical audio and zero divergent samples regardless of chunk size",
+            "dsp_core_contract": "Numerical equivalence across block sizes (max diff < 0.005, zero divergent samples > 1e-4)",
+            "host_segmentation_contract": "Bit-exact identity across host chunk sizes (max diff == 0.0, zero divergent samples)",
+            "contract": "DSP Core numerical equivalence; Host segmentation bit-exact identity",
             "source": "tools/bbd_clock_trace.c"
         },
         "dsp_core_block_sizes": c99_invar.get("dsp_core_block_sizes", [1, 7, 16, 32, 64]),
         "host_buffer_sizes": c99_invar.get("host_buffer_sizes", [64, 128, 256, 512, 1024]),
         "sample_rates": c99_invar.get("sample_rates", [44100, 48000, 96000]),
         "measured_metrics": {
-            "dsp_core_max_abs_diff": float(c99_metrics.get("dsp_core_max_abs_diff", 0.0)),
+            "dsp_core_max_abs_diff": dsp_core_max_diff,
             "dsp_core_rms_diff": float(c99_metrics.get("dsp_core_rms_diff", 0.0)),
             "dsp_core_nrmse": float(c99_metrics.get("dsp_core_nrmse", 0.0)),
-            "dsp_core_divergent_samples": int(c99_metrics.get("dsp_core_divergent_samples", 0)),
-            "host_segmentation_max_abs_diff": float(c99_metrics.get("host_segmentation_max_abs_diff", 0.0)),
+            "dsp_core_divergent_samples": dsp_core_divergent,
+            "dsp_core_is_numerical_equivalent": dsp_core_ok,
+            "host_segmentation_max_abs_diff": host_max_diff,
             "host_segmentation_rms_diff": float(c99_metrics.get("host_segmentation_rms_diff", 0.0)),
             "host_segmentation_nrmse": float(c99_metrics.get("host_segmentation_nrmse", 0.0)),
-            "host_segmentation_divergent_samples": int(c99_metrics.get("host_segmentation_divergent_samples", 0)),
-            "is_bit_exact": bool(c99_metrics.get("is_bit_exact", False)),
+            "host_segmentation_divergent_samples": host_divergent,
+            "host_segmentation_is_bit_exact": host_bit_exact_ok,
+            "is_bit_exact": host_bit_exact_ok,
             "source": "bbd_block_invariance_c99",
-            "status": "PASS" if (c99_metrics.get("dsp_core_max_abs_diff", 1.0) < 0.005 and c99_metrics.get("is_bit_exact", False)) else "FAIL"
+            "status": "PASS" if invariance_ok else "FAIL"
         },
         "boundary_continuity": {
             "max_single_sample_clock_step_hz": max_boundary_step,
-            "max_audio_boundary_jump": 0.0125,
-            "status": "PASS" if max_boundary_step < 15.0 else "FAIL"
+            "max_audio_boundary_jump": None,
+            "audio_boundary_jump_status": "NOT_MEASURED",
+            "status": "PASS" if boundary_ok else "FAIL"
         }
     }
     
@@ -310,6 +332,15 @@ def run_clock_accuracy_analysis(out_dir="out", docs_dir="docs/spectral"):
     plt.savefig(p2, dpi=180)
     plt.close()
     print(f"Saved block boundary continuity plot to: {p2}")
+
+    all_ok = clock_ok and boundary_ok and invariance_ok
+    if not all_ok:
+        print("\n" + "=" * 76)
+        print("CLOCK ACCURACY & INVARIANCE SUITE: CHECKS FAILED")
+        print(f"  clock_ok: {clock_ok}, boundary_ok: {boundary_ok}, invariance_ok: {invariance_ok}")
+        print(f"  max_steady_err={max_steady_err:.6f}, max_auto_err={max_auto_err:.6f}, rms_auto_err={rms_auto_err:.6f}, max_boundary_step={max_boundary_step:.2f}")
+        print("=" * 76)
+        return 1
     
     print("\n" + "=" * 76)
     print("CLOCK ACCURACY & INVARIANCE SUITE: ALL CHECKS PASSED")

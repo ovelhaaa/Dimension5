@@ -46,14 +46,15 @@ def generate_summary(out_dir="out"):
     errors = []
     
     # -------------------------------------------------------------------------
-    # 1. Load All 5 Required Reports (Check for Absence)
+    # 1. Load All 6 Required Reports (Check for Absence)
     # -------------------------------------------------------------------------
     required_reports = {
         "spec": "spectral_validation_report.json",
         "gen": "generator_precision_report.json",
         "clock": "clock_accuracy_report.json",
         "invar": "block_invariance_report.json",
-        "neg": "negative_validation_report.json"
+        "neg": "negative_validation_report.json",
+        "regression": "phase_a3_a4_regression_report.json"
     }
     
     loaded = {}
@@ -79,6 +80,7 @@ def generate_summary(out_dir="out"):
     clock_report = loaded["clock"]
     invar_report = loaded["invar"]
     neg_report = loaded["neg"]
+    reg_report = loaded["regression"]
     
     # -------------------------------------------------------------------------
     # 2. Commit Consistency Verification
@@ -90,7 +92,7 @@ def generate_summary(out_dir="out"):
                 errors.append(f"COMMIT_MISMATCH: {required_reports[key]} was generated for commit {rep_commit}, expected {commit}")
 
     # -------------------------------------------------------------------------
-    # 3. Test Counts & Status Consistency Checks
+    # 3. Test Counts, Metrics & Status Consistency Checks
     # -------------------------------------------------------------------------
     gen_ok = False
     if gen_report is not None:
@@ -117,7 +119,22 @@ def generate_summary(out_dir="out"):
         c_sum = clock_report.get("summary", {})
         c_met = clock_report.get("measured_metrics", {})
         c_pass = c_sum.get("all_tests_passed", False) and (c_met.get("status") == "PASS")
-        if not c_pass:
+
+        steady_err = c_met.get("max_steady_state_relative_error", 1.0)
+        auto_err = c_met.get("max_automation_relative_error", 1.0)
+        rms_auto_err = c_met.get("rms_automation_relative_error", 1.0)
+        boundary_step = c_met.get("max_boundary_step_hz", 999.0)
+
+        thresholds_ok = (
+            steady_err < 0.001
+            and auto_err < 0.005
+            and rms_auto_err < 0.002
+            and boundary_step < 15.0
+        )
+
+        if not thresholds_ok and c_pass:
+            errors.append(f"INCONSISTENT_METRIC: clock_accuracy_report status is PASS but metrics exceed acceptance thresholds (steady={steady_err}, auto={auto_err}, rms={rms_auto_err}, boundary={boundary_step})")
+        elif not c_pass or not thresholds_ok:
             errors.append("SUITE_FAILURE: clock_accuracy_report did not meet acceptance criteria.")
         else:
             clock_ok = True
@@ -125,16 +142,36 @@ def generate_summary(out_dir="out"):
     invar_ok = False
     if invar_report is not None:
         i_met = invar_report.get("measured_metrics", {})
+        b_cont = invar_report.get("boundary_continuity", {})
+
+        dsp_max_diff = i_met.get("dsp_core_max_abs_diff", 1.0)
+        dsp_divergent = i_met.get("dsp_core_divergent_samples", 1)
+        host_max_diff = i_met.get("host_segmentation_max_abs_diff", 1.0)
+        host_divergent = i_met.get("host_segmentation_divergent_samples", 1)
         is_bit_exact = i_met.get("is_bit_exact", False)
-        i_status = i_met.get("status") == "PASS"
-        if not (is_bit_exact and i_status):
-            errors.append("SUITE_FAILURE: block_invariance_report failed invariance or is not bit-exact.")
-        else:
+        i_status = (i_met.get("status") == "PASS")
+
+        b_step = b_cont.get("max_single_sample_clock_step_hz", 999.0)
+        b_status = (b_cont.get("status") == "PASS")
+
+        dsp_ok = (dsp_max_diff < 0.005 and dsp_divergent == 0)
+        host_ok = (host_max_diff == 0.0 and host_divergent == 0 and is_bit_exact)
+        boundary_ok = (b_step < 15.0 and b_status)
+
+        if b_step >= 15.0 and b_cont.get("status") == "PASS":
+            errors.append(f"INCONSISTENT_METRIC: block_invariance_report boundary continuity marked PASS but step ({b_step} Hz) exceeds 15 Hz threshold.")
+        elif not boundary_ok:
+            errors.append(f"SUITE_FAILURE: block_invariance_report boundary continuity failed (step={b_step} Hz, status={b_cont.get('status')}).")
+
+        if (not dsp_ok or not host_ok) and i_status:
+            errors.append(f"INCONSISTENT_METRIC: block_invariance_report status is PASS but invariance contract violated (dsp_max={dsp_max_diff}, host_max={host_max_diff}).")
+        elif not (dsp_ok and host_ok and i_status):
+            errors.append("SUITE_FAILURE: block_invariance_report failed DSP core or host segmentation invariance.")
+        elif boundary_ok:
             invar_ok = True
 
     neg_ok = False
     if neg_report is not None:
-        n_meta = neg_report.get("metadata", {})
         n_sum = neg_report.get("overall_summary", {})
         n_tot = n_sum.get("total_tests", 0)
         n_pass = n_sum.get("passed_tests", 0)
@@ -144,7 +181,51 @@ def generate_summary(out_dir="out"):
         else:
             neg_ok = True
 
-    all_ok = (len(errors) == 0) and gen_ok and spec_ok and clock_ok and invar_ok and neg_ok
+    regression_ok = False
+    if reg_report is not None:
+        scenarios = reg_report.get("scenarios", {})
+        conclusions = reg_report.get("conclusions", {})
+        if "character_50pct" not in scenarios or "character_100pct" not in scenarios:
+            errors.append("SUITE_FAILURE: phase_a3_a4_regression_report missing character_50pct or character_100pct scenarios.")
+        else:
+            c50 = scenarios.get("character_50pct", {})
+            c100 = scenarios.get("character_100pct", {})
+            required_sections = ["steady_state", "transient_automation", "overall"]
+            reg_fields_ok = True
+            for sc_name, sc in [("50%", c50), ("100%", c100)]:
+                for sec in required_sections:
+                    if sec not in sc or not isinstance(sc[sec], dict):
+                        errors.append(f"SUITE_FAILURE: phase_a3_a4_regression_report scenario {sc_name} missing '{sec}' section.")
+                        reg_fields_ok = False
+                if "steady_state" in sc:
+                    if "max_abs_diff" not in sc["steady_state"] or "rms_diff" not in sc["steady_state"]:
+                        errors.append(f"SUITE_FAILURE: phase_a3_a4_regression_report scenario {sc_name} steady_state missing required metrics.")
+                        reg_fields_ok = False
+                if "transient_automation" in sc:
+                    if "max_abs_diff" not in sc["transient_automation"] or "rms_diff" not in sc["transient_automation"]:
+                        errors.append(f"SUITE_FAILURE: phase_a3_a4_regression_report scenario {sc_name} transient_automation missing required metrics.")
+                        reg_fields_ok = False
+                if "overall" in sc:
+                    for req_m in ["max_abs_diff", "rms_diff", "max_abs_diff_dbfs", "rms_diff_dbfs", "cross_version_correlation"]:
+                        if req_m not in sc["overall"]:
+                            errors.append(f"SUITE_FAILURE: phase_a3_a4_regression_report scenario {sc_name} overall missing required metric '{req_m}'.")
+                            reg_fields_ok = False
+
+            steady_identical = conclusions.get("steady_state_identical", False)
+            transient_controlled = conclusions.get("transient_divergence_controlled", False)
+            verdict = conclusions.get("verdict", "")
+
+            if not steady_identical:
+                errors.append("SUITE_FAILURE: phase_a3_a4_regression_report steady_state_identical is False.")
+            if not transient_controlled:
+                errors.append("SUITE_FAILURE: phase_a3_a4_regression_report transient_divergence_controlled is False.")
+            if not (isinstance(verdict, str) and verdict.startswith("PASS")):
+                errors.append(f"SUITE_FAILURE: phase_a3_a4_regression_report verdict does not indicate PASS (verdict='{verdict}').")
+
+            if reg_fields_ok and steady_identical and transient_controlled and isinstance(verdict, str) and verdict.startswith("PASS"):
+                regression_ok = True
+
+    all_ok = (len(errors) == 0) and gen_ok and spec_ok and clock_ok and invar_ok and neg_ok and regression_ok
     
     # -------------------------------------------------------------------------
     # 4. Construct Consolidated Summary
@@ -180,14 +261,21 @@ def generate_summary(out_dir="out"):
             },
             "block_invariance_and_segmentation": {
                 "status": "PASS" if invar_ok else "FAIL",
+                "dsp_core_contract": "Numerical equivalence (tolerance < 0.005, zero divergent samples)",
+                "host_segmentation_contract": "Bit-exact identity (max_abs_diff == 0.0, zero divergent samples)",
                 "source": invar_report.get("measured_metrics", {}).get("source") if invar_report else None,
                 "dsp_core_max_abs_diff": invar_report.get("measured_metrics", {}).get("dsp_core_max_abs_diff") if invar_report else None,
                 "dsp_core_rms_diff": invar_report.get("measured_metrics", {}).get("dsp_core_rms_diff") if invar_report else None,
                 "dsp_core_nrmse": invar_report.get("measured_metrics", {}).get("dsp_core_nrmse") if invar_report else None,
+                "dsp_core_divergent_samples": invar_report.get("measured_metrics", {}).get("dsp_core_divergent_samples") if invar_report else None,
                 "host_segmentation_max_abs_diff": invar_report.get("measured_metrics", {}).get("host_segmentation_max_abs_diff") if invar_report else None,
                 "host_segmentation_rms_diff": invar_report.get("measured_metrics", {}).get("host_segmentation_rms_diff") if invar_report else None,
+                "host_segmentation_divergent_samples": invar_report.get("measured_metrics", {}).get("host_segmentation_divergent_samples") if invar_report else None,
                 "is_bit_exact": invar_report.get("measured_metrics", {}).get("is_bit_exact") if invar_report else None,
-                "boundary_clock_slew_max_hz": invar_report.get("boundary_continuity", {}).get("max_single_sample_clock_step_hz") if invar_report else None
+                "boundary_clock_slew_max_hz": invar_report.get("boundary_continuity", {}).get("max_single_sample_clock_step_hz") if invar_report else None,
+                "boundary_continuity_status": invar_report.get("boundary_continuity", {}).get("status") if invar_report else None,
+                "max_audio_boundary_jump": invar_report.get("boundary_continuity", {}).get("max_audio_boundary_jump") if invar_report else None,
+                "audio_boundary_jump_status": invar_report.get("boundary_continuity", {}).get("audio_boundary_jump_status") if invar_report else None
             },
             "baseline_neutrality_e153da5": {
                 "status": "PASS" if spec_ok else "FAIL",
@@ -202,25 +290,39 @@ def generate_summary(out_dir="out"):
                 "new_aliasing_components": sum(item.get("new_aliasing_count", 0) for item in spec_report["aliasing_evaluations"].values()) if spec_report else None,
                 "amplitude_increases": sum(item.get("amplitude_increases_count", 0) for item in spec_report["aliasing_evaluations"].values()) if spec_report else None,
                 "worst_case_sfdr_db": min(item["sfdr_db"] for item in spec_report["aliasing_evaluations"].values()) if spec_report else None
+            },
+            "phase_a3_vs_a4_regression": {
+                "status": "PASS" if regression_ok else "FAIL",
+                "steady_state_identical": reg_report.get("conclusions", {}).get("steady_state_identical") if reg_report else None,
+                "transient_divergence_controlled": reg_report.get("conclusions", {}).get("transient_divergence_controlled") if reg_report else None,
+                "character_50pct": {
+                    "max_abs_diff": reg_report.get("scenarios", {}).get("character_50pct", {}).get("overall", {}).get("max_abs_diff") if reg_report else None,
+                    "rms_diff": reg_report.get("scenarios", {}).get("character_50pct", {}).get("overall", {}).get("rms_diff") if reg_report else None,
+                    "peak_diff_dbfs": reg_report.get("scenarios", {}).get("character_50pct", {}).get("overall", {}).get("max_abs_diff_dbfs") if reg_report else None,
+                    "rms_diff_dbfs": reg_report.get("scenarios", {}).get("character_50pct", {}).get("overall", {}).get("rms_diff_dbfs") if reg_report else None,
+                    "steady_state_max_abs_diff": reg_report.get("scenarios", {}).get("character_50pct", {}).get("steady_state", {}).get("max_abs_diff") if reg_report else None,
+                    "steady_state_rms_diff": reg_report.get("scenarios", {}).get("character_50pct", {}).get("steady_state", {}).get("rms_diff") if reg_report else None,
+                    "transient_max_abs_diff": reg_report.get("scenarios", {}).get("character_50pct", {}).get("transient_automation", {}).get("max_abs_diff") if reg_report else None,
+                    "transient_rms_diff": reg_report.get("scenarios", {}).get("character_50pct", {}).get("transient_automation", {}).get("rms_diff") if reg_report else None,
+                    "cross_version_correlation": reg_report.get("scenarios", {}).get("character_50pct", {}).get("overall", {}).get("cross_version_correlation") if reg_report else None
+                } if reg_report else None,
+                "character_100pct": {
+                    "max_abs_diff": reg_report.get("scenarios", {}).get("character_100pct", {}).get("overall", {}).get("max_abs_diff") if reg_report else None,
+                    "rms_diff": reg_report.get("scenarios", {}).get("character_100pct", {}).get("overall", {}).get("rms_diff") if reg_report else None,
+                    "peak_diff_dbfs": reg_report.get("scenarios", {}).get("character_100pct", {}).get("overall", {}).get("max_abs_diff_dbfs") if reg_report else None,
+                    "rms_diff_dbfs": reg_report.get("scenarios", {}).get("character_100pct", {}).get("overall", {}).get("rms_diff_dbfs") if reg_report else None,
+                    "steady_state_max_abs_diff": reg_report.get("scenarios", {}).get("character_100pct", {}).get("steady_state", {}).get("max_abs_diff") if reg_report else None,
+                    "steady_state_rms_diff": reg_report.get("scenarios", {}).get("character_100pct", {}).get("steady_state", {}).get("rms_diff") if reg_report else None,
+                    "transient_max_abs_diff": reg_report.get("scenarios", {}).get("character_100pct", {}).get("transient_automation", {}).get("max_abs_diff") if reg_report else None,
+                    "transient_rms_diff": reg_report.get("scenarios", {}).get("character_100pct", {}).get("transient_automation", {}).get("rms_diff") if reg_report else None,
+                    "cross_version_correlation": reg_report.get("scenarios", {}).get("character_100pct", {}).get("overall", {}).get("cross_version_correlation") if reg_report else None
+                } if reg_report else None,
+                "perceptual_evaluation_status": "NOT_PERFORMED",
+                "verdict": reg_report.get("conclusions", {}).get("verdict") if reg_report else None
             }
         },
         "recommendation": "READY TO CLOSE PHASE A" if all_ok else "NOT READY"
     }
-
-    reg_path = os.path.join(out_dir, "phase_a3_a4_regression_report.json")
-    if os.path.exists(reg_path):
-        try:
-            with open(reg_path, 'r') as f:
-                reg_report = json.load(f)
-                summary["verification_domains"]["phase_a3_vs_a4_regression"] = {
-                    "status": "PASS" if reg_report.get("conclusions", {}).get("steady_state_identical") else "FAIL",
-                    "steady_state_identical": reg_report.get("conclusions", {}).get("steady_state_identical"),
-                    "character_50pct_rms_diff_dbfs": reg_report.get("scenarios", {}).get("character_50pct", {}).get("overall", {}).get("rms_diff_dbfs"),
-                    "character_100pct_rms_diff_dbfs": reg_report.get("scenarios", {}).get("character_100pct", {}).get("overall", {}).get("rms_diff_dbfs"),
-                    "verdict": reg_report.get("conclusions", {}).get("verdict")
-                }
-        except Exception:
-            pass
     
     summary_path = os.path.join(out_dir, "validation_summary.json")
     with open(summary_path, 'w') as f:
