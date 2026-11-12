@@ -5,6 +5,13 @@
 #include <string.h>
 
 #define DIMENSION_PI 3.14159265358979323846f
+#ifndef DIMENSION_SMOOTH_TAU_SEC
+#define DIMENSION_SMOOTH_TAU_SEC 0.030f
+#endif
+
+#ifndef DIMENSION_SMOOTH_TAU_PREDICTOR_SEC
+#define DIMENSION_SMOOTH_TAU_PREDICTOR_SEC DIMENSION_SMOOTH_TAU_SEC
+#endif
 
 static inline float dimension_clampf(float x, float lo, float hi) {
     return (x < lo) ? lo : ((x > hi) ? hi : x);
@@ -182,8 +189,7 @@ static inline void dimension_apply_mode_preset(DimensionParams* p, DimensionMode
 
 static inline float dimension_smooth_coeff(float sampleRate) {
     const float sr = (sampleRate > 1000.0f) ? sampleRate : DIMENSION_SAMPLE_RATE_DEFAULT;
-    const float tauSec = 0.030f;
-    return 1.0f - expf(-1.0f / (tauSec * sr));
+    return 1.0f - expf(-1.0f / (DIMENSION_SMOOTH_TAU_SEC * sr));
 }
 
 static inline void dimension_update_smoothing_config(DimensionDSP* d) {
@@ -333,12 +339,12 @@ void Dimension_ProcessBlock(
 
     /* Temporal Clock Tracking & Block Interpolation:
      * Compute start and predicted end values of baseDelay and depth across this block (n frames)
-     * using the closed form of the 20 ms one-pole smoother (gamma = exp(-n / (0.020 * sr))).
+     * using the closed form of the 30 ms one-pole smoother (gamma = exp(-n / (0.030 * sr))).
+     * Derived from DIMENSION_SMOOTH_TAU_SEC (30 ms) to match per-sample smoothing exactly.
      * Linearly interpolate bbdF0 and bbdDepthRatio across the n samples.
      * Guarantees exact continuity across block boundaries (0 jump) for any block size,
      * keeps clock in sync with delay evolution during automation, and eliminates per-sample division. */
-    const float tauDelaySec = 0.020f;
-    const float gammaDelay = expf(-(float)n / (tauDelaySec * sr));
+    const float gammaDelay = expf(-(float)n / (DIMENSION_SMOOTH_TAU_PREDICTOR_SEC * sr));
     const float endBaseMs = d->params.baseDelayMs + (d->smoothBaseDelayMs - d->params.baseDelayMs) * gammaDelay;
     const float endDepthMs = d->params.depthMs + (d->smoothDepthMs - d->params.depthMs) * gammaDelay;
 
@@ -441,6 +447,10 @@ void Dimension_ProcessBlock(
         clockR = dimension_clampf(clockR, DIMENSION_BBD_MIN_CLOCK_HZ, DIMENSION_BBD_MAX_CLOCK_HZ);
         d->bbdClock.chL.instantaneousClockHz = clockL;
         d->bbdClock.chR.instantaneousClockHz = clockR;
+
+#ifdef DIMENSION_CLOCK_TRACE_HOOK
+        DIMENSION_CLOCK_TRACE_HOOK(d, i, clockL, clockR, lfo, curBbdF0);
+#endif
 
         const float transLagL = DimensionBBDClock_TransportLag(clockL, curBbdF0, bbdChar);
         const float transLagR = DimensionBBDClock_TransportLag(clockR, curBbdF0, bbdChar);

@@ -22,6 +22,106 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+def write_wav_float32(path, left, right, sample_rate):
+    """Writes stereo 32-bit float WAV file."""
+    left = np.asarray(left, dtype=np.float32)
+    right = np.asarray(right, dtype=np.float32)
+    n = min(len(left), len(right))
+    interleaved = np.empty(2 * n, dtype=np.float32)
+    interleaved[0::2] = left[:n]
+    interleaved[1::2] = right[:n]
+    raw_data = interleaved.tobytes()
+    data_size = len(raw_data)
+    
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, 'wb') as f:
+        f.write(struct.pack('<4sI4s', b'RIFF', 36 + data_size, b'WAVE'))
+        byte_rate = sample_rate * 8
+        f.write(struct.pack('<4sIHHIIHH', b'fmt ', 16, 3, 2, sample_rate, byte_rate, 8, 32))
+        f.write(struct.pack('<4sI', b'data', data_size))
+        f.write(raw_data)
+
+def validate_wav_file(path, expected_sr=None, min_samples=None, expected_channels=2, require_float32=True):
+    """
+    Validates WAV file existence, header integrity, sample rate, channels, minimum duration,
+    and absence of NaN/Inf.
+    Returns:
+        (is_valid: bool, error_code: str, left: np.ndarray, right: np.ndarray, sr: int)
+    """
+    if not os.path.exists(path):
+        return False, "REQUIRED_FIXTURE_MISSING", None, None, 0
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(12)
+            if len(header) < 12:
+                return False, "INVALID_HEADER", None, None, 0
+            riff, size, wave = struct.unpack('<4sI4s', header)
+            if riff != b'RIFF' or wave != b'WAVE':
+                return False, "INVALID_HEADER", None, None, 0
+            
+            fmt_found = False
+            data_found = False
+            audio_format = 1
+            num_channels = 2
+            sample_rate = 48000
+            bits_per_sample = 16
+            raw_data = None
+            
+            while True:
+                chunk_header = f.read(8)
+                if len(chunk_header) < 8:
+                    break
+                chunk_id, chunk_size = struct.unpack('<4sI', chunk_header)
+                if chunk_id == b'fmt ':
+                    fmt_data = f.read(chunk_size)
+                    audio_format, num_channels, sample_rate, byte_rate, block_align, bits_per_sample = struct.unpack(
+                        '<HHIIHH', fmt_data[:16]
+                    )
+                    fmt_found = True
+                elif chunk_id == b'data':
+                    raw_data = f.read(chunk_size)
+                    data_found = True
+                    break
+                else:
+                    f.seek(chunk_size, os.SEEK_CUR)
+                    
+            if not fmt_found or not data_found:
+                return False, "INVALID_HEADER", None, None, 0
+                
+            if require_float32 and audio_format != 3:
+                return False, "UNSUPPORTED_FORMAT", None, None, sample_rate
+            if expected_channels is not None and num_channels != expected_channels:
+                return False, "CHANNEL_COUNT_MISMATCH", None, None, sample_rate
+            if expected_sr is not None and sample_rate != expected_sr:
+                return False, "SAMPLE_RATE_MISMATCH", None, None, sample_rate
+                
+            if audio_format == 3:
+                samples = np.frombuffer(raw_data, dtype=np.float32)
+            elif audio_format == 1 and bits_per_sample == 16:
+                samples = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) * (1.0 / 32768.0)
+            elif audio_format == 1 and bits_per_sample == 32:
+                samples = np.frombuffer(raw_data, dtype=np.int32).astype(np.float32) * (1.0 / 2147483648.0)
+            else:
+                return False, "UNSUPPORTED_FORMAT", None, None, sample_rate
+                
+            if num_channels == 2:
+                left = samples[0::2]
+                right = samples[1::2]
+            else:
+                left = samples
+                right = samples
+                
+            n_frames = len(left)
+            if min_samples is not None and n_frames < min_samples:
+                return False, "INVALID_DURATION", left, right, sample_rate
+                
+            if np.isnan(left).any() or np.isnan(right).any() or np.isinf(left).any() or np.isinf(right).any():
+                return False, "NONFINITE_AUDIO", left, right, sample_rate
+                
+            return True, "OK", left, right, sample_rate
+    except Exception as e:
+        return False, f"EXCEPTION_{type(e).__name__}", None, None, 0
+
 def read_wav(path):
     """Reads 16-bit PCM or 32-bit float WAV file into left, right numpy arrays and sample rate."""
     with open(path, 'rb') as f:
@@ -278,6 +378,85 @@ def analyze_carrier_and_sidebands(signal, sr, f_carrier, f_mod=0.25, max_delay_d
         "freqs": freqs,
         "mag_db": mag_db
     }
+
+def classify_aliasing_components(test_candidates, baseline_candidates, df=0.0625, amp_tol_db=6.0, freq_tol_hz=None):
+    """
+    Rigorously compares detected aliasing/spurious components against baseline:
+    - Matches components by frequency within tolerance (default max(5 * df, 10 Hz)).
+    - Classifies each candidate as:
+      * BASELINE_MATCHED: present in baseline with similar amplitude (|delta| <= amp_tol_db).
+      * NEW_COMPONENT: significant component not present in baseline.
+      * AMPLITUDE_INCREASE: present in baseline, but test level exceeds baseline by > amp_tol_db.
+      * AMPLITUDE_DECREASE: present in baseline, but test level is lower by > amp_tol_db.
+      * UNCERTAIN: candidate level below significance threshold.
+    Returns:
+      (classifications: list[dict], new_components_count: int, amplitude_increases_count: int)
+    """
+    freq_tol = freq_tol_hz if freq_tol_hz is not None else max(5.0 * df, 10.0)
+    classifications = []
+    new_components_count = 0
+    amplitude_increases_count = 0
+
+    base_matched_indices = set()
+
+    for cand in test_candidates:
+        f_cand = cand["measured_freq_hz"]
+        p_cand = cand["mag_dbfs"]
+        rel_cand = cand["rel_dbc"]
+        is_sig = cand.get("is_significant", False) or (rel_cand > -60.0 and p_cand > -80.0)
+
+        if not is_sig:
+            classifications.append({
+                "candidate": cand,
+                "classification": "UNCERTAIN",
+                "reason": "Level below significance threshold (-60 dBc or -80 dBFS)"
+            })
+            continue
+
+        # Look for matching baseline candidate within frequency tolerance
+        best_match = None
+        best_idx = -1
+        min_f_diff = float('inf')
+
+        for idx, base_cand in enumerate(baseline_candidates):
+            f_base = base_cand["measured_freq_hz"]
+            f_diff = abs(f_cand - f_base)
+            if f_diff <= freq_tol and f_diff < min_f_diff:
+                min_f_diff = f_diff
+                best_match = base_cand
+                best_idx = idx
+
+        if best_match is not None:
+            base_matched_indices.add(best_idx)
+            delta_amp = rel_cand - best_match["rel_dbc"]
+            if delta_amp > amp_tol_db:
+                classif = "AMPLITUDE_INCREASE"
+                amplitude_increases_count += 1
+                reason = f"Component level increased by {delta_amp:+.1f} dB (>{amp_tol_db} dB threshold)"
+            elif delta_amp < -amp_tol_db:
+                classif = "AMPLITUDE_DECREASE"
+                reason = f"Component level decreased by {delta_amp:+.1f} dB"
+            else:
+                classif = "BASELINE_MATCHED"
+                reason = f"Frequency match within {min_f_diff:.2f} Hz, level delta {delta_amp:+.1f} dB"
+
+            classifications.append({
+                "candidate": cand,
+                "matched_baseline": best_match,
+                "freq_diff_hz": min_f_diff,
+                "delta_dbc": delta_amp,
+                "classification": classif,
+                "reason": reason
+            })
+        else:
+            classifications.append({
+                "candidate": cand,
+                "classification": "NEW_COMPONENT",
+                "reason": f"No baseline component found within {freq_tol:.1f} Hz tolerance"
+            })
+            new_components_count += 1
+
+    return classifications, new_components_count, amplitude_increases_count
 
 def compare_block_invariance(ref, test, sr, name="invariance"):
     """

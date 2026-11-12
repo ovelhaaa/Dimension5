@@ -19,6 +19,8 @@
 #define SECONDS_SMOKE 4U
 #define SECONDS_SPECTRAL 16U
 #define PI_F 3.14159265358979323846f
+#define PI_DOUBLE 3.141592653589793238462643383279502884
+#define TWO_PI_DOUBLE (2.0 * PI_DOUBLE)
 
 typedef struct Stats { float peak; double sum; double energy; } Stats;
 
@@ -304,16 +306,18 @@ static void render_spectral_fixture(
         const uint32_t n = (frames - pos > BLOCK) ? BLOCK : frames - pos;
         for (uint32_t i = 0; i < n; ++i) {
             const uint32_t t = pos + i;
-            const float tSec = (float)t / (float)sampleRate;
+            const double tSec = (double)t / (double)sampleRate;
             float s = 0.0f;
             if (freqHz > 0.0f) {
-                /* Pure sinusoid */
-                s = 0.25f * sinf(2.0f * PI_F * freqHz * tSec);
+                /* Pure sinusoid with double-precision time, phase, and range reduction */
+                const double phase = fmod(TWO_PI_DOUBLE * (double)freqHz * tSec, TWO_PI_DOUBLE);
+                s = (float)(0.25 * sin(phase));
             } else {
-                /* Multitone fixture */
-                s = 0.12f * sinf(2.0f * PI_F * 1000.0f * tSec) +
-                    0.08f * sinf(2.0f * PI_F * 4500.0f * tSec) +
-                    0.05f * sinf(2.0f * PI_F * 12000.0f * tSec);
+                /* Multitone fixture with double-precision phase */
+                const double p1 = fmod(TWO_PI_DOUBLE * 1000.0 * tSec, TWO_PI_DOUBLE);
+                const double p2 = fmod(TWO_PI_DOUBLE * 4500.0 * tSec, TWO_PI_DOUBLE);
+                const double p3 = fmod(TWO_PI_DOUBLE * 12000.0 * tSec, TWO_PI_DOUBLE);
+                s = (float)(0.12 * sin(p1) + 0.08 * sin(p2) + 0.05 * sin(p3));
             }
             inL[i] = s;
             inR[i] = s;

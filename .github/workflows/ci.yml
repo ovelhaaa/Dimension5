@@ -14,8 +14,16 @@ jobs:
         compiler: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: tools/requirements-validation.txt
+      - name: Install Validation Dependencies
+        run: pip install -r tools/requirements-validation.txt
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.compiler }} -DDIMENSION5_ENABLE_ASAN=ON -DDIMENSION5_ENABLE_UBSAN=ON
+        run: cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.compiler }} -DDIMENSION5_ENABLE_ASAN=ON -DDIMENSION5_ENABLE_UBSAN=ON -DDIMENSION5_STRICT_CI=ON
       - name: Build
         run: cmake --build build --parallel
       - name: Test
@@ -24,12 +32,26 @@ jobs:
         run: ./build/dimension5_bench
       - name: Render offline WAVs
         run: ./build/dimension5_offline_render out --spectral
+      - name: Render Phase A.3 vs A.4 A/B Fixtures
+        run: ./build/dimension5_render_phase_a3_a4 out
+      - name: Compare Phase A.3 vs A.4 Regression
+        run: python3 tools/compare_phase_a3_a4.py out
+      - name: Generate BBD Clock Trace and Invariance
+        run: ./build/dimension5_bbd_clock_trace out
+      - name: Spectral Generator Precision
+        run: python3 tools/test_generator_precision.py out
       - name: Negative Validator Tests
         run: python3 tools/test_spectral_analyzer.py
       - name: BBD Audio Characterization
         run: python3 tools/analyze_bbd_character.py out
       - name: BBD High-Resolution Spectral Validation
         run: python3 tools/run_spectral_analysis.py out
+      - name: BBD Clock Accuracy & Invariance Validation
+        run: python3 tools/validate_clock_and_invariance.py out
+      - name: Summary Aggregator Negative Suite
+        run: python3 tools/test_validation_summary.py out
+      - name: Consolidated Validation Summary
+        run: python3 tools/generate_validation_summary.py out
       - name: Upload Audio Analysis artifacts
         uses: actions/upload-artifact@v4
         with:
