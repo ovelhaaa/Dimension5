@@ -244,14 +244,14 @@ int main(int argc, char** argv) {
     fprintf(json, "    \"aggregation\": \"median ns/sample over repetitions\"\n");
     fprintf(json, "  },\n");
     fprintf(json, "  \"memory\": {\n");
-    fprintf(json, "    \"phase_a4\": {\"instance_bytes\": %u, \"delay_buffers_bytes\": %u, \"total_state_bytes\": %u},\n",
+    fprintf(json, "    \"phase_a4\": {\"instance_bytes\": %u, \"delay_buffers_bytes_included\": %u, \"non_delay_bytes\": %u},\n",
             (unsigned int)sizeof(DimensionDSP_phase_a4),
             (unsigned int)(2 * DIMENSION_DELAY_SIZE * sizeof(float)),
-            (unsigned int)(sizeof(DimensionDSP_phase_a4) + 2 * DIMENSION_DELAY_SIZE * sizeof(float)));
-    fprintf(json, "    \"phase_b1\": {\"instance_bytes\": %u, \"delay_buffers_bytes\": %u, \"total_state_bytes\": %u},\n",
+            (unsigned int)(sizeof(DimensionDSP_phase_a4) - 2 * DIMENSION_DELAY_SIZE * sizeof(float)));
+    fprintf(json, "    \"phase_b1\": {\"instance_bytes\": %u, \"delay_buffers_bytes_included\": %u, \"non_delay_bytes\": %u},\n",
             (unsigned int)sizeof(DimensionDSP),
             (unsigned int)(2 * DIMENSION_DELAY_SIZE * sizeof(float)),
-            (unsigned int)(sizeof(DimensionDSP) + 2 * DIMENSION_DELAY_SIZE * sizeof(float)));
+            (unsigned int)(sizeof(DimensionDSP) - 2 * DIMENSION_DELAY_SIZE * sizeof(float)));
     fprintf(json, "    \"incremental_state_bytes\": %d\n",
             (int)((long)sizeof(DimensionDSP) - (long)sizeof(DimensionDSP_phase_a4)));
     fprintf(json, "  },\n");
