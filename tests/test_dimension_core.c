@@ -13,6 +13,7 @@
 #define TEST_SR 48000.0f
 #define BLOCK 64U
 #define PI_F 3.14159265358979323846f
+#define PI_DOUBLE 3.141592653589793238462643383279502884
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "CHECK failed: %s at %s:%d\n", #cond, __FILE__, __LINE__); return 1; } } while (0)
 
 static inline float test_clampf(float x, float lo, float hi) {
@@ -2421,25 +2422,32 @@ static int test_bbd_spectral_combined_filter_response(void) {
             p.bbdCharacter = charLevels[k];
             Dimension_SetParams(&dsp, &p);
 
-            /* Warm up states */
+            /* Warm up states. The absolute sample counter must keep advancing
+             * into the measurement window so the excitation phase is continuous
+             * across the warm-up/measurement boundary. 320 blocks (~427 ms at
+             * 48 kHz) exceed the 30 ms parameter-smoothing time constant by more
+             * than an order of magnitude, leaving the measured state settled. */
+            uint64_t sampleIndex = 0;
             float inL[64] = {0}, inR[64] = {0}, outL[64] = {0}, outR[64] = {0};
-            for (int w = 0; w < 40; ++w) {
+            for (int w = 0; w < 320; ++w) {
                 for (uint32_t i = 0; i < 64; ++i) {
-                    const float t = (float)(w * 64 + i) / sr;
-                    inL[i] = 0.20f * sinf(2.0f * PI_F * freq * t);
+                    const double t = (double)sampleIndex / (double)sr;
+                    inL[i] = (float)(0.20 * sin(2.0 * PI_DOUBLE * (double)freq * t));
                     inR[i] = inL[i];
+                    ++sampleIndex;
                 }
                 Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, 64);
             }
 
-            /* Measure steady-state RMS */
+            /* Measure steady-state RMS using the same absolute phase timeline */
             double sumSqIn = 0.0, sumSqOut = 0.0;
             for (int m = 0; m < 50; ++m) {
                 for (uint32_t i = 0; i < 64; ++i) {
-                    const float t = (float)(m * 64 + i) / sr;
-                    inL[i] = 0.20f * sinf(2.0f * PI_F * freq * t);
+                    const double t = (double)sampleIndex / (double)sr;
+                    inL[i] = (float)(0.20 * sin(2.0 * PI_DOUBLE * (double)freq * t));
                     inR[i] = inL[i];
                     sumSqIn += (double)(inL[i] * inL[i]);
+                    ++sampleIndex;
                 }
                 Dimension_ProcessBlock(&dsp, inL, inR, outL, outR, 64);
                 for (uint32_t i = 0; i < 64; ++i) {

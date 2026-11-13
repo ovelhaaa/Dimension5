@@ -28,10 +28,16 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
-      - name: Benchmark
-        run: ./build/dimension5_bench
+      - name: Benchmark Incremental A.4 vs B.1
+        run: ./build/dimension5_bench out
       - name: Render offline WAVs
         run: ./build/dimension5_offline_render out --spectral
+      - name: Compare Phase A.4 vs Phase B.1 (Mandatory A/B Integrity)
+        run: python3 tools/compare_phase_a4_b1.py out
+      - name: A/B Comparator Negative Tests
+        run: python3 tools/test_compare_phase_a4_b1.py
+      - name: Build Listening Review Package
+        run: python3 tools/build_listening_package.py out
       - name: Render Phase A.3 vs A.4 A/B Fixtures
         run: ./build/dimension5_render_phase_a3_a4 out
       - name: Compare Phase A.3 vs A.4 Regression
@@ -60,6 +66,8 @@ jobs:
             out/*.wav
             out/*.json
             out/*.csv
+            out/listening_review.zip
+            out/listening_review/**
             docs/spectral/*.png
       - name: Spatial Engine 2.0 Full Validation
         if: matrix.compiler == 'gcc'
@@ -124,6 +132,26 @@ jobs:
 
       - name: Run JUCE tests
         run: ctest --test-dir build-plugin --output-on-failure -C Release
+
+      - name: Repeat SnapshotBuffer concurrency suite (50x)
+        shell: pwsh
+        run: |
+          $exe = "build-plugin/plugin/juce/Release/dimension5_snapshot_standalone_tests.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "SnapshotBuffer test executable not found at $exe"
+          }
+          $failures = 0
+          for ($i = 1; $i -le 50; $i++) {
+            & $exe *> $null
+            if ($LASTEXITCODE -ne 0) {
+              $failures++
+              Write-Host "SnapshotBuffer repetition $i FAILED (exit $LASTEXITCODE)"
+            }
+          }
+          Write-Host "SnapshotBuffer repetition: $((50 - $failures))/50 passed, $failures failed"
+          if ($failures -ne 0) {
+            throw "$failures/50 SnapshotBuffer concurrency runs failed"
+          }
 
       - name: Upload VST3 artifact
         uses: actions/upload-artifact@v4

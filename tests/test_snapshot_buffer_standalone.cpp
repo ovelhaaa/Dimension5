@@ -19,6 +19,11 @@ static void check(bool condition, const char* message) {
     }
 }
 
+// Test-only thread-local collector used by testHookPostGenCAS. The hook runs on
+// the publishing thread and exposes the generation actually reserved/published
+// by that specific operation, unlike a later getLatestPublishedGeneration() poll.
+static thread_local std::vector<uint64_t>* g_tlsPublishedGens = nullptr;
+
 struct BenchmarkMetrics {
     double meanNs;
     double p95Ns;
@@ -441,25 +446,104 @@ void test_phase123_test_a_explicit_gen_contention() {
     check(g >= 4000, "Published generation monotonically advanced to at least 4000");
 }
 
+// 12a. Deterministic reproduction of the legacy observation race.
+// Two distinct successful publications are collapsed into the same observed
+// "latest" generation when the test polls getLatestPublishedGeneration() after
+// publish() returns. The exact per-operation generation delivered by
+// testHookPostGenCAS remains unique.
+void test_phase123_test_b_legacy_observation_race() {
+    dimension_ipc::SnapshotBuffer<int, 8> buf;
+
+    std::atomic<bool> firstPublished { false };
+    std::atomic<bool> releaseFirst { false };
+    std::atomic<bool> firstHookSeen { false };
+    std::vector<uint64_t> exactGens;
+    std::mutex exactMutex;
+
+    buf.testHookPostGenCAS = [&](uint32_t /*slot*/, uint64_t gen) {
+        {
+            std::lock_guard<std::mutex> lock(exactMutex);
+            exactGens.push_back(gen);
+        }
+        if (!firstHookSeen.exchange(true, std::memory_order_acq_rel)) {
+            firstPublished.store(true, std::memory_order_release);
+            while (!releaseFirst.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    bool ok1 = false;
+    bool ok2 = false;
+    uint64_t legacyObs1 = 0;
+    uint64_t legacyObs2 = 0;
+
+    std::thread p1([&]() {
+        ok1 = buf.publish(10);
+        if (ok1) {
+            // Legacy test observation: a post-publication global poll.
+            legacyObs1 = buf.getLatestPublishedGeneration();
+        }
+    });
+
+    std::thread p2([&]() {
+        while (!firstPublished.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        ok2 = buf.publish(20);
+        if (ok2) {
+            legacyObs2 = buf.getLatestPublishedGeneration();
+        }
+        releaseFirst.store(true, std::memory_order_release);
+    });
+
+    p1.join();
+    p2.join();
+
+    check(ok1 && ok2, "Both independent automatic publications succeeded");
+
+    // Reproduced false positive: two distinct publications observe one generation.
+    check(legacyObs1 == legacyObs2 && legacyObs1 > 0,
+          "Legacy global polling collapses two distinct publications into one generation (reproduced)");
+
+    // Corrected test observation: every successful publication exposes its own
+    // reserved/published generation through the test-only hook.
+    std::lock_guard<std::mutex> lock(exactMutex);
+    check(exactGens.size() == 2, "Exactly one generation recorded per successful publication");
+    std::sort(exactGens.begin(), exactGens.end());
+    check(std::adjacent_find(exactGens.begin(), exactGens.end()) == exactGens.end(),
+          "Per-operation generations are unique");
+}
+
 // 12. Test B — Automatic Generation under Contention
 void test_phase123_test_b_auto_gen_contention() {
     dimension_ipc::SnapshotBuffer<int, 8> buf;
     std::atomic<bool> start { false };
     std::vector<uint64_t> acceptedGenerations[4];
+    std::atomic<int> acceptedCounts[4] {};
     std::mutex genMutex;
+
+    // Observe the generation actually assigned to each successful publication
+    // instead of polling a shared global generation after the fact.
+    buf.testHookPostGenCAS = [](uint32_t /*slot*/, uint64_t gen) {
+        if (g_tlsPublishedGens != nullptr) {
+            g_tlsPublishedGens->push_back(gen);
+        }
+    };
 
     auto worker = [&](int threadId) {
         std::vector<uint64_t> threadGens;
         threadGens.reserve(200);
+        int accepted = 0;
+        g_tlsPublishedGens = &threadGens;
         while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
         for (int i = 0; i < 200; ++i) {
             if (buf.publish(threadId * 1000 + i)) {
-                uint64_t curPub = buf.getLatestPublishedGeneration();
-                if (curPub > 0) {
-                    threadGens.push_back(curPub);
-                }
+                ++accepted;
             }
         }
+        g_tlsPublishedGens = nullptr;
+        acceptedCounts[threadId].store(accepted, std::memory_order_release);
         std::lock_guard<std::mutex> lock(genMutex);
         acceptedGenerations[threadId] = std::move(threadGens);
     };
@@ -477,6 +561,12 @@ void test_phase123_test_b_auto_gen_contention() {
 
     std::vector<uint64_t> allGens;
     for (int i = 0; i < 4; ++i) {
+        check((int)acceptedGenerations[i].size() == acceptedCounts[i].load(),
+              "Every successful publication recorded exactly one generation");
+        for (size_t j = 1; j < acceptedGenerations[i].size(); ++j) {
+            check(acceptedGenerations[i][j] > acceptedGenerations[i][j - 1],
+                  "Generations observed by each producer are strictly increasing");
+        }
         allGens.insert(allGens.end(), acceptedGenerations[i].begin(), acceptedGenerations[i].end());
     }
     check(!allGens.empty(), "Automatic publications were accepted");
@@ -864,6 +954,10 @@ int main() {
     std::cout << "[Running] Test 11: test_phase123_test_a_explicit_gen_contention..." << std::endl;
     test_phase123_test_a_explicit_gen_contention();
     std::cout << "Test 11: Explicit generation under contention PASSED" << std::endl;
+
+    std::cout << "[Running] Test 12a: test_phase123_test_b_legacy_observation_race..." << std::endl;
+    test_phase123_test_b_legacy_observation_race();
+    std::cout << "Test 12a: Legacy observation race reproduced and per-operation observation PASSED" << std::endl;
 
     std::cout << "[Running] Test 12: test_phase123_test_b_auto_gen_contention..." << std::endl;
     test_phase123_test_b_auto_gen_contention();
