@@ -63,9 +63,10 @@ void StereoMetricsComponent::paint(juce::Graphics& g) {
 
         juce::String valStr = "--";
         juce::String badgeStr = "SILENT";
-        juce::Colour col = secondaryText();
+        juce::Colour col = textMuted();
         float meterVal = 0.0f;
         bool valid = false;
+        bool alert = false;
 
         if (currentFrame.hasSignal) {
             if (currentFrame.isCorrelationValid) {
@@ -75,19 +76,21 @@ void StereoMetricsComponent::paint(juce::Graphics& g) {
 
                 if (smoothedCorr >= 0.60f) {
                     badgeStr = "IN PHASE";
-                    col = spatialAccent();
+                    col = primaryAccent();
                 } else if (smoothedCorr >= 0.15f) {
                     badgeStr = "CORRELATED";
-                    col = spatialAccent();
+                    col = primaryAccent();
                 } else if (smoothedCorr > -0.15f) {
                     badgeStr = "DECORRELATED";
-                    col = primaryText();
+                    col = textOnPanel();
                 } else if (smoothedCorr > -0.60f) {
                     badgeStr = "PHASE RISK";
-                    col = analogAccent();
+                    col = accentHover();
+                    alert = true;
                 } else {
                     badgeStr = "ANTIPHASE";
-                    col = warningAccent();
+                    col = accentHover();
+                    alert = true;
                 }
             } else {
                 if (currentFrame.correlationStatus == CorrelationStatus::LeftOnly) {
@@ -97,11 +100,11 @@ void StereoMetricsComponent::paint(juce::Graphics& g) {
                 } else {
                     badgeStr = "UNDEFINED";
                 }
-                col = secondaryText();
+                col = textSecondary();
             }
         }
 
-        drawMetricCard(g, cardArea, "CORRELATION", valStr, badgeStr, col, meterVal, true, valid);
+        drawMetricCard(g, cardArea, "CORRELATION", valStr, badgeStr, col, meterVal, true, valid, alert);
     }
 
     // 2. SIDE / MID
@@ -111,28 +114,32 @@ void StereoMetricsComponent::paint(juce::Graphics& g) {
 
         juce::String valStr = "--";
         juce::String badgeStr = "SILENT";
-        juce::Colour col = secondaryText();
+        juce::Colour col = textMuted();
         float meterVal = 0.0f;
         bool valid = false;
+        bool alert = false;
 
         if (currentFrame.hasSignal) {
             if (currentFrame.isSideMidValid) {
                 valid = true;
                 valStr = juce::String::formatted("%+.1f dB", (double)smoothedOutSmDb);
                 badgeStr = "OUTPUT";
-                col = spatialAccent();
+                col = primaryAccent();
                 meterVal = juce::jlimit(0.0f, 1.0f, (smoothedOutSmDb + 30.0f) / 40.0f);
             } else if (currentFrame.midRms > 1.0e-5f && currentFrame.sideRms <= 1.0e-5f) {
                 badgeStr = "MONO";
+                col = textSecondary();
             } else if (currentFrame.sideRms > 1.0e-5f && currentFrame.midRms <= 1.0e-5f) {
                 badgeStr = "SIDE ONLY";
-                col = warningAccent();
+                col = accentHover();
+                alert = true;
             } else {
                 badgeStr = "N/A";
+                col = textSecondary();
             }
         }
 
-        drawMetricCard(g, cardArea, "SIDE / MID", valStr, badgeStr, col, meterVal, false, valid);
+        drawMetricCard(g, cardArea, "SIDE / MID", valStr, badgeStr, col, meterVal, false, valid, alert);
     }
 
     // 3. MONO SUM
@@ -142,9 +149,10 @@ void StereoMetricsComponent::paint(juce::Graphics& g) {
 
         juce::String valStr = "--";
         juce::String badgeStr = "SILENT";
-        juce::Colour col = secondaryText();
+        juce::Colour col = textMuted();
         float meterVal = 0.0f;
         bool valid = false;
+        bool alert = false;
 
         if (currentFrame.hasSignal && currentFrame.stereoReferenceRms > 1.0e-5f) {
             valid = true;
@@ -152,22 +160,23 @@ void StereoMetricsComponent::paint(juce::Graphics& g) {
 
             if (smoothedMonoAttenDb >= -1.0f) {
                 badgeStr = "STABLE";
-                col = spatialAccent();
+                col = primaryAccent();
             } else if (smoothedMonoAttenDb >= -3.5f) {
                 badgeStr = "MILD LOSS";
-                col = primaryText();
+                col = textOnPanel();
             } else if (smoothedMonoAttenDb >= -7.0f) {
                 badgeStr = "ATTENUATION";
-                col = analogAccent();
+                col = textSecondary();
             } else {
                 badgeStr = "CANCEL RISK";
-                col = warningAccent();
+                col = accentHover();
+                alert = true;
             }
 
             meterVal = juce::jlimit(0.0f, 1.0f, 1.0f + (smoothedMonoAttenDb / 12.0f));
         }
 
-        drawMetricCard(g, cardArea, "MONO SUM", valStr, badgeStr, col, meterVal, false, valid);
+        drawMetricCard(g, cardArea, "MONO SUM", valStr, badgeStr, col, meterVal, false, valid, alert);
     }
 
     // 4. STEREO DELTA
@@ -176,14 +185,16 @@ void StereoMetricsComponent::paint(juce::Graphics& g) {
 
         juce::String valStr = "--";
         juce::String badgeStr = "SILENT";
-        juce::Colour col = secondaryText();
+        juce::Colour col = textMuted();
         float meterVal = 0.0f;
         bool valid = false;
+        bool alert = false;
 
         if (currentFrame.hasSignal) {
             if (bypassActive) {
                 badgeStr = "BYPASS";
-                col = warningAccent();
+                col = primaryAccent();
+                alert = true;
                 if (currentFrame.isStereoDeltaValid) {
                     valStr = juce::String::formatted("%+.1f dB", (double)currentFrame.stereoDeltaDb);
                 }
@@ -193,13 +204,13 @@ void StereoMetricsComponent::paint(juce::Graphics& g) {
 
                 if (smoothedStereoDeltaDb > 0.4f) {
                     badgeStr = "EXPANDED";
-                    col = spatialAccent();
+                    col = primaryAccent();
                 } else if (smoothedStereoDeltaDb < -0.4f) {
                     badgeStr = "NARROWED";
-                    col = analogAccent();
+                    col = textSecondary();
                 } else {
                     badgeStr = "UNITY";
-                    col = primaryText();
+                    col = textOnPanel();
                 }
 
                 meterVal = juce::jlimit(-1.0f, 1.0f, smoothedStereoDeltaDb / 12.0f);
@@ -219,24 +230,24 @@ void StereoMetricsComponent::paint(juce::Graphics& g) {
                 } else {
                     badgeStr = "LIMITED";
                 }
-                col = secondaryText();
+                col = textSecondary();
             }
         }
 
-        drawMetricCard(g, cardArea, "STEREO DELTA", valStr, badgeStr, col, meterVal, true, valid);
+        drawMetricCard(g, cardArea, "STEREO DELTA", valStr, badgeStr, col, meterVal, true, valid, alert);
     }
 }
 
 void StereoMetricsComponent::drawMetricCard(juce::Graphics& g, juce::Rectangle<float> bounds,
                                             const juce::String& title, const juce::String& valueText,
                                             const juce::String& badgeText, juce::Colour accentColour,
-                                            float meterValue, bool isBipolar, bool isValid) {
+                                            float meterValue, bool isBipolar, bool isValid, bool isAlert) {
     using namespace Dimension5UI;
 
-    g.setColour(surfaceColour().brighter(0.015f));
-    g.fillRoundedRectangle(bounds, 5.0f);
-    g.setColour(dividerColour());
-    g.drawRoundedRectangle(bounds, 5.0f, 1.0f);
+    g.setColour(panelRecessed());
+    g.fillRoundedRectangle(bounds, 4.5f);
+    g.setColour(isAlert ? primaryAccent() : panelBorder());
+    g.drawRoundedRectangle(bounds, 4.5f, isAlert ? 1.2f : 1.0f);
 
     auto content = bounds.reduced(9.0f, 5.0f);
     if (content.getHeight() < 40.0f || content.getWidth() < 40.0f) {
@@ -244,20 +255,28 @@ void StereoMetricsComponent::drawMetricCard(juce::Graphics& g, juce::Rectangle<f
     }
 
     const bool compact = content.getWidth() < 112.0f;
-    const float titleFont = juce::jlimit(8.2f, 10.2f, content.getWidth() * 0.075f);
-    const float statusFont = juce::jlimit(7.8f, 9.5f, content.getWidth() * 0.068f);
-    const float valueFont = juce::jlimit(compact ? 15.0f : 17.0f, 22.0f, content.getWidth() * 0.16f);
+    const float titleFont  = juce::jlimit(8.2f, 10.0f, content.getWidth() * 0.075f);
+    const float statusFont = juce::jlimit(7.8f, 9.2f, content.getWidth() * 0.068f);
+    const float valueFont  = juce::jlimit(compact ? 14.5f : 16.5f, 21.0f, content.getWidth() * 0.155f);
 
-    // Row 1: title + status dot
+    // Row 1: title + status indicator (dot or hollow square for alert)
     auto titleRow = content.removeFromTop(compact ? 11.0f : 12.0f);
-    g.setFont(juce::Font(titleFont, juce::Font::bold));
-    g.setColour(secondaryText());
+    g.setFont(Dimension5LookAndFeel::makeTechnicalFont(titleFont, true));
+    g.setColour(textSecondary());
     g.drawText(title, titleRow.removeFromLeft(titleRow.getWidth() - 12.0f),
                juce::Justification::centredLeft, false);
 
-    const float dotR = 3.0f;
-    g.setColour(accentColour.withAlpha(isValid ? 0.9f : 0.45f));
-    g.fillEllipse(titleRow.getRight() - dotR * 2.0f, titleRow.getCentreY() - dotR, dotR * 2.0f, dotR * 2.0f);
+    const float dotR = 2.8f;
+    const float dotX = titleRow.getRight() - dotR * 2.0f;
+    const float dotY = titleRow.getCentreY() - dotR;
+    g.setColour(accentColour.withAlpha((isValid || isAlert) ? 0.95f : 0.45f));
+    if (isAlert) {
+        g.drawRect(dotX - 0.5f, dotY - 0.5f, dotR * 2.0f + 1.0f, dotR * 2.0f + 1.0f, 1.3f);
+    } else if (isValid) {
+        g.fillEllipse(dotX, dotY, dotR * 2.0f, dotR * 2.0f);
+    } else {
+        g.drawEllipse(dotX, dotY, dotR * 2.0f, dotR * 2.0f, 1.0f);
+    }
 
     // Bottom rows: status, bar, value
     auto statusRow = content.removeFromBottom(compact ? 11.0f : 12.0f);
@@ -265,20 +284,20 @@ void StereoMetricsComponent::drawMetricCard(juce::Graphics& g, juce::Rectangle<f
     auto barArea = content.removeFromBottom(5.0f);
     content.removeFromBottom(3.0f);
 
-    g.setFont(juce::Font(statusFont, juce::Font::bold));
-    g.setColour(accentColour.withAlpha(isValid ? 0.95f : 0.65f));
+    g.setFont(Dimension5LookAndFeel::makeTechnicalFont(statusFont, true));
+    g.setColour(accentColour.withAlpha((isValid || isAlert) ? 0.95f : 0.70f));
     g.drawText(badgeText, statusRow, juce::Justification::centredLeft, false);
 
-    // Graphical indicator
-    g.setColour(elevatedColour());
+    // Graphical indicator track
+    g.setColour(displayBackground());
     g.fillRoundedRectangle(barArea, 2.0f);
-    g.setColour(dividerColour());
-    g.drawRoundedRectangle(barArea, 2.0f, 0.5f);
+    g.setColour(panelBorder());
+    g.drawRoundedRectangle(barArea, 2.0f, 0.7f);
 
     if (isValid) {
         if (isBipolar) {
             const float midX = barArea.getCentreX();
-            g.setColour(dividerColour().brighter(0.25f));
+            g.setColour(displayAxis().brighter(0.25f));
             g.drawLine(midX, barArea.getY(), midX, barArea.getBottom(), 1.0f);
 
             const float halfW = barArea.getWidth() * 0.5f;
@@ -303,7 +322,7 @@ void StereoMetricsComponent::drawMetricCard(juce::Graphics& g, juce::Rectangle<f
     }
 
     // Numeric value: omitted entirely when the measurement is invalid.
-    g.setFont(juce::Font(valueFont, juce::Font::bold));
-    g.setColour(isValid ? primaryText() : secondaryText().withAlpha(0.60f));
+    g.setFont(Dimension5LookAndFeel::makeTechnicalFont(valueFont, true));
+    g.setColour(isValid ? textOnPanel() : textMuted().withAlpha(0.65f));
     g.drawText(valueText, content, juce::Justification::centredLeft, false);
 }

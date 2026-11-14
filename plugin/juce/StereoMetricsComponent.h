@@ -41,7 +41,7 @@ private:
     void drawMetricCard(juce::Graphics& g, juce::Rectangle<float> bounds,
                         const juce::String& title, const juce::String& valueText,
                         const juce::String& badgeText, juce::Colour accentColour,
-                        float meterValue, bool isBipolar, bool isValid);
+                        float meterValue, bool isBipolar, bool isValid, bool isAlert = false);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(StereoMetricsComponent)
 };

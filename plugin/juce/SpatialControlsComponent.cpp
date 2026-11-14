@@ -1,8 +1,9 @@
 #include "SpatialControlsComponent.h"
+#include <algorithm>
 
 namespace {
 void placeKnob(juce::Rectangle<int> cell, int knobSize,
-               juce::Label& label, juce::Slider& slider, int labelHeight) {
+               juce::Label& label, juce::Slider& slider, int labelHeight, bool isHero) {
     if (cell.isEmpty()) {
         label.setBounds(0, 0, 0, 0);
         slider.setBounds(0, 0, 0, 0);
@@ -10,6 +11,11 @@ void placeKnob(juce::Rectangle<int> cell, int knobSize,
     }
     const int effectiveLabelH = juce::jlimit(12, 18, juce::jmin(labelHeight, cell.getHeight() / 3));
     label.setBounds(cell.removeFromTop(effectiveLabelH));
+
+    // Keep textBox proportional so value readout never clips at compact or maximum sizes
+    const int textBoxH = juce::jlimit(16, 20, juce::roundToInt((float)cell.getHeight() * 0.19f));
+    const int textBoxW = juce::jlimit(isHero ? 60 : 54, isHero ? 82 : 72, cell.getWidth() - 8);
+    slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, textBoxW, textBoxH);
 
     // Slider stays strictly within the remaining cell bounds - NEVER expand vertically outside cell
     const int availW = cell.getWidth();
@@ -42,14 +48,17 @@ void SpatialControlsComponent::configureKnob(juce::Slider& slider, juce::Label& 
 
     slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
     slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, isSpatialHero ? 72 : 62, 18);
-    slider.setColour(juce::Slider::rotarySliderFillColourId, isSpatialHero ? spatialAccent() : analogAccent());
+    slider.setColour(juce::Slider::rotarySliderFillColourId, primaryAccent());
     slider.setTextValueSuffix("");
+    slider.setSliderSnapsToMousePosition(false);
+    slider.setVelocityModeParameters(1.0, 1, 0.08, true, juce::ModifierKeys::ctrlAltCommandModifiers);
     addAndMakeVisible(slider);
 
     label.setText(text, juce::dontSendNotification);
     label.setJustificationType(juce::Justification::centred);
-    label.setColour(juce::Label::textColourId, isSpatialHero ? spatialAccent() : analogAccent());
-    label.setFont(juce::Font(isSpatialHero ? 11.5f : 10.5f, juce::Font::bold));
+    label.setColour(juce::Label::textColourId, isSpatialHero ? textOnPanel() : textSecondary());
+    label.setFont(Dimension5LookAndFeel::makeTechnicalFont(isSpatialHero ? 11.2f : 10.2f, true));
+    label.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(label);
 }
 
@@ -59,6 +68,22 @@ void SpatialControlsComponent::attachParameters(juce::AudioProcessorValueTreeSta
     depthAttachment  = std::make_unique<SliderAttachment>(apvts, "depthMs", depthSlider);
     motionAttachment = std::make_unique<SliderAttachment>(apvts, "rateHz", motionSlider);
     colorAttachment  = std::make_unique<SliderAttachment>(apvts, "lpfHz", colorSlider);
+
+    auto bindDefaultMarkerAndReset = [&apvts](juce::Slider& s, const char* id, double fallbackDefault) {
+        if (const auto* param = apvts.getParameter(id)) {
+            const float defNorm = param->getDefaultValue();
+            s.getProperties().set("defaultNorm", defNorm);
+            s.setDoubleClickReturnValue(true, (double)param->convertFrom0to1(defNorm));
+        } else {
+            s.setDoubleClickReturnValue(true, fallbackDefault);
+        }
+    };
+
+    bindDefaultMarkerAndReset(spreadSlider, "width", 1.0);
+    bindDefaultMarkerAndReset(mixSlider,    "mix", 1.0);
+    bindDefaultMarkerAndReset(depthSlider,  "depthMs", 0.9);
+    bindDefaultMarkerAndReset(motionSlider, "rateHz", 0.25);
+    bindDefaultMarkerAndReset(colorSlider,  "lpfHz", 8000.0);
 
     // Explicit unit formatting applied AFTER attachment binding to override generic host defaults
     spreadSlider.setTextValueSuffix("");
@@ -124,8 +149,8 @@ void SpatialControlsComponent::resized() {
     auto bounds = getLocalBounds().reduced(juce::jlimit(6, 10, getWidth() / 36));
 
     // Responsive header title
-    const bool isCompactHeight = bounds.getHeight() < 240;
-    const int titleH = isCompactHeight ? 22 : 28;
+    const bool isCompactHeight = getHeight() < 240;
+    const int titleH = isCompactHeight ? 24 : 30;
     bounds.removeFromTop(titleH);
 
     // Responsive footer (omit if vertical space is tight)
@@ -157,8 +182,8 @@ void SpatialControlsComponent::resized() {
     const int heroSize = juce::jlimit(36, 180, juce::jmin(maxHeroKnobFromW, maxHeroKnobFromH));
 
     const int heroLabelH = isCompactHeight ? 14 : 18;
-    placeKnob(spreadBox, heroSize, spreadLabel, spreadSlider, heroLabelH);
-    placeKnob(mixBox, heroSize, mixLabel, mixSlider, heroLabelH);
+    placeKnob(spreadBox, heroSize, spreadLabel, spreadSlider, heroLabelH, true);
+    placeKnob(mixBox, heroSize, mixLabel, mixSlider, heroLabelH, true);
 
     const int secWidth = secondaryRow.getWidth() / 3;
     auto depthBox = secondaryRow.removeFromLeft(secWidth).reduced(2, 0);
@@ -170,36 +195,82 @@ void SpatialControlsComponent::resized() {
     const int secondarySize = juce::jlimit(28, 120, juce::jmin(maxSecKnobFromW, maxSecKnobFromH));
 
     const int secLabelH = isCompactHeight ? 13 : 16;
-    placeKnob(depthBox, secondarySize, depthLabel, depthSlider, secLabelH);
-    placeKnob(motionBox, secondarySize, motionLabel, motionSlider, secLabelH);
-    placeKnob(colorBox, secondarySize, colorLabel, colorSlider, secLabelH);
+    placeKnob(depthBox, secondarySize, depthLabel, depthSlider, secLabelH, false);
+    placeKnob(motionBox, secondarySize, motionLabel, motionSlider, secLabelH, false);
+    placeKnob(colorBox, secondarySize, colorLabel, colorSlider, secLabelH, false);
 }
 
 void SpatialControlsComponent::paint(juce::Graphics& g) {
     using namespace Dimension5UI;
 
-    auto bounds = getLocalBounds().toFloat();
+    const auto bounds = getLocalBounds().toFloat().reduced(0.5f);
+    constexpr float corner = 5.5f;
 
-    g.setColour(surfaceColour());
-    g.fillRoundedRectangle(bounds, 6.0f);
-    g.setColour(dividerColour());
-    g.drawRoundedRectangle(bounds, 6.0f, 1.0f);
+    // 1. Main graphite module body (#292B2D) over the off-white chassis
+    g.setColour(panelBackground());
+    g.fillRoundedRectangle(bounds, corner);
 
-    const float headerH = (getHeight() < 240) ? 24.0f : 32.0f;
-    g.setColour(dividerColour());
-    g.drawLine(bounds.getX() + 8.0f, bounds.getY() + headerH, bounds.getRight() - 8.0f, bounds.getY() + headerH, 1.0f);
+    // 2. Recessed top header band (#212325)
+    const bool isCompact = getHeight() < 240;
+    const float headerH = isCompact ? 24.0f : 30.0f;
+    const juce::Rectangle<float> headerBgRect(bounds.getX() + 1.0f, bounds.getY() + 1.0f,
+                                              bounds.getWidth() - 2.0f, headerH);
+    g.setColour(panelRecessed());
+    g.fillRoundedRectangle(headerBgRect, corner);
+    g.fillRect(bounds.getX() + 1.0f, bounds.getY() + headerH - corner, bounds.getWidth() - 2.0f, corner);
 
-    g.setFont(juce::Font((getHeight() < 240) ? 10.0f : 11.0f, juce::Font::bold));
-    g.setColour(secondaryText());
-    g.drawText("SPATIAL MATRIX CONTROLS", bounds.getX() + 12.0f, bounds.getY(),
-               bounds.getWidth() - 24.0f, headerH, juce::Justification::centredLeft);
+    g.setColour(panelBorder());
+    g.drawRoundedRectangle(bounds, corner, 1.0f);
+    g.drawHorizontalLine((int)(bounds.getY() + headerH), bounds.getX() + 1.0f, bounds.getRight() - 1.0f);
 
-    // Footer identification: displayed when sufficient vertical clearance exists
+    // Minimalist orange index bar + section title
+    g.setColour(primaryAccent());
+    g.fillRoundedRectangle(bounds.getX() + 10.0f, bounds.getY() + (headerH - 11.0f) * 0.5f, 3.0f, 11.0f, 1.2f);
+
+    g.setFont(Dimension5LookAndFeel::makeTechnicalFont(isCompact ? 10.2f : 11.2f, true));
+    g.setColour(textOnPanel());
+    g.drawText("SPATIAL CONTROLS",
+               (int)(bounds.getX() + 18.0f), (int)bounds.getY(),
+               (int)(bounds.getWidth() * 0.58f), (int)headerH,
+               juce::Justification::centredLeft, false);
+
+    if (bounds.getWidth() >= 270.0f) {
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(isCompact ? 8.5f : 9.2f, false));
+        g.setColour(textMuted());
+        g.drawText("SPREAD / BBD / TONE",
+                   (int)(bounds.getX() + bounds.getWidth() * 0.48f), (int)bounds.getY(),
+                   (int)(bounds.getWidth() * 0.52f - 10.0f), (int)headerH,
+                   juce::Justification::centredRight, false);
+    }
+
+    // 3. Subtle structural dividers between primary hero row and secondary precision row
+    const float footerH = isCompact ? ((getHeight() < 185) ? 0.0f : 14.0f) : 20.0f;
+    const float bodyTop = bounds.getY() + headerH + 6.0f;
+    const float bodyBottom = bounds.getBottom() - footerH - 6.0f;
+    const float bodyH = std::max(20.0f, bodyBottom - bodyTop);
+    const float splitY = bodyTop + bodyH * 0.55f;
+
+    g.setColour(panelBorder().withAlpha(0.70f));
+    g.drawHorizontalLine((int)splitY, bounds.getX() + 12.0f, bounds.getRight() - 12.0f);
+
+    // Vertical divider between SPREAD and MIX in Hero Row
+    g.drawVerticalLine((int)bounds.getCentreX(), bodyTop + 4.0f, splitY - 6.0f);
+
+    // Vertical dividers between DEPTH, MOTION and COLOR in Secondary Row
+    const float thirdW = bounds.getWidth() / 3.0f;
+    g.drawVerticalLine((int)(bounds.getX() + thirdW), splitY + 6.0f, bodyBottom - 4.0f);
+    g.drawVerticalLine((int)(bounds.getX() + thirdW * 2.0f), splitY + 6.0f, bodyBottom - 4.0f);
+
+    // 4. Footer identification when vertical clearance exists
     if (getHeight() >= 190) {
-        g.setFont(juce::Font(8.0f, juce::Font::plain));
-        g.setColour(secondaryText().withAlpha(0.45f));
-        g.drawText("BBD-LITE ENGINE / STEREO MATRIX",
-                   bounds.getX() + 12.0f, bounds.getBottom() - 18.0f,
-                   bounds.getWidth() - 24.0f, 14.0f, juce::Justification::centredLeft);
+        g.setColour(panelBorder().withAlpha(0.55f));
+        g.drawHorizontalLine((int)(bounds.getBottom() - 20.0f), bounds.getX() + 10.0f, bounds.getRight() - 10.0f);
+
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(8.5f, true));
+        g.setColour(textMuted());
+        g.drawText("BBD-LITE ENGINE  |  ANTIPHASE MATRIX",
+                   (int)(bounds.getX() + 12.0f), (int)(bounds.getBottom() - 18.0f),
+                   (int)(bounds.getWidth() - 24.0f), 15,
+                   juce::Justification::centredLeft, false);
     }
 }
