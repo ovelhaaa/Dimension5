@@ -1,4 +1,5 @@
 #include "StereoFieldComponent.h"
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -257,17 +258,17 @@ uint32_t StereoFieldComponent::getVectorSegmentCount() const noexcept {
 void StereoFieldComponent::resized() {
     auto bounds = getLocalBounds();
 
-    headerBounds = bounds.removeFromTop(34);
-    auto modeButtonsArea = headerBounds.removeFromRight(juce::jlimit(156, 214, headerBounds.getWidth() / 2));
-    modeButtonsArea = modeButtonsArea.reduced(0, 4);
+    headerBounds = bounds.removeFromTop(32);
+    auto modeButtonsArea = headerBounds.removeFromRight(juce::jlimit(162, 218, headerBounds.getWidth() / 2));
+    modeButtonsArea = modeButtonsArea.reduced(6, 4);
     const int btnW = modeButtonsArea.getWidth() / 3;
     fieldModeButton.setBounds(modeButtonsArea.removeFromLeft(btnW).reduced(2, 0));
     vectorModeButton.setBounds(modeButtonsArea.removeFromLeft(btnW).reduced(2, 0));
     deltaModeButton.setBounds(modeButtonsArea.reduced(2, 0));
 
-    const int metricsHeight = juce::jlimit(86, 108, juce::roundToInt((float)bounds.getHeight() * 0.23f));
+    const int metricsHeight = juce::jlimit(82, 106, juce::roundToInt((float)bounds.getHeight() * 0.24f));
     metricsBounds = bounds.removeFromBottom(metricsHeight);
-    metricsComponent.setBounds(metricsBounds.reduced(8, 3));
+    metricsComponent.setBounds(metricsBounds.reduced(8, 5));
 
     scopeBounds = bounds;
 }
@@ -275,38 +276,71 @@ void StereoFieldComponent::resized() {
 void StereoFieldComponent::paint(juce::Graphics& g) {
     using namespace Dimension5UI;
 
-    auto totalArea = getLocalBounds().toFloat();
+    const auto totalArea = getLocalBounds().toFloat().reduced(0.5f);
+    constexpr float corner = 5.5f;
 
-    g.setColour(surfaceColour());
-    g.fillRoundedRectangle(totalArea, 6.0f);
-    g.setColour(dividerColour());
-    g.drawRoundedRectangle(totalArea, 6.0f, 1.0f);
+    // 1. Outer graphite module frame (#292B2D) over off-white chassis
+    g.setColour(panelBackground());
+    g.fillRoundedRectangle(totalArea, corner);
 
-    g.setColour(dividerColour());
-    g.drawLine(totalArea.getX() + 8.0f, (float)headerBounds.getBottom(),
-               totalArea.getRight() - 8.0f, (float)headerBounds.getBottom(), 1.0f);
+    // 2. Recessed header bar (#212325)
+    const float headerH = (float)headerBounds.getHeight();
+    const juce::Rectangle<float> headerBgRect(totalArea.getX() + 1.0f, totalArea.getY() + 1.0f,
+                                              totalArea.getWidth() - 2.0f, headerH);
+    g.setColour(panelRecessed());
+    g.fillRoundedRectangle(headerBgRect, corner);
+    g.fillRect(totalArea.getX() + 1.0f, totalArea.getY() + headerH - corner, totalArea.getWidth() - 2.0f, corner);
 
-    g.setFont(juce::Font(11.0f, juce::Font::bold));
-    g.setColour(secondaryText());
-    auto titleArea = headerBounds.toFloat().reduced(12.0f, 0.0f);
-    g.drawText("STEREO FIELD MONITOR 2.1", titleArea.removeFromLeft(196.0f), juce::Justification::centredLeft);
+    g.setColour(panelBorder());
+    g.drawRoundedRectangle(totalArea, corner, 1.0f);
+    g.drawHorizontalLine(headerBounds.getBottom(), totalArea.getX() + 1.0f, totalArea.getRight() - 1.0f);
+
+    // Minimalist orange index bar + section title
+    g.setColour(primaryAccent());
+    g.fillRoundedRectangle(totalArea.getX() + 10.0f, totalArea.getY() + (headerH - 11.0f) * 0.5f, 3.0f, 11.0f, 1.2f);
+
+    g.setFont(Dimension5LookAndFeel::makeTechnicalFont(11.2f, true));
+    g.setColour(textOnPanel());
+    const float availableForTitle = (float)fieldModeButton.getX() - 28.0f;
+    const float titleW = juce::jmin(160.0f, juce::jmax(70.0f, availableForTitle));
+    g.drawText("STEREO FIELD MONITOR", 18.0f, 0.0f, titleW, (float)headerH, juce::Justification::centredLeft, true);
 
     juce::String modeDesc;
-    if (currentMode == ViewMode::Field)       modeDesc = "FIELD / Measured Phosphor Cloud";
-    else if (currentMode == ViewMode::Vector) modeDesc = "VECTOR / Continuous Lissajous";
-    else                                      modeDesc = "DELTA / True Input vs Output";
+    if (currentMode == ViewMode::Field)       modeDesc = "FIELD  |  MEASURED PHOSPHOR CLOUD";
+    else if (currentMode == ViewMode::Vector) modeDesc = "VECTOR  |  CONTINUOUS LISSAJOUS";
+    else                                      modeDesc = "DELTA  |  INPUT VS OUTPUT";
 
-    if (titleArea.getWidth() > 110.0f) {
-        g.setFont(juce::Font(9.5f, juce::Font::plain));
-        g.setColour(secondaryText().withAlpha(0.6f));
-        g.drawText(modeDesc, titleArea, juce::Justification::centredLeft);
+    const float subX = 18.0f + titleW + 12.0f;
+    const float subW = (float)fieldModeButton.getX() - subX - 10.0f;
+    if (subW > 180.0f) {
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(9.2f, false));
+        g.setColour(textMuted());
+        g.drawText(modeDesc, (int)subX, 0, (int)subW, headerH, juce::Justification::centredLeft, false);
     }
 
-    g.setColour(dividerColour());
-    g.drawLine(totalArea.getX() + 8.0f, (float)metricsBounds.getY(),
-               totalArea.getRight() - 8.0f, (float)metricsBounds.getY(), 1.0f);
+    // 3. Recessed almost-black display interior (#17191B) inside the graphite frame
+    auto displayFrame = scopeBounds.toFloat().reduced(8.0f, 6.0f);
+    g.setColour(displayBackground());
+    g.fillRoundedRectangle(displayFrame, 4.0f);
+    g.setColour(panelBorder());
+    g.drawRoundedRectangle(displayFrame, 4.0f, 1.0f);
 
-    auto scopeArea = scopeBounds.toFloat().reduced(8.0f, 6.0f);
+    // Subtle technical graticule inside display screen
+    g.setColour(displayGrid());
+    for (int r = 1; r <= 3; ++r) {
+        const float gy = displayFrame.getY() + displayFrame.getHeight() * ((float)r * 0.25f);
+        g.drawHorizontalLine((int)gy, displayFrame.getX() + 2.0f, displayFrame.getRight() - 2.0f);
+    }
+    for (int c = 1; c <= 5; ++c) {
+        const float gx = displayFrame.getX() + displayFrame.getWidth() * ((float)c / 6.0f);
+        g.drawVerticalLine((int)gx, displayFrame.getY() + 2.0f, displayFrame.getBottom() - 2.0f);
+    }
+
+    // Divider line above metrics strip
+    g.setColour(panelBorder());
+    g.drawHorizontalLine(metricsBounds.getY(), totalArea.getX() + 8.0f, totalArea.getRight() - 8.0f);
+
+    auto scopeArea = displayFrame.reduced(6.0f, 4.0f);
 
     if (currentMode == ViewMode::Field) {
         drawFieldMode(g, scopeArea);
@@ -324,7 +358,7 @@ void StereoFieldComponent::drawFieldMode(juce::Graphics& g, juce::Rectangle<floa
     using namespace Dimension5UI;
 
     const auto center = area.getCentre();
-    const float radius = juce::jmin(area.getWidth(), area.getHeight()) * 0.47f;
+    const float radius = juce::jmin(area.getWidth(), area.getHeight()) * 0.46f;
 
     drawReticle(g, center, radius, true);
 
@@ -332,16 +366,17 @@ void StereoFieldComponent::drawFieldMode(juce::Graphics& g, juce::Rectangle<floa
         drawAuxiliaryAperture(g, center, radius);
     }
 
-    // A small, explicit label: this is a configuration guide, never a measurement.
+    // Explicit legend: configuration guide (neutral dashed) vs measured signal (orange)
     if (!bypassActive) {
-        g.setFont(juce::Font(8.0f, juce::Font::plain));
-        g.setColour(secondaryText().withAlpha(0.38f));
-        g.drawText("CONFIG GUIDE", area.getX() + 4.0f, area.getY() + 2.0f,
-                   90.0f, 10.0f, juce::Justification::centredLeft);
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(8.2f, true));
+        g.setColour(textMuted().withAlpha(0.75f));
+        g.drawText("CONFIG GUIDE (DASHED)", area.getX() + 4.0f, area.getY() + 2.0f,
+                   130.0f, 11.0f, juce::Justification::centredLeft);
     }
 
     const float scale = radius * 0.92f;
-    const auto accent = spatialAccent();
+    const auto accent = primaryAccent();
+    const auto hotCore = accentHover();
     const float scaleFactor = displayScale;
 
     for (size_t k = 0; k < pointCount; ++k) {
@@ -353,24 +388,24 @@ void StereoFieldComponent::drawFieldMode(juce::Graphics& g, juce::Rectangle<floa
         const float px = center.x + juce::jlimit(-1.20f, 1.20f, pt.outputSide * scaleFactor) * scale;
         const float py = center.y - juce::jlimit(-1.20f, 1.20f, pt.outputMid * scaleFactor) * scale;
 
-        // Discrete halo + small bright core: density and amplitude stay distinct.
+        // Warm orange phosphor halo + crisp high-intensity core
         g.setColour(accent.withAlpha(0.05f + 0.16f * pt.age));
         g.fillEllipse(px - 3.0f, py - 3.0f, 6.0f, 6.0f);
 
-        g.setColour(accent.withAlpha(0.30f + 0.60f * pt.age));
-        g.fillEllipse(px - 1.05f, py - 1.05f, 2.1f, 2.1f);
+        g.setColour(accent.withAlpha(0.32f + 0.60f * pt.age));
+        g.fillEllipse(px - 1.1f, py - 1.1f, 2.2f, 2.2f);
 
         if (pt.age > 0.72f) {
-            g.setColour(primaryText().withAlpha(0.55f * (pt.age - 0.72f) / 0.28f));
-            g.fillEllipse(px - 0.55f, py - 0.55f, 1.1f, 1.1f);
+            g.setColour(hotCore.interpolatedWith(textOnPanel(), 0.45f).withAlpha(0.65f * (pt.age - 0.72f) / 0.28f));
+            g.fillEllipse(px - 0.6f, py - 0.6f, 1.2f, 1.2f);
         }
     }
 
     if (getActiveOutputPointCount() == 0 && !hasSignal) {
-        g.setFont(juce::Font(10.5f, juce::Font::bold));
-        g.setColour(secondaryText().withAlpha(0.55f));
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(10.0f, true));
+        g.setColour(textMuted().withAlpha(0.75f));
         g.drawText("AWAITING SIGNAL",
-                   center.x - 100.0f, center.y + radius * 0.52f,
+                   center.x - 100.0f, center.y + radius * 0.50f,
                    200.0f, 16.0f, juce::Justification::centred);
     }
 
@@ -386,7 +421,7 @@ void StereoFieldComponent::drawFieldMode(juce::Graphics& g, juce::Rectangle<floa
 // ==============================================================================
 juce::Path StereoFieldComponent::buildVectorPath(juce::Rectangle<float> area) const {
     const auto center = area.getCentre();
-    const float radius = juce::jmin(area.getWidth(), area.getHeight()) * 0.47f;
+    const float radius = juce::jmin(area.getWidth(), area.getHeight()) * 0.46f;
     const float scale = radius * 0.92f;
 
     juce::Path path;
@@ -425,26 +460,26 @@ void StereoFieldComponent::drawVectorMode(juce::Graphics& g, juce::Rectangle<flo
     using namespace Dimension5UI;
 
     const auto center = area.getCentre();
-    const float radius = juce::jmin(area.getWidth(), area.getHeight()) * 0.47f;
+    const float radius = juce::jmin(area.getWidth(), area.getHeight()) * 0.46f;
 
     drawReticle(g, center, radius, true);
 
-    g.setColour(dividerColour().withAlpha(0.30f));
+    g.setColour(displayAxis().withAlpha(0.65f));
     g.drawEllipse(center.x - radius * 0.75f, center.y - radius * 0.75f, radius * 1.5f, radius * 1.5f, 0.75f);
     g.drawEllipse(center.x - radius * 0.50f, center.y - radius * 0.50f, radius * 1.0f, radius * 1.0f, 0.75f);
     g.drawEllipse(center.x - radius * 0.25f, center.y - radius * 0.25f, radius * 0.5f, radius * 0.5f, 0.75f);
 
-    g.setFont(juce::Font(8.5f, juce::Font::plain));
-    g.setColour(secondaryText().withAlpha(0.45f));
+    g.setFont(Dimension5LookAndFeel::makeTechnicalFont(8.2f, false));
+    g.setColour(textMuted().withAlpha(0.75f));
     g.drawText("-6 dB", center.x + 4.0f, center.y - radius * 0.75f - 9.0f, 35.0f, 10.0f, juce::Justification::centredLeft);
     g.drawText("-12 dB", center.x + 4.0f, center.y - radius * 0.50f - 9.0f, 35.0f, 10.0f, juce::Justification::centredLeft);
 
     if (getVectorSegmentCount() == 0) {
         if (!hasSignal) {
-            g.setFont(juce::Font(10.5f, juce::Font::bold));
-            g.setColour(secondaryText().withAlpha(0.55f));
+            g.setFont(Dimension5LookAndFeel::makeTechnicalFont(10.0f, true));
+            g.setColour(textMuted().withAlpha(0.75f));
             g.drawText("VECTOR SCOPE IDLE",
-                       center.x - 100.0f, center.y + radius * 0.52f,
+                       center.x - 100.0f, center.y + radius * 0.50f,
                        200.0f, 16.0f, juce::Justification::centred);
         }
         return;
@@ -452,11 +487,15 @@ void StereoFieldComponent::drawVectorMode(juce::Graphics& g, juce::Rectangle<flo
 
     const auto path = buildVectorPath(area);
 
-    g.setColour(spatialAccent().withAlpha(0.18f));
-    g.strokePath(path, juce::PathStrokeType(2.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    // Multi-luminosity orange trace: soft bloom + primary orange + bright highlight filament
+    g.setColour(primaryAccent().withAlpha(0.20f));
+    g.strokePath(path, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-    g.setColour(spatialAccent().withAlpha(0.82f));
-    g.strokePath(path, juce::PathStrokeType(1.05f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.setColour(primaryAccent().withAlpha(0.88f));
+    g.strokePath(path, juce::PathStrokeType(1.25f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+    g.setColour(accentHover().withAlpha(0.55f));
+    g.strokePath(path, juce::PathStrokeType(0.55f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
     if (bypassActive) {
         drawBypassBadge(g, area);
@@ -466,6 +505,9 @@ void StereoFieldComponent::drawVectorMode(juce::Graphics& g, juce::Rectangle<flo
 
 // ==============================================================================
 // 3. DELTA MODE: True Input vs Output from time-aligned measured samples
+//    Strictly single chromatic accent:
+//    - INPUT / BEFORE: neutral light gray (#BAB6AD) with hollow/fine coding
+//    - OUTPUT / AFTER: primary orange (#F36B2B) with solid luminous coding
 // ==============================================================================
 void StereoFieldComponent::drawDeltaMode(juce::Graphics& g, juce::Rectangle<float> area) {
     using namespace Dimension5UI;
@@ -476,97 +518,145 @@ void StereoFieldComponent::drawDeltaMode(juce::Graphics& g, juce::Rectangle<floa
     auto rightArea = working.removeFromRight(panelW);
     auto centerBadgeArea = working;
 
-    const float radius = juce::jmax(18.0f, juce::jmin(leftArea.getWidth(), leftArea.getHeight()) * 0.44f);
+    const float radius = juce::jmax(18.0f, juce::jmin(leftArea.getWidth(), leftArea.getHeight()) * 0.43f);
     const auto centerL = leftArea.getCentre();
     const auto centerR = rightArea.getCentre();
     const float scale = radius * 0.92f;
-    const auto amber = analogAccent();
-    const auto teal = spatialAccent();
+    const auto beforeCol = textSecondary(); // Neutral light gray (#BAB6AD)
+    const auto afterCol  = primaryAccent(); // Precision orange (#F36B2B)
 
+    // Left Reticle + BEFORE Legend Pill (Neutral Gray + Dashed Marker)
     drawReticle(g, centerL, radius, false);
-    g.setFont(juce::Font(10.0f, juce::Font::bold));
-    g.setColour(amber);
-    g.drawText("INPUT / BEFORE", leftArea.getX(), leftArea.getY() + 2.0f,
-               leftArea.getWidth(), 14.0f, juce::Justification::centred);
+    {
+        const juce::Rectangle<float> hdrL(leftArea.getX() + 6.0f, leftArea.getY() + 2.0f,
+                                          leftArea.getWidth() - 12.0f, 15.0f);
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(9.5f, true));
+        g.setColour(beforeCol);
+        g.drawText("INPUT / BEFORE (REF)", hdrL, juce::Justification::centred, false);
+    }
 
+    // Right Reticle + AFTER Legend Pill (Orange + Solid Marker)
     drawReticle(g, centerR, radius, false);
-    g.setColour(teal);
-    g.drawText("OUTPUT / AFTER", rightArea.getX(), rightArea.getY() + 2.0f,
-               rightArea.getWidth(), 14.0f, juce::Justification::centred);
+    {
+        const juce::Rectangle<float> hdrR(rightArea.getX() + 6.0f, rightArea.getY() + 2.0f,
+                                          rightArea.getWidth() - 12.0f, 15.0f);
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(9.5f, true));
+        g.setColour(afterCol);
+        g.drawText("OUTPUT / AFTER (ACTIVE)", hdrR, juce::Justification::centred, false);
+    }
 
     const float deltaScaleFactor = deltaDisplayScale;
+
+    // Connect consecutive points in BEFORE with a fine dashed neutral trace and AFTER with a continuous orange trace,
+    // plus distinct point clouds so both dense and sparse signals remain unmistakably differentiated.
+    juce::Path beforePath;
+    juce::Path afterPath;
+    bool hasPrev = false;
+    uint64_t prevSeq = 0;
 
     for (size_t k = 0; k < pointCount; ++k) {
         const auto& pt = points[chronologicalIndex(k)];
         if (pt.age <= kPointRemovalAge) {
+            hasPrev = false;
             continue;
         }
 
-        // Input cloud (amber). Same common scale as the output cloud.
-        {
-            const float px = centerL.x + juce::jlimit(-1.20f, 1.20f, pt.inputSide * deltaScaleFactor) * scale;
-            const float py = centerL.y - juce::jlimit(-1.20f, 1.20f, pt.inputMid * deltaScaleFactor) * scale;
-            g.setColour(amber.withAlpha(0.04f + 0.13f * pt.age));
-            g.fillEllipse(px - 2.8f, py - 2.8f, 5.6f, 5.6f);
-            g.setColour(amber.withAlpha(0.28f + 0.55f * pt.age));
-            g.fillEllipse(px - 1.0f, py - 1.0f, 2.0f, 2.0f);
+        const float inX = centerL.x + juce::jlimit(-1.20f, 1.20f, pt.inputSide * deltaScaleFactor) * scale;
+        const float inY = centerL.y - juce::jlimit(-1.20f, 1.20f, pt.inputMid * deltaScaleFactor) * scale;
+
+        const float outX = centerR.x + juce::jlimit(-1.20f, 1.20f, pt.outputSide * deltaScaleFactor) * scale;
+        const float outY = centerR.y - juce::jlimit(-1.20f, 1.20f, pt.outputMid * deltaScaleFactor) * scale;
+
+        if (pt.age > 0.22f) {
+            if (!hasPrev || pt.sequence != prevSeq + 1) {
+                beforePath.startNewSubPath(inX, inY);
+                afterPath.startNewSubPath(outX, outY);
+            } else {
+                beforePath.lineTo(inX, inY);
+                afterPath.lineTo(outX, outY);
+            }
+            prevSeq = pt.sequence;
+            hasPrev = true;
         }
 
-        // Output cloud (teal). Same common scale as the input cloud.
-        {
-            const float px = centerR.x + juce::jlimit(-1.20f, 1.20f, pt.outputSide * deltaScaleFactor) * scale;
-            const float py = centerR.y - juce::jlimit(-1.20f, 1.20f, pt.outputMid * deltaScaleFactor) * scale;
-            g.setColour(teal.withAlpha(0.04f + 0.13f * pt.age));
-            g.fillEllipse(px - 2.8f, py - 2.8f, 5.6f, 5.6f);
-            g.setColour(teal.withAlpha(0.28f + 0.55f * pt.age));
-            g.fillEllipse(px - 1.0f, py - 1.0f, 2.0f, 2.0f);
-        }
+        // Input cloud (neutral gray, fine crisp points)
+        g.setColour(beforeCol.withAlpha(0.04f + 0.10f * pt.age));
+        g.fillEllipse(inX - 2.2f, inY - 2.2f, 4.4f, 4.4f);
+        g.setColour(beforeCol.withAlpha(0.28f + 0.52f * pt.age));
+        g.fillEllipse(inX - 0.85f, inY - 0.85f, 1.7f, 1.7f);
+
+        // Output cloud (orange, luminous points)
+        g.setColour(afterCol.withAlpha(0.05f + 0.14f * pt.age));
+        g.fillEllipse(outX - 2.8f, outY - 2.8f, 5.6f, 5.6f);
+        g.setColour(afterCol.withAlpha(0.32f + 0.58f * pt.age));
+        g.fillEllipse(outX - 1.05f, outY - 1.05f, 2.1f, 2.1f);
+    }
+
+    // Draw dashed neutral trace on BEFORE and solid orange trace on AFTER
+    if (!beforePath.isEmpty()) {
+        const float dashLengths[2] = { 3.5f, 3.0f };
+        juce::Path dashedBefore;
+        juce::PathStrokeType(0.85f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded)
+            .createDashedStroke(dashedBefore, beforePath, dashLengths, 2);
+        g.setColour(beforeCol.withAlpha(0.45f));
+        g.fillPath(dashedBefore);
+    }
+    if (!afterPath.isEmpty()) {
+        g.setColour(afterCol.withAlpha(0.48f));
+        g.strokePath(afterPath, juce::PathStrokeType(1.10f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
 
     if (!hasSignal) {
         if (getActiveInputPointCount() == 0) {
-            g.setFont(juce::Font(9.5f, juce::Font::plain));
-            g.setColour(secondaryText().withAlpha(0.45f));
-            g.drawText("NO INPUT", centerL.x - 50.0f, centerL.y + radius * 0.55f, 100.0f, 14.0f, juce::Justification::centred);
+            g.setFont(Dimension5LookAndFeel::makeTechnicalFont(9.2f, true));
+            g.setColour(textMuted().withAlpha(0.70f));
+            g.drawText("NO INPUT", centerL.x - 50.0f, centerL.y + radius * 0.52f, 100.0f, 14.0f, juce::Justification::centred);
         }
         if (getActiveOutputPointCount() == 0) {
-            g.setFont(juce::Font(9.5f, juce::Font::plain));
-            g.setColour(secondaryText().withAlpha(0.45f));
-            g.drawText("NO OUTPUT", centerR.x - 50.0f, centerR.y + radius * 0.55f, 100.0f, 14.0f, juce::Justification::centred);
+            g.setFont(Dimension5LookAndFeel::makeTechnicalFont(9.2f, true));
+            g.setColour(textMuted().withAlpha(0.70f));
+            g.drawText("NO OUTPUT", centerR.x - 50.0f, centerR.y + radius * 0.52f, 100.0f, 14.0f, juce::Justification::centred);
         }
     }
 
     // Central transfer readout: measured Side/Mid delta in dB.
     {
         const auto badgeCenter = centerBadgeArea.getCentre();
-        const float badgeW = juce::jmax(70.0f, centerBadgeArea.getWidth());
+        const float badgeW = juce::jmax(72.0f, centerBadgeArea.getWidth());
 
-        g.setFont(juce::Font(8.5f, juce::Font::bold));
-        g.setColour(secondaryText().withAlpha(0.75f));
-        g.drawText("STEREO DELTA", badgeCenter.x - badgeW * 0.5f, badgeCenter.y - 34.0f,
+        const juce::Rectangle<float> centerCard(badgeCenter.x - badgeW * 0.48f, badgeCenter.y - 38.0f,
+                                                badgeW * 0.96f, 74.0f);
+        g.setColour(panelRecessed().withAlpha(0.90f));
+        g.fillRoundedRectangle(centerCard, 4.0f);
+        g.setColour(panelBorder());
+        g.drawRoundedRectangle(centerCard, 4.0f, 1.0f);
+
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(8.2f, true));
+        g.setColour(textMuted());
+        g.drawText("STEREO DELTA", badgeCenter.x - badgeW * 0.5f, badgeCenter.y - 33.0f,
                    badgeW, 12.0f, juce::Justification::centred);
 
         const auto& f = lastTelemetry.frame;
         juce::String valueStr = "--";
         juce::String statusStr = "N/A";
-        juce::Colour valueColour = secondaryText();
+        juce::Colour valueColour = textMuted();
 
         const bool deltaValid = f.hasSignal && f.isStereoDeltaValid;
         if (bypassActive) {
             statusStr = "BYPASS";
-            valueColour = warningAccent();
+            valueColour = primaryAccent();
             valueStr = deltaValid ? juce::String::formatted("%+.1f dB", (double)f.stereoDeltaDb) : juce::String("--");
         } else if (deltaValid) {
             valueStr = juce::String::formatted("%+.1f dB", (double)f.stereoDeltaDb);
             if (f.stereoDeltaDb > 0.4f) {
                 statusStr = "EXPANDED";
-                valueColour = spatialAccent();
+                valueColour = primaryAccent();
             } else if (f.stereoDeltaDb < -0.4f) {
                 statusStr = "NARROWED";
-                valueColour = analogAccent();
+                valueColour = textSecondary();
             } else {
                 statusStr = "UNITY";
-                valueColour = primaryText();
+                valueColour = textOnPanel();
             }
         } else if (f.hasSignal) {
             constexpr float kFloor = 1.0e-5f;
@@ -584,24 +674,24 @@ void StereoFieldComponent::drawDeltaMode(juce::Graphics& g, juce::Rectangle<floa
             } else {
                 statusStr = "LIMITED";
             }
-            valueColour = secondaryText();
+            valueColour = textSecondary();
         }
 
-        g.setFont(juce::Font(14.5f, juce::Font::bold));
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(14.0f, true));
         g.setColour(valueColour);
-        g.drawText(valueStr, badgeCenter.x - badgeW * 0.5f, badgeCenter.y - 20.0f,
+        g.drawText(valueStr, badgeCenter.x - badgeW * 0.5f, badgeCenter.y - 19.0f,
                    badgeW, 20.0f, juce::Justification::centred);
 
-        g.setFont(juce::Font(8.5f, juce::Font::bold));
-        g.setColour(valueColour.withAlpha(0.85f));
-        g.drawText(statusStr, badgeCenter.x - badgeW * 0.5f, badgeCenter.y + 1.0f,
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(8.5f, true));
+        g.setColour(valueColour.withAlpha(0.90f));
+        g.drawText(statusStr, badgeCenter.x - badgeW * 0.5f, badgeCenter.y + 2.0f,
                    badgeW, 12.0f, juce::Justification::centred);
 
         if (std::abs(deltaScaleFactor - 1.0f) > 0.06f) {
-            g.setFont(juce::Font(7.5f, juce::Font::plain));
-            g.setColour(secondaryText().withAlpha(0.55f));
-            g.drawText(juce::String::formatted("COMMON SCALE x%.1f", (double)deltaScaleFactor),
-                       badgeCenter.x - badgeW * 0.5f, badgeCenter.y + 15.0f,
+            g.setFont(Dimension5LookAndFeel::makeTechnicalFont(7.5f, false));
+            g.setColour(textMuted());
+            g.drawText(juce::String::formatted("SCALE x%.1f", (double)deltaScaleFactor),
+                       badgeCenter.x - badgeW * 0.5f, badgeCenter.y + 18.0f,
                        badgeW, 10.0f, juce::Justification::centred);
         }
     }
@@ -617,12 +707,16 @@ void StereoFieldComponent::drawDeltaMode(juce::Graphics& g, juce::Rectangle<floa
 void StereoFieldComponent::drawReticle(juce::Graphics& g, juce::Point<float> center, float radius, bool showDiagonals) {
     using namespace Dimension5UI;
 
-    g.setColour(bgColour());
+    g.setColour(displayBackground());
     g.fillEllipse(center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f);
-    g.setColour(dividerColour().withAlpha(0.85f));
-    g.drawEllipse(center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f, 1.0f);
+    g.setColour(displayAxis());
+    g.drawEllipse(center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f, 1.1f);
 
-    g.setColour(dividerColour().withAlpha(0.55f));
+    // Subtle inner reference ring
+    g.setColour(displayGrid().brighter(0.06f));
+    g.drawEllipse(center.x - radius * 0.55f, center.y - radius * 0.55f, radius * 1.10f, radius * 1.10f, 0.8f);
+
+    g.setColour(displayAxis());
     g.drawLine(center.x, center.y - radius, center.x, center.y + radius, 1.0f);
     g.drawLine(center.x - radius, center.y, center.x + radius, center.y, 1.0f);
 
@@ -637,21 +731,21 @@ void StereoFieldComponent::drawReticle(juce::Graphics& g, juce::Point<float> cen
         float dashLengths[2] = { 3.0f, 4.0f };
         juce::Path dashedDiag;
         juce::PathStrokeType(0.75f).createDashedStroke(dashedDiag, diagPath, dashLengths, 2);
-        g.setColour(dividerColour().withAlpha(0.28f));
+        g.setColour(displayAxis().withAlpha(0.75f));
         g.fillPath(dashedDiag);
 
-        g.setFont(juce::Font(9.0f, juce::Font::bold));
-        g.setColour(secondaryText().withAlpha(0.70f));
-        g.drawText("M", center.x - 10.0f, center.y - radius - 2.0f, 20.0f, 12.0f, juce::Justification::centred);
-        g.drawText("+S", center.x + radius - 18.0f, center.y - 12.0f, 22.0f, 12.0f, juce::Justification::centred);
-        g.drawText("-S", center.x - radius - 4.0f, center.y - 12.0f, 22.0f, 12.0f, juce::Justification::centred);
-        g.drawText("L", center.x + diag - 6.0f, center.y - diag - 12.0f, 16.0f, 12.0f, juce::Justification::centred);
-        g.drawText("R", center.x - diag - 10.0f, center.y - diag - 12.0f, 16.0f, 12.0f, juce::Justification::centred);
+        g.setFont(Dimension5LookAndFeel::makeTechnicalFont(8.8f, true));
+        g.setColour(textSecondary().withAlpha(0.85f));
+        g.drawText("M", center.x - 10.0f, center.y - radius + 2.0f, 20.0f, 12.0f, juce::Justification::centred);
+        g.drawText("+S", center.x + radius - 20.0f, center.y - 12.0f, 20.0f, 12.0f, juce::Justification::centred);
+        g.drawText("-S", center.x - radius + 2.0f, center.y - 12.0f, 20.0f, 12.0f, juce::Justification::centred);
+        g.drawText("L", center.x + diag - 4.0f, center.y - diag - 12.0f, 16.0f, 12.0f, juce::Justification::centred);
+        g.drawText("R", center.x - diag - 12.0f, center.y - diag - 12.0f, 16.0f, 12.0f, juce::Justification::centred);
     }
 }
 
 // ==============================================================================
-// Configuration aperture: a smooth superellipse, explicitly a config guide
+// Configuration aperture: a smooth superellipse, explicitly a neutral config guide
 // ==============================================================================
 void StereoFieldComponent::drawAuxiliaryAperture(juce::Graphics& g, juce::Point<float> center, float radius) {
     using namespace Dimension5UI;
@@ -690,13 +784,14 @@ void StereoFieldComponent::drawAuxiliaryAperture(juce::Graphics& g, juce::Point<
     }
     aperture.closeSubPath();
 
-    g.setColour(spatialAccent().withAlpha(0.035f * mixNorm));
+    // Neutral technical guide so orange remains exclusively for measured telemetry
+    g.setColour(textSecondary().withAlpha(0.035f * mixNorm));
     g.fillPath(aperture);
 
     float dashLengths[2] = { 5.0f, 4.0f };
     juce::Path dashedAperture;
     juce::PathStrokeType(1.0f).createDashedStroke(dashedAperture, aperture, dashLengths, 2);
-    g.setColour(spatialAccent().withAlpha(0.26f * mixNorm));
+    g.setColour(textSecondary().withAlpha(0.32f * mixNorm));
     g.fillPath(dashedAperture);
 }
 
@@ -710,20 +805,24 @@ void StereoFieldComponent::drawAutoScaleBadge(juce::Graphics& g, juce::Rectangle
     const juce::String text = juce::String::formatted("AUTO x%.2f", (double)scale);
     const auto badge = juce::Rectangle<float>(area.getRight() - 96.0f, area.getBottom() - 15.0f, 92.0f, 12.0f);
 
-    g.setFont(juce::Font(8.0f, juce::Font::plain));
-    g.setColour(secondaryText().withAlpha(0.55f));
+    g.setFont(Dimension5LookAndFeel::makeTechnicalFont(8.0f, true));
+    g.setColour(textMuted().withAlpha(0.80f));
     g.drawText(text, badge, juce::Justification::centredRight);
 }
 
 void StereoFieldComponent::drawBypassBadge(juce::Graphics& g, juce::Rectangle<float> area) {
     using namespace Dimension5UI;
 
-    const auto badge = juce::Rectangle<float>(area.getRight() - 74.0f, area.getY() + 2.0f, 70.0f, 16.0f);
-    g.setColour(warningAccent().withAlpha(0.10f));
-    g.fillRoundedRectangle(badge, 4.0f);
-    g.setColour(warningAccent().withAlpha(0.65f));
-    g.drawRoundedRectangle(badge, 4.0f, 1.0f);
-    g.setFont(juce::Font(8.5f, juce::Font::bold));
-    g.setColour(warningAccent().withAlpha(0.9f));
-    g.drawText("BYPASS", badge, juce::Justification::centred);
+    const auto badge = juce::Rectangle<float>(area.getRight() - 78.0f, area.getY() + 3.0f, 74.0f, 17.0f);
+    g.setColour(panelRecessed().withAlpha(0.95f));
+    g.fillRoundedRectangle(badge, 3.5f);
+    g.setColour(primaryAccent());
+    g.drawRoundedRectangle(badge, 3.5f, 1.3f);
+
+    // Left orange index bar inside bypass badge
+    g.fillRoundedRectangle(badge.getX() + 3.0f, badge.getY() + 3.5f, 2.5f, badge.getHeight() - 7.0f, 1.0f);
+
+    g.setFont(Dimension5LookAndFeel::makeTechnicalFont(8.5f, true));
+    g.setColour(primaryAccent());
+    g.drawText("BYPASS", badge.withTrimmedLeft(5.0f), juce::Justification::centred);
 }
